@@ -620,7 +620,6 @@ async fn main() -> Result<()> {
         if !grace.is_zero() {
             tokio::spawn(twalk_companion_gateway::bridge_status::sweep(
                 statuses.clone(),
-                grace,
             ));
         } else {
             info!(

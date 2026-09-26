@@ -68,7 +68,7 @@ impl Fixture {
             grace_seconds,
         )?;
         let base = gateway.base_url().await?;
-        Ok(Self {
+        let fixture = Self {
             gateway,
             base,
             stub,
@@ -76,7 +76,24 @@ impl Fixture {
             bridge_id,
             unverifiable_bridge_id,
             static_dir,
-        })
+        };
+        // The startup reconciliation has run before any test pushes anything.
+        //
+        // Without this barrier a push and the reconciliation race, and the race
+        // has a visible outcome: the reconciliation asks the stub `whoami`,
+        // which holds no login and therefore answers `disconnected`, so whether
+        // that is *a change* depends on whether the push landed first. Both
+        // orders are honest and one of them publishes an extra transition,
+        // which is a test that passes on timing.
+        //
+        // The second bridge points at a port nothing listens on, and the
+        // reconciliation walks the bridges in configuration order, so its
+        // warning is the line that says the first bridge's reconciliation is
+        // already behind us.
+        fixture
+            .wait_for_log("could not reconcile a bridge's status at startup")
+            .await?;
+        Ok(fixture)
     }
 
     fn spawn(
@@ -709,6 +726,41 @@ async fn the_events_bridge_id_is_the_contracts_not_the_instances() -> Result<()>
     Ok(())
 }
 
+/// The rows the Gateway recorded for this fixture's bridge, read from the
+/// store's own file (#324).
+///
+/// The bus is not enough here: the ticket is explicit that the grace covers
+/// **what is recorded** as well as what is published, because the store is the
+/// record the Companion's feed and the clerk both read. A blink that left a row
+/// behind and published nothing would satisfy every assertion made on the bus
+/// and still fill the feed.
+fn recorded_states(fixture: &Fixture) -> Result<Vec<String>> {
+    let store = rusqlite::Connection::open_with_flags(
+        harness::gateway_state_dir(&fixture.static_dir).join("consent.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = store.prepare(
+        "SELECT to_state FROM bridge_status_change WHERE bridge_id = ? ORDER BY sequence",
+    )?;
+    let states = statement
+        .query_map([&fixture.bridge_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(states)
+}
+
+/// Brings a fixture's bridge to `connected`, published at once: the state the
+/// owner has been told about, and the one every case below starts from.
+async fn connected_first(fixture: &Fixture) -> Result<()> {
+    fixture.push(state("CONNECTED", 1_774_000_000)).await?;
+    let events = fixture.events_until(1).await?;
+    assert_eq!(events[0]["data"]["to_state"], json!("connected"), "{events:?}");
+    Ok(())
+}
+
+/// Two seconds: long enough that a blink fits inside it on a loaded host, short
+/// enough that these tests do not become the slowest in the suite.
+const GRACE: u64 = 2;
+
 /// #324: a bridge that loses its socket for under a second is not an event.
 ///
 /// Measured on the reference deployment on 2026-09-22/23: `degraded` then
@@ -717,27 +769,11 @@ async fn the_events_bridge_id_is_the_contracts_not_the_instances() -> Result<()>
 /// feed that exists to say *something needs you*, which is how a reader learns
 /// to skim it. whatsmeow reconnects by itself; nothing was lost and nothing
 /// needed doing.
-///
-/// Three things are asserted, which are the ticket's three: a blink produces
-/// nothing at all, a degradation that outlives the grace produces exactly one
-/// transition dated when the bridge **first** said so, and a flap inside one
-/// window produces at most one — and only because it ended outside
-/// `connected`.
 #[tokio::test]
 async fn a_bridge_that_blinks_inside_the_grace_produces_nothing_at_all() -> Result<()> {
-    // Two seconds: long enough that a blink fits inside it on a loaded host,
-    // short enough that this test does not become the slowest in the suite.
-    let grace = 2;
-    let fixture = Fixture::start_with_grace("bridge-status-grace", grace).await?;
+    let fixture = Fixture::start_with_grace("bridge-status-blink", GRACE).await?;
+    connected_first(&fixture).await?;
 
-    // Connected first, which is published at once: good news is not noise, and
-    // the state the store holds is what the owner was told.
-    fixture.push(state("CONNECTED", 1_774_000_000)).await?;
-    let events = fixture.events_until(1).await?;
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(events[0]["data"]["to_state"], json!("connected"));
-
-    // --- the blink: degraded, then connected, inside the window.
     fixture
         .push(state("TRANSIENT_DISCONNECT", 1_774_000_100))
         .await?;
@@ -746,7 +782,8 @@ async fn a_bridge_that_blinks_inside_the_grace_produces_nothing_at_all() -> Resu
         .wait_for_log("a bridge blinked and is back inside the grace")
         .await?;
     // Past the grace, so a transition that was merely late would have arrived.
-    tokio::time::sleep(std::time::Duration::from_secs(grace + 2)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(GRACE + 2)).await;
+
     let events = fixture.events().await?;
     assert_eq!(
         events.len(),
@@ -757,12 +794,26 @@ async fn a_bridge_that_blinks_inside_the_grace_produces_nothing_at_all() -> Resu
             .map(|event| event["data"]["to_state"].clone())
             .collect::<Vec<_>>()
     );
+    // And nothing in the store either, which is the half the feed reads.
+    assert_eq!(
+        recorded_states(&fixture)?,
+        vec!["connected".to_owned()],
+        "a blink left a row behind"
+    );
 
-    // --- the degradation that lasts: one transition, dated when the bridge
-    // first reported it and not when the Gateway stopped waiting.
-    let first_said = 1_774_000_200;
+    fixture.stop().await;
+    Ok(())
+}
+
+/// And one that stays down is published — with the instant **it** reported,
+/// not the instant the Gateway stopped waiting.
+#[tokio::test]
+async fn a_degradation_that_outlives_the_grace_is_published_with_its_own_instant() -> Result<()> {
+    let fixture = Fixture::start_with_grace("bridge-status-lasting", GRACE).await?;
+    connected_first(&fixture).await?;
+
     fixture
-        .push(state("TRANSIENT_DISCONNECT", first_said))
+        .push(state("TRANSIENT_DISCONNECT", 1_774_000_200))
         .await?;
     let events = fixture.events_until(2).await?;
     assert_eq!(events.len(), 2, "{events:?}");
@@ -783,13 +834,27 @@ async fn a_bridge_that_blinks_inside_the_grace_produces_nothing_at_all() -> Resu
             > degraded["data"]["occurred_at"].as_str().unwrap_or_default(),
         "the event was produced after the bridge reported it: {degraded}"
     );
+    assert_eq!(
+        recorded_states(&fixture)?,
+        vec!["connected".to_owned(), "degraded".to_owned()]
+    );
 
-    // --- the flap: connected, then degraded twice with a worse state between,
-    // all inside one window. At most one transition, and only because it ends
-    // outside connected.
+    // A recovery after that is its own transition: the owner was told about the
+    // degradation, so they are told it is over.
     fixture.push(state("CONNECTED", 1_774_000_300)).await?;
     let events = fixture.events_until(3).await?;
-    assert_eq!(events[2]["data"]["to_state"], json!("connected"));
+    assert_eq!(events[2]["data"]["to_state"], json!("connected"), "{events:?}");
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A bridge flapping inside one window is at most one transition, and only if
+/// it ends outside `connected`.
+#[tokio::test]
+async fn a_flap_inside_one_window_is_one_transition_to_the_state_it_ended_in() -> Result<()> {
+    let fixture = Fixture::start_with_grace("bridge-status-flap", GRACE).await?;
+    connected_first(&fixture).await?;
 
     fixture
         .push(state("TRANSIENT_DISCONNECT", 1_774_000_400))
@@ -799,11 +864,12 @@ async fn a_bridge_that_blinks_inside_the_grace_produces_nothing_at_all() -> Resu
         .push(state("TRANSIENT_DISCONNECT", 1_774_000_402))
         .await?;
     fixture.push(state("BAD_CREDENTIALS", 1_774_000_403)).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(grace + 2)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(GRACE + 2)).await;
+
     let events = fixture.events().await?;
     assert_eq!(
         events.len(),
-        4,
+        2,
         "a flap inside one window produced more than one transition: {:?}",
         events
             .iter()
@@ -812,12 +878,16 @@ async fn a_bridge_that_blinks_inside_the_grace_produces_nothing_at_all() -> Resu
     );
     // The state it ended in, dated when the trouble started — the second
     // degradation, since the `connected` between them cancelled the first.
-    assert_eq!(events[3]["data"]["to_state"], json!("session_expired"));
+    assert_eq!(events[1]["data"]["to_state"], json!("session_expired"));
     assert_eq!(
-        events[3]["data"]["occurred_at"],
+        events[1]["data"]["occurred_at"],
         json!("2026-03-20T09:53:22Z"),
         "{:?}",
-        events[3]
+        events[1]
+    );
+    assert_eq!(
+        recorded_states(&fixture)?,
+        vec!["connected".to_owned(), "session_expired".to_owned()]
     );
 
     fixture.stop().await;
