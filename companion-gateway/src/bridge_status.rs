@@ -50,8 +50,9 @@
 //! connected) and it is what keeps a first push of `CONNECTING` from having
 //! to invent a state it came from.
 
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -523,6 +524,38 @@ impl StatusRefusal {
     }
 }
 
+/// How long a state worse than `connected` is held before anybody is told
+/// (#324), unless the deployment says otherwise.
+///
+/// Thirty seconds is the shape of what was measured: on the reference
+/// deployment, `mautrix-whatsapp` loses its websocket about five times in
+/// twelve hours (`Error reading from websocket: … EOF`), whatsmeow reconnects
+/// inside the second, and nothing is lost. Each of those blips wrote two lines
+/// into the owner's activity channel and two rows into this Gateway's store —
+/// pairs that cancel themselves, in the one feed that exists to say *something
+/// needs you*, which is how a reader learns to skim it.
+///
+/// It is a floor on how late an outage is announced, and that is the price: a
+/// bridge that really goes down is said thirty seconds after it did. `0`
+/// restores the behaviour this shipped with, which is to publish every blink.
+pub const DEFAULT_GRACE_SECONDS: u64 = 30;
+
+/// A transition this Gateway has seen and not yet told anybody about (#324).
+#[derive(Debug, Clone)]
+struct Held {
+    /// The transition as it will be recorded if the bridge does not come back
+    /// — `occurred_at` the instant the bridge **first** reported it, so the
+    /// operator's clock does not shift because we waited.
+    transition: Transition,
+    /// When it stops being held. Kept rather than recomputed, so a second
+    /// worse state inside the window does not extend it: one blip, one window,
+    /// at most one transition.
+    deadline: SystemTime,
+    /// Which channel first reported it, so the counter says where it came from
+    /// rather than saying "grace" for everything.
+    channel: &'static str,
+}
+
 /// The status half of the bridge facade: every bridge's identity and
 /// credential, and the store-backed comparison that turns a reported state
 /// into an event — or into nothing.
@@ -535,6 +568,19 @@ pub struct Statuses {
     outbox: Arc<Outbox>,
     metrics: Arc<Metrics>,
     now: fn() -> SystemTime,
+    /// How long a state worse than `connected` waits before it is recorded and
+    /// published (#324). `Duration::ZERO` publishes at once, as this shipped.
+    grace: Duration,
+    /// What is waiting, by `bridge_id`. One slot per bridge: a bridge flapping
+    /// inside one window is one pending transition, replaced as the state
+    /// moves and cancelled the moment it is `connected` again.
+    ///
+    /// In memory and not in the store, deliberately: the store is the record
+    /// of what the owner was **told**, and a blip nobody was told about must
+    /// leave nothing behind. A restart drops what was held — and the startup
+    /// reconciliation asks every bridge what state it is in, which is the
+    /// same answer arrived at from the other side.
+    held: Mutex<BTreeMap<String, Held>>,
 }
 
 impl Statuses {
@@ -549,6 +595,7 @@ impl Statuses {
         outbox: Arc<Outbox>,
         metrics: Arc<Metrics>,
         now: fn() -> SystemTime,
+        grace: Duration,
     ) -> Result<Self> {
         let mut bridges = Vec::with_capacity(configured.len());
         for config in configured {
@@ -598,6 +645,8 @@ impl Statuses {
             outbox,
             metrics,
             now,
+            grace,
+            held: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -609,6 +658,148 @@ impl Statuses {
         self.bridges
             .iter()
             .find(|bridge| bridge.bridge_id == bridge_id)
+    }
+
+    /// Holds a transition instead of publishing it (#324), or updates the one
+    /// already held.
+    ///
+    /// The **first** instant and the **first** deadline win; the state and the
+    /// reason are the latest. So a bridge going degraded, then unavailable,
+    /// inside one window is one transition to the state it ended in, dated when
+    /// the trouble started — and a flap cannot push its own deadline forward
+    /// for ever.
+    fn hold(&self, transition: Transition, channel: &'static str) {
+        let deadline = (self.now)() + self.grace;
+        let mut held = self.held.lock().expect("the held mutex is never poisoned");
+        match held.get_mut(&transition.bridge_id) {
+            Some(waiting) => {
+                debug!(
+                    bridge = %transition.bridge_id,
+                    to_state = transition.to_state.as_str(),
+                    was = waiting.transition.to_state.as_str(),
+                    "a bridge moved again while it was being held; nothing published yet"
+                );
+                waiting.transition.to_state = transition.to_state;
+                waiting.transition.reason = transition.reason;
+                waiting.transition.last_message_at = transition.last_message_at;
+            }
+            None => {
+                debug!(
+                    bridge = %transition.bridge_id,
+                    to_state = transition.to_state.as_str(),
+                    grace_seconds = self.grace.as_secs(),
+                    channel,
+                    "a bridge reported a state worse than connected; held in case it comes back"
+                );
+                held.insert(
+                    transition.bridge_id.clone(),
+                    Held {
+                        transition,
+                        deadline,
+                        channel,
+                    },
+                );
+            }
+        }
+        self.metrics.record_bridge_status(channel, "held");
+    }
+
+    /// Cancels what was held for a bridge, if anything — the blip that ended
+    /// (#324). Answers whether there was one, because the caller's log line
+    /// differs: "it blinked" is not "it reported what it already was".
+    fn settled(
+        &self,
+        bridge: &StatusBridge,
+        state: ContractState,
+        channel: &'static str,
+    ) -> bool {
+        let waiting = self
+            .held
+            .lock()
+            .expect("the held mutex is never poisoned")
+            .remove(&bridge.bridge_id);
+        let Some(waiting) = waiting else {
+            return false;
+        };
+        info!(
+            bridge = %bridge.bridge_id,
+            was = waiting.transition.to_state.as_str(),
+            state = state.as_str(),
+            channel,
+            "a bridge blinked and is back inside the grace; nothing recorded and nothing published"
+        );
+        self.metrics.record_bridge_status(channel, "settled");
+        true
+    }
+
+    /// Records and publishes everything whose grace has run out (#324).
+    ///
+    /// Called by [`sweep`] rather than by a timer per transition: one loop is
+    /// one thing to reason about, and a bridge that goes silent after
+    /// degrading is exactly the case a per-event timer would have to exist for
+    /// anyway.
+    pub fn flush_held(&self) -> Vec<Transition> {
+        let now = (self.now)();
+        let due: Vec<Held> = {
+            let mut held = self.held.lock().expect("the held mutex is never poisoned");
+            let due: Vec<String> = held
+                .iter()
+                .filter(|(_, waiting)| waiting.deadline <= now)
+                .map(|(bridge_id, _)| bridge_id.clone())
+                .collect();
+            due.iter().filter_map(|bridge_id| held.remove(bridge_id)).collect()
+        };
+        let mut published = Vec::new();
+        for waiting in due {
+            let Held {
+                transition,
+                channel,
+                ..
+            } = waiting;
+            match self.outbox.record_bridge_status(&transition) {
+                Ok(_) => {
+                    info!(
+                        bridge = %transition.bridge_id,
+                        network = transition.network.as_str(),
+                        from_state = transition.from_state.as_str(),
+                        to_state = transition.to_state.as_str(),
+                        occurred_at = %transition.occurred_at,
+                        grace_seconds = self.grace.as_secs(),
+                        channel,
+                        "a bridge changed state and stayed changed"
+                    );
+                    self.metrics
+                        .record_bridge_status(channel, transition.to_state.as_str());
+                    published.push(transition);
+                }
+                Err(error) => {
+                    // Kept, not dropped: the next sweep tries again, because a
+                    // store that is briefly unwritable must not turn an outage
+                    // into a silence.
+                    warn!(
+                        bridge = %transition.bridge_id,
+                        %error,
+                        "failed to record a bridge transition whose grace ran out; keeping it"
+                    );
+                    self.held
+                        .lock()
+                        .expect("the held mutex is never poisoned")
+                        .entry(transition.bridge_id.clone())
+                        .or_insert(Held {
+                            transition,
+                            deadline: now,
+                            channel,
+                        });
+                }
+            }
+        }
+        published
+    }
+
+    /// How many transitions are waiting for their grace to run out — for the
+    /// tests, and for a log line that says the Gateway is holding something.
+    pub fn held_count(&self) -> usize {
+        self.held.lock().expect("the held mutex is never poisoned").len()
     }
 
     /// Verifies a push and records what it reports.
@@ -661,6 +852,13 @@ impl Statuses {
             .context("failed to read the bridge's last known state")?
             .unwrap_or(ContractState::INITIAL);
         if from_state == observed.state {
+            // The state the owner was last told about, reported again — which
+            // is also what a bridge that blinked and came back says (#324): if
+            // something was being held for it, this is the cancellation, and
+            // nothing it did is worth a row.
+            if self.settled(bridge, observed.state, channel) {
+                return Ok(None);
+            }
             debug!(
                 bridge = %bridge.bridge_id,
                 state = observed.state.as_str(),
@@ -680,6 +878,21 @@ impl Statuses {
             reason: observed.reason.clone(),
             last_message_at: observed.last_message_at.clone(),
         };
+        // Anything but `connected` waits, if this deployment gave it a grace
+        // (#324): a bridge that is back inside the window said nothing the
+        // owner can act on, and the feed that fills with pairs which cancel
+        // themselves is the one they stop reading.
+        //
+        // `connected` is never held. Good news is not noise, and the state the
+        // store holds is what the owner was told — so a recovery from a
+        // degradation they *were* told about is published at once.
+        if observed.state != ContractState::Connected && !self.grace.is_zero() {
+            self.hold(transition, channel);
+            return Ok(None);
+        }
+        // A recovery cancels whatever was pending first, so the two cannot
+        // both reach the store.
+        self.settled(bridge, observed.state, channel);
         let committed = self.outbox.record_bridge_status(&transition)?;
         if committed.replayed {
             debug!(
@@ -740,6 +953,38 @@ pub fn is_contract_bridge_id(value: &str) -> bool {
 /// with no state yet — what a bridge that has just restarted looks like,
 /// because its state is in memory — is `starting`: the bridge holds the
 /// login and is bringing it up.
+/// Publishes what the grace was waiting for (#324), for as long as the Gateway
+/// runs.
+///
+/// A loop rather than a timer per held transition: a bridge that degrades and
+/// then goes silent — which is what a bridge that really went down does — sends
+/// nothing more, so something has to come back on its own anyway. One loop is
+/// also one thing to read in a stack trace.
+///
+/// It ticks at a quarter of the grace, and at least once a second: the delay
+/// this adds to an announcement is a quarter of what the operator already
+/// accepted when they set the grace, and a deployment with a grace of zero
+/// never starts it at all.
+pub async fn sweep(statuses: Arc<Statuses>, grace: Duration) {
+    let every = (grace / 4).max(Duration::from_secs(1));
+    info!(
+        grace_seconds = grace.as_secs(),
+        tick_seconds = every.as_secs(),
+        "a bridge state worse than connected is held before it is published: a bridge that is \
+         back inside the grace produces no row, no event and no line in the activity feed"
+    );
+    loop {
+        tokio::time::sleep(every).await;
+        for transition in statuses.flush_held() {
+            debug!(
+                bridge = %transition.bridge_id,
+                to_state = transition.to_state.as_str(),
+                "a held bridge transition outlived its grace and was published"
+            );
+        }
+    }
+}
+
 pub async fn reconcile(statuses: Arc<Statuses>, bridges: Arc<Bridges>, owner: String) {
     for bridge in statuses.bridges() {
         let observed = match bridges.whoami(&bridge.instance_id, &owner).await {

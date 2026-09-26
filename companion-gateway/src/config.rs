@@ -103,6 +103,14 @@ pub struct Config {
     /// on a deployment whose bus carries far more traffic than one person's
     /// conversations; the cost is a longer read on the approval path alone.
     pub approval_lookup_window: u64,
+    /// How long a bridge state worse than `connected` is held before it is
+    /// recorded and published (GATEWAY_BRIDGE_STATUS_GRACE_SECONDS, default
+    /// [`crate::bridge_status::DEFAULT_GRACE_SECONDS`], #324).
+    ///
+    /// `0` publishes every reported state at once, which is what this shipped
+    /// with — and what filled the owner's activity feed with pairs that cancel
+    /// themselves, five times in twelve hours.
+    pub bridge_status_grace_seconds: u64,
     /// How often the portal register is re-read in the background, in
     /// seconds (GATEWAY_PORTAL_REFRESH_SECONDS, default
     /// [`crate::portals::DEFAULT_REFRESH_SECONDS`], ticket #105). `0` turns
@@ -713,6 +721,10 @@ impl Config {
                 );
                 window
             },
+            bridge_status_grace_seconds: optional(
+                "GATEWAY_BRIDGE_STATUS_GRACE_SECONDS",
+                &crate::bridge_status::DEFAULT_GRACE_SECONDS.to_string(),
+            )?,
             portal_refresh_seconds: optional(
                 "GATEWAY_PORTAL_REFRESH_SECONDS",
                 &crate::portals::DEFAULT_REFRESH_SECONDS.to_string(),
