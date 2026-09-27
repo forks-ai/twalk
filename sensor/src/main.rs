@@ -1880,7 +1880,7 @@ async fn receive_handovers(client: &Client, events: &[ProcessedToDeviceEvent], c
                 // Sensor's trust requirement to `CrossSigned` turns this channel
                 // into exactly these events.
                 if event_field(unreadable, "sender") == ctx.owner
-                    && offered_device(client, ctx).await.is_some()
+                    && !offers_standing(client, ctx).await.is_empty()
                 {
                     ctx.metrics
                         .record_handover_refused(owner_device::NotAHandover::NotEncrypted);
@@ -1899,12 +1899,12 @@ async fn receive_handovers(client: &Client, events: &[ProcessedToDeviceEvent], c
         if event_type != owner_device::HANDOVER_EVENT_TYPE {
             continue;
         }
-        // The offer is read only for a candidate: a plaintext event claiming this
+        // The offers are read only for a candidate: a plaintext event claiming this
         // type is refused on its encryption, and anybody can send one.
-        let offered = if decrypted && sender == ctx.owner {
-            offered_device(client, ctx).await
+        let offers = if decrypted && sender == ctx.owner {
+            offers_standing(client, ctx).await
         } else {
-            None
+            Vec::new()
         };
         let content = serde_json::from_str::<serde_json::Value>(raw.json().get())
             .map(|event| event.get("content").cloned().unwrap_or_default())
@@ -1915,18 +1915,35 @@ async fn receive_handovers(client: &Client, events: &[ProcessedToDeviceEvent], c
             sender: &sender,
             sender_device: sender_device.as_deref(),
         };
-        match owner_device::handover_in(&delivered, &content, offered.as_deref(), &ctx.owner) {
-            Ok(handover) => {
-                let offered_by = sender_device.unwrap_or_default();
-                take_the_handover(client, handover, &offered_by, ctx).await;
+        // Asked of the policy once per offer standing, and once with none when
+        // there are none: whether a delivery is a handover is
+        // `owner_device::handover_in`'s to say, and what is here is only the facts
+        // it needs. The room that offered this device is the room the
+        // acknowledgement belongs in.
+        let mut taken = None;
+        let mut refusal = owner_device::handover_in(&delivered, &content, None, &ctx.owner);
+        for (room, offered) in &offers {
+            match owner_device::handover_in(&delivered, &content, Some(offered), &ctx.owner) {
+                Ok(handover) => {
+                    taken = Some((room.clone(), handover));
+                    break;
+                }
+                Err(why) => refusal = Err(why),
             }
-            Err(why) => {
+        }
+        match taken {
+            Some((room, handover)) => {
+                let offered_by = sender_device.unwrap_or_default();
+                take_the_handover(&room, handover, &offered_by, ctx).await;
+            }
+            None => {
+                let why = refusal.expect_err("nothing was taken, so the policy refused");
                 ctx.metrics.record_handover_refused(why);
                 warn!(
                     why = why.as_str(),
                     sender = %sender,
                     sender_device = sender_device.as_deref().unwrap_or("none"),
-                    offered = offered.as_deref().unwrap_or("none"),
+                    offers = offers.len(),
                     "refused a to-device event claiming to hand over a device credential; nothing \
                      was taken from it and the Sensor goes on as it was. Anybody can send one, so \
                      twalk_sensor_handovers_refused_total is where this belongs as well as here"
@@ -1946,63 +1963,80 @@ fn event_field(raw: &matrix_sdk::ruma::serde::Raw<AnyToDeviceEvent>, name: &str)
         .unwrap_or_default()
 }
 
-/// The one encrypted room the owner's account and this Sensor share (#226), as
-/// its own `m.room.create` names it.
+/// The rooms the owner's account and this Sensor share that were created to hand a
+/// credential over (#226), as their own `m.room.create` names them.
 ///
 /// Found rather than configured, and found by the two facts nobody can forge: the
 /// room type `m.room.create` carries for its whole life — it can be neither
 /// replaced nor redacted — and the owner being its creator. A room somebody else
-/// built with the same type is not this one.
-fn handover_room(client: &Client, owner: &str) -> Option<Room> {
-    client.joined_rooms().into_iter().find(|room| {
-        room.room_type()
-            .is_some_and(|room_type| room_type.as_str() == owner_device::HANDOVER_ROOM_TYPE)
-            && room
-                .creators()
-                .is_some_and(|creators| creators.iter().any(|creator| creator.as_str() == owner))
-    })
+/// built with the same type is not one of these.
+///
+/// **Rooms**, plural, and that is not pedantry. The Companion keeps one per owner
+/// and finds it by its canonical alias, but the Sensor cannot rely on that being
+/// the only one it is joined to: its account outlives any store, and a homeserver
+/// several deployments have been onboarded against — every test stack, and any
+/// owner who left a room and was onboarded again — holds more than one. A Sensor
+/// that picked the first would read a stale offer and refuse the handover it was
+/// waiting for. (Measured, and it is how this function came to be written this
+/// way: the refusal said `sender_device` and `offered` were different devices, and
+/// the offer it had read belonged to a room from a previous run.)
+fn handover_rooms(client: &Client, owner: &str) -> Vec<Room> {
+    client
+        .joined_rooms()
+        .into_iter()
+        .filter(|room| {
+            room.room_type()
+                .is_some_and(|room_type| room_type.as_str() == owner_device::HANDOVER_ROOM_TYPE)
+                && room.creators().is_some_and(|creators| {
+                    creators.iter().any(|creator| creator.as_str() == owner)
+                })
+        })
+        .collect()
 }
 
-/// The device the owner offered the credential from, read from the homeserver and
-/// not from the store.
+/// Every device the owner has offered a handover from, and the room they offered
+/// it in — read from the homeserver and not from the store.
 ///
 /// The store is the wrong source for the same reason `the_room_is_a_portal` gives:
 /// a room the Sensor is in whose state has not arrived in a sync yet answers "no
 /// offer", and believing it would refuse the very handover this deployment is
-/// waiting for. One `GET`, and an unreadable answer is no offer — which refuses,
-/// because a handover nobody offered is one nobody asked for.
-async fn offered_device(client: &Client, ctx: &Handovers) -> Option<String> {
-    let room = handover_room(client, &ctx.owner)?;
-    let answer = client
-        .send(get_state_event_for_key::v3::Request::new(
-            room.room_id().to_owned(),
-            owner_device::HANDOVER_OFFER_TYPE.into(),
-            String::new(),
-        ))
-        .await;
-    match answer {
-        Ok(response) => {
-            let content =
-                serde_json::from_str::<serde_json::Value>(response.event_or_content.get()).ok()?;
-            owner_device::offered_from(Some(&content)).map(str::to_owned)
-        }
-        Err(error) => {
-            // `M_NOT_FOUND` is the ordinary answer in a room where nothing has
-            // been offered, and is not worth a line.
-            if !matches!(
-                error.client_api_error_kind(),
-                Some(matrix_sdk::ruma::api::error::ErrorKind::NotFound)
-            ) {
-                warn!(
-                    room = %room.room_id(),
-                    %error,
-                    "could not read who the owner offered a device handover from; refusing the \
-                     handover, because a credential nobody offered is one nobody asked for"
-                );
+/// waiting for. One `GET` per room, which in a deployment is one; an unreadable
+/// answer is no offer, because a handover nobody offered is one nobody asked for.
+async fn offers_standing(client: &Client, ctx: &Handovers) -> Vec<(Room, String)> {
+    let mut offers = Vec::new();
+    for room in handover_rooms(client, &ctx.owner) {
+        let answer = client
+            .send(get_state_event_for_key::v3::Request::new(
+                room.room_id().to_owned(),
+                owner_device::HANDOVER_OFFER_TYPE.into(),
+                String::new(),
+            ))
+            .await;
+        match answer {
+            Ok(response) => {
+                let content =
+                    serde_json::from_str::<serde_json::Value>(response.event_or_content.get()).ok();
+                if let Some(device) = owner_device::offered_from(content.as_ref()) {
+                    offers.push((room, device.to_owned()));
+                }
             }
-            None
+            Err(error) => {
+                // `M_NOT_FOUND` is the ordinary answer in a room where nothing has
+                // been offered, and is not worth a line.
+                if !matches!(
+                    error.client_api_error_kind(),
+                    Some(matrix_sdk::ruma::api::error::ErrorKind::NotFound)
+                ) {
+                    warn!(
+                        room = %room.room_id(),
+                        %error,
+                        "could not read who the owner offered a device handover from in this room"
+                    );
+                }
+            }
         }
     }
+    offers
 }
 
 /// Holds a handed-over credential: uses it, writes it down, acts through it, and
@@ -2028,7 +2062,7 @@ async fn offered_device(client: &Client, ctx: &Handovers) -> Option<String> {
 /// device of their account like any other, and revoking it is theirs to do from
 /// any Matrix client, which is ADR 0025's own mitigation.
 async fn take_the_handover(
-    client: &Client,
+    room: &Room,
     handover: owner_device::Handover,
     offered_by: &str,
     ctx: &Handovers,
@@ -2088,39 +2122,31 @@ async fn take_the_handover(
         .await;
     ctx.metrics.record_handover_held();
 
-    match handover_room(client, &ctx.owner) {
-        Some(room) => {
-            match room
-                .send_state_event_raw(
-                    owner_device::HANDOVER_HELD_TYPE,
-                    "",
-                    owner_device::held(&handover, offered_by),
-                )
-                .await
-            {
-                Ok(_) => info!(
-                    device_id = %handover.device_id,
-                    offered_by,
-                    replacing = replacing.as_deref().unwrap_or("nothing"),
-                    "holding the device the owner's browser handed over, and said so in the \
-                     handover room: approved replies are posted by it from now on, so a bridge \
-                     relays them (ADR 0025, ADR 0034)"
-                ),
-                Err(error) => warn!(
-                    device_id = %handover.device_id,
-                    %error,
-                    "the credential is held and the acknowledgement could not be written in the \
-                     handover room: onboarding will report that the handover failed although this \
-                     deployment has it. The room's power levels are what let the Sensor write that \
-                     one state event — an older room created before they granted it needs the \
-                     Companion to add the exception"
-                ),
-            }
-        }
-        None => warn!(
+    match room
+        .send_state_event_raw(
+            owner_device::HANDOVER_HELD_TYPE,
+            "",
+            owner_device::held(&handover, offered_by),
+        )
+        .await
+    {
+        Ok(_) => info!(
             device_id = %handover.device_id,
-            "the credential is held and there is no handover room to acknowledge it in: \
-             onboarding will report that the handover failed although this deployment has it"
+            offered_by,
+            room = %room.room_id(),
+            replacing = replacing.as_deref().unwrap_or("nothing"),
+            "holding the device the owner's browser handed over, and said so in the handover \
+             room: approved replies are posted by it from now on, so a bridge relays them \
+             (ADR 0025, ADR 0034)"
+        ),
+        Err(error) => warn!(
+            device_id = %handover.device_id,
+            room = %room.room_id(),
+            %error,
+            "the credential is held and the acknowledgement could not be written in the handover \
+             room: onboarding will report that the handover failed although this deployment has \
+             it. The room's power levels are what let the Sensor write that one state event — a \
+             room created before they granted it needs the Companion to add the exception"
         ),
     }
 }
