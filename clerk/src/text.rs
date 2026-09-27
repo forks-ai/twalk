@@ -108,8 +108,21 @@ pub fn network_name(network: &str) -> &str {
 /// conversation where the owner wrote it. And a step whose `kind` this build
 /// does not know is skipped rather than guessed at, so a Gateway that grows a
 /// fourth kind does not stop a clerk from posting.
+/// The most steps a post draws before it starts counting them instead.
+///
+/// Four, because the post's job is to put a decision in front of somebody on a
+/// phone: a summary, what the draft did, the text, and what will happen to it.
+/// Measured on the reference deployment on 2026-09-27, a post carried **twelve**
+/// path lines and the draft was the thirteenth — a wall above the one thing the
+/// owner has to read (#395). The lines beyond the fourth are still in the
+/// owner's journal and on the Companion's screen, which folds them; this
+/// surface says how many there were.
+pub const MOST_PATH_LINES: usize = 4;
+
 pub fn path_lines(l: Lang, path: &[crate::gateway::Step]) -> String {
     let mut lines = String::new();
+    let mut drawn = 0_usize;
+    let mut counted = 0_usize;
     for step in path {
         let line = match (step.kind.as_str(), l) {
             ("freebusy", l) => {
@@ -165,8 +178,21 @@ pub fn path_lines(l: Lang, path: &[crate::gateway::Step]) -> String {
             // A kind this build does not know: skipped, not guessed at.
             _ => continue,
         };
+        if drawn == MOST_PATH_LINES {
+            // Counted rather than drawn, from here on: the count is one line
+            // whatever the number, and the draft stays where a reader finds it.
+            counted += 1;
+            continue;
+        }
+        drawn += 1;
         lines.push_str(&line);
         lines.push('\n');
+    }
+    if counted > 0 {
+        lines.push_str(&match l {
+            Lang::Fr => format!("· et {counted} autres lectures de votre agenda\n"),
+            Lang::En => format!("· and {counted} more reads of your calendar\n"),
+        });
     }
     lines
 }
@@ -866,6 +892,42 @@ mod tests {
             Some("« Oui »"),
             "a draft that looked nothing up is posted exactly as before: {without}"
         );
+    }
+
+    /// #395: the draft is what the owner decides about, so it must not sit
+    /// under a wall of what the assistant did.
+    #[test]
+    fn a_long_path_is_counted_rather_than_drawn_line_by_line() {
+        let read = |at: &str| crate::gateway::Step {
+            kind: "freebusy".to_owned(),
+            from: Some(format!("2026-10-{at}T06:00:00Z")),
+            to: Some(format!("2026-10-{at}T18:00:00Z")),
+            outcome: Some("served".to_owned()),
+            intervals: Some(2),
+            asked: None,
+        };
+        let many: Vec<crate::gateway::Step> = (12..24).map(|day| read(&day.to_string())).collect();
+        let lines = path_lines(Lang::Fr, &many);
+        let drawn: Vec<&str> = lines.lines().collect();
+        assert_eq!(
+            drawn.len(),
+            MOST_PATH_LINES + 1,
+            "twelve reads drew {} lines: {lines}",
+            drawn.len()
+        );
+        assert!(drawn[MOST_PATH_LINES].contains("et 8 autres lectures"), "{lines}");
+        assert!(
+            drawn[..MOST_PATH_LINES]
+                .iter()
+                .all(|line| line.starts_with("· a lu vos disponibilités")),
+            "{lines}"
+        );
+
+        // Four or fewer are drawn whole, with nothing counted: the common case
+        // is unchanged.
+        let few = path_lines(Lang::En, &many[..MOST_PATH_LINES]);
+        assert_eq!(few.lines().count(), MOST_PATH_LINES, "{few}");
+        assert!(!few.contains("more reads"), "{few}");
     }
 
     /// #383: the owner has to be able to tell a draft whose hours were

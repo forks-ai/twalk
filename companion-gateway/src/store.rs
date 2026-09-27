@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 17] = [
+pub const MIGRATIONS: [&str; 18] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -878,6 +878,21 @@ pub const MIGRATIONS: [&str; 17] = [
     // append-only triggers above neither fire nor need lifting.
     r#"
     ALTER TABLE working_day_decision ADD COLUMN exceptions TEXT;
+    "#,
+    // v18 (#395): who made a read — `hermes`, the drafting agent, or
+    // `gateway`, this process checking a time a draft offered (#383).
+    //
+    // Both belong in the journal: it is the owner's record of every read of
+    // their calendar, whoever made it. They do not both belong in *what your
+    // assistant did*, which is what the approval screen and the clerk's post
+    // draw — there, the Gateway's own check read as the assistant looking at
+    // the same week twice, which is untrue and tells the owner nothing.
+    //
+    // `NULL` on every row written before this: those were the agent's, except
+    // the handful #383 wrote between its deploy and this migration, and
+    // guessing which is worse than reading them all as the agent's.
+    r#"
+    ALTER TABLE hermes_read ADD COLUMN made_by TEXT;
     "#,
 ];
 
@@ -1873,8 +1888,9 @@ impl Store {
         connection
             .execute(
                 "INSERT INTO hermes_read
-                 (connection, window_from, window_to, requested_at, delivery, outcome, intervals)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (connection, window_from, window_to, requested_at, delivery, outcome, intervals,
+                  made_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     read.connection,
                     read.window_from,
@@ -1883,6 +1899,7 @@ impl Store {
                     read.delivery,
                     read.outcome,
                     read.intervals.map(|count| count as i64),
+                    read.made_by,
                 ],
             )
             .context("failed to record a free/busy read")?;
@@ -1979,52 +1996,107 @@ impl Store {
     /// owner needs is the sequence of what their assistant did, not three
     /// lists to interleave by eye. The instants are the same format
     /// throughout, so the comparison is the string's.
-    pub fn hermes_path(&self, trigger_event_id: &str) -> Result<Vec<Step>> {
+    pub fn hermes_path(&self, trigger_event_id: &str, attempt: Option<u64>) -> Result<Vec<Step>> {
         let connection = self.connection();
         let named = format!("%{trigger_event_id}%");
         let mut steps = Vec::new();
 
+        // Of **this** attempt, and of the agent.
+        //
+        // The delivery a read carries is the whole reference —
+        // `TWALK-REF:<persona>:<trigger>:<attempt>` — so the attempt is there
+        // to be read, and matching the trigger alone showed the union of every
+        // answer ever drafted for one message. Measured on the reference
+        // deployment on 2026-09-27: twelve lines above one draft, from four
+        // attempts, several of them the same window (#395).
+        //
+        // Compared after parsing rather than in the `LIKE`, because `:1` is a
+        // prefix of `:10` and a pattern that got that wrong would be a screen
+        // quietly showing the wrong draft's work.
+        //
+        // `attempt: None` keeps every attempt, which is what a caller that does
+        // not know one has to mean — a suggestion published before #206 carried
+        // no attempt at all.
+        let of_this_attempt = |delivery: &Option<String>| match attempt {
+            None => true,
+            Some(attempt) => delivery
+                .as_deref()
+                .and_then(crate::hermes_answer::Reference::find)
+                .is_some_and(|reference| reference.attempt == attempt),
+        };
+
         let mut reads = connection.prepare(
-            "SELECT window_from, window_to, outcome, intervals, requested_at
+            "SELECT window_from, window_to, outcome, intervals, requested_at, delivery, made_by
              FROM hermes_read WHERE delivery LIKE ?1 ORDER BY sequence",
         )?;
-        for step in reads.query_map([&named], |row| {
-            Ok(Step::FreeBusy {
-                from: row.get(0)?,
-                to: row.get(1)?,
-                outcome: row.get(2)?,
-                intervals: row.get::<_, Option<i64>>(3)?.map(|count| count as u64),
-                at: row.get(4)?,
-            })
+        for row in reads.query_map([&named], |row| {
+            Ok((
+                Step::FreeBusy {
+                    from: row.get(0)?,
+                    to: row.get(1)?,
+                    outcome: row.get(2)?,
+                    intervals: row.get::<_, Option<i64>>(3)?.map(|count| count as u64),
+                    at: row.get(4)?,
+                },
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
         })? {
-            steps.push(step.context("failed to read a free/busy step")?);
+            let (step, delivery, made_by) = row.context("failed to read a free/busy step")?;
+            // The Gateway's own check of a proposed time is in the journal and
+            // not in this list: it has a line of its own on both surfaces
+            // (#383), and drawn here it reads as the assistant looking at the
+            // same week twice.
+            if made_by.as_deref() == Some(crate::hermes_freebusy::MADE_BY_GATEWAY) {
+                continue;
+            }
+            if of_this_attempt(&delivery) {
+                steps.push(step);
+            }
         }
 
         let mut events = connection.prepare(
-            "SELECT uid, outcome, found, requested_at
+            "SELECT uid, outcome, found, requested_at, delivery
              FROM hermes_event_read WHERE delivery LIKE ?1 ORDER BY sequence",
         )?;
-        for step in events.query_map([&named], |row| {
-            Ok(Step::EventFacts {
-                uid: row.get(0)?,
-                outcome: row.get(1)?,
-                found: row.get::<_, Option<i64>>(2)?.map(|found| found != 0),
-                at: row.get(3)?,
-            })
+        for row in events.query_map([&named], |row| {
+            Ok((
+                Step::EventFacts {
+                    uid: row.get(0)?,
+                    outcome: row.get(1)?,
+                    found: row.get::<_, Option<i64>>(2)?.map(|found| found != 0),
+                    at: row.get(3)?,
+                },
+                row.get::<_, Option<String>>(4)?,
+            ))
         })? {
-            steps.push(step.context("failed to read an event-facts step")?);
+            let (step, delivery) = row.context("failed to read an event-facts step")?;
+            if of_this_attempt(&delivery) {
+                steps.push(step);
+            }
         }
 
+        // The questions are this attempt's **and every earlier one's**, which
+        // is not the rule the reads follow and is deliberate (#395). A draft
+        // exists because of the question that came before it: #367's whole
+        // story is one wake deferring with a question and the next drafting,
+        // and the owner reading that draft needs the question. A *read* of an
+        // earlier attempt is that attempt's own work and fed a draft that was
+        // never published.
         let mut asked = connection.prepare(
             "SELECT asked, deferred_at FROM hermes_deferral
-             WHERE trigger_event_id = ?1 ORDER BY sequence",
+             WHERE trigger_event_id = ?1 AND (?2 IS NULL OR attempt <= ?2)
+             ORDER BY sequence",
         )?;
-        for step in asked.query_map([trigger_event_id], |row| {
-            Ok(Step::Asked {
-                asked: row.get(0)?,
-                at: row.get(1)?,
-            })
-        })? {
+        for step in asked.query_map(
+            rusqlite::params![trigger_event_id, attempt.map(|attempt| attempt as i64)],
+            |row| {
+                Ok(Step::Asked {
+                    asked: row.get(0)?,
+                    at: row.get(1)?,
+                })
+            },
+        )? {
             steps.push(step.context("failed to read a question step")?);
         }
 
@@ -4510,6 +4582,60 @@ mod bridge_status_tests {
             .record_connections(&test_support::implicit_registry())
             .expect("the registry records");
         store
+    }
+
+    #[test]
+    fn a_path_is_this_attempts_reads_and_never_the_gateways_own() {
+        use crate::hermes_freebusy::{HermesRead, MADE_BY_GATEWAY, MADE_BY_HERMES};
+        let store = store("hermes-path-attempt");
+        let trigger = "b".repeat(64);
+        let reference = |attempt: u64| format!("TWALK-REF:assistant:{trigger}:{attempt}");
+        let read = |window: &str, at: &str, attempt: u64, made_by: &'static str| HermesRead {
+            connection: "calendar".to_owned(),
+            window_from: format!("2026-10-{window}T06:00:00Z"),
+            window_to: format!("2026-10-{window}T18:00:00Z"),
+            requested_at: format!("2026-10-01T{at}:00Z"),
+            delivery: Some(reference(attempt)),
+            outcome: "served".to_owned(),
+            intervals: Some(2),
+            made_by,
+        };
+        // Attempt 1 read one window; attempt 2 read another and the Gateway
+        // checked a time the draft offered. And attempt 10, because `:1` is a
+        // prefix of `:10` and a pattern that got that wrong would put another
+        // draft's work on this one's screen.
+        for row in [
+            read("12", "09:00", 1, MADE_BY_HERMES),
+            read("13", "09:05", 2, MADE_BY_HERMES),
+            read("13", "09:06", 2, MADE_BY_GATEWAY),
+            read("14", "09:07", 10, MADE_BY_HERMES),
+        ] {
+            store.record_hermes_read(&row).expect("the read records");
+        }
+
+        let windows = |attempt: Option<u64>| -> Vec<String> {
+            store
+                .hermes_path(&trigger, attempt)
+                .expect("the path reads")
+                .into_iter()
+                .filter_map(|step| match step {
+                    Step::FreeBusy { from, .. } => Some(from[8..10].to_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(windows(Some(1)), vec!["12"], "attempt 1 read one window");
+        assert_eq!(
+            windows(Some(2)),
+            vec!["13"],
+            "attempt 2 shows its own read and not the Gateway's check of it"
+        );
+        assert_eq!(windows(Some(10)), vec!["14"], "10 is not 1");
+        assert_eq!(
+            windows(None),
+            vec!["12", "13", "14"],
+            "a caller with no attempt sees every attempt, and still never the Gateway's own"
+        );
     }
 
     #[test]

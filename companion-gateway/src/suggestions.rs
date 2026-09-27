@@ -544,10 +544,16 @@ impl Suggestions {
         // text, and the user may still refuse it — and what it answers
         // does not.
         let context = listed_context(document.data.context, consent_label);
-        // What the draft did before it wrote (#367). Read here rather than on
-        // the single-suggestion route, because the listing and the single read
-        // are deliberately one shape — a member present in one and absent in
-        // the other is how a screen grows two code paths.
+        // What the draft did before it wrote (#367), **of this attempt**
+        // (#395). Read here rather than on the single-suggestion route,
+        // because the listing and the single read are deliberately one shape —
+        // a member present in one and absent in the other is how a screen
+        // grows two code paths.
+        //
+        // The attempt is the suggestion's own. One message answered twice is
+        // two suggestions, and each shows the reads its own draft made; before
+        // this they showed the union, which on the reference deployment was
+        // twelve lines above one draft.
         //
         // A store that cannot answer does not lose the suggestion: the path is
         // then empty and said so in the log. The text is what the owner has to
@@ -555,7 +561,7 @@ impl Suggestions {
         // reason to refuse.
         let path = self
             .store
-            .hermes_path(&document.data.trigger.event_id)
+            .hermes_path(&document.data.trigger.event_id, document.data.attempt)
             .unwrap_or_else(|error| {
                 warn!(
                     %error,
