@@ -396,6 +396,58 @@ pub const MADE_BY_HERMES: &str = "hermes";
 /// Or this process, checking a time a draft offered (#383).
 pub const MADE_BY_GATEWAY: &str = "gateway";
 
+/// What one window's check knows: the gaps, and the zone the owner's days are
+/// counted in.
+///
+/// The zone travels with the gaps because a check that has one without the
+/// other can only half-answer. An instant is a moment; **which day it is** is a
+/// question about where the owner lives, and `2026-10-12T23:30:00Z` is a Monday
+/// in London and a Tuesday in Paris (#397).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    /// The free stretches of the window.
+    pub gaps: Vec<Gap>,
+    /// The IANA name the collector answered, or `None` when the deployment
+    /// knows none. For the log line: what the day is computed from is the
+    /// offset on each gap, not this.
+    pub zone: Option<String>,
+}
+
+/// One free stretch, as this Gateway needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gap {
+    pub start: i64,
+    pub end: i64,
+    /// The owner's offset from UTC at that moment, in seconds, read off the
+    /// gap's own `start_local` — `+02:00` is `7200` (#397).
+    ///
+    /// **Read, not computed.** The collector has the owner's zone and the
+    /// database that turns an instant into a local time, and spelled it out
+    /// for exactly this reason (#379): a second implementation here would be
+    /// the arithmetic that ticket removed, with a summer-time bug waiting in
+    /// it. `None` when the deployment knows no zone, and then nothing that
+    /// needs a *day* can be answered.
+    pub offset_seconds: Option<i32>,
+}
+
+/// `+02:00`, `-05:30` or `Z` at the end of an RFC 3339 instant, in seconds.
+fn offset_seconds(local: &str) -> Option<i32> {
+    if local.ends_with('Z') || local.ends_with('z') {
+        return Some(0);
+    }
+    let (sign, rest) = match local.rfind(['+', '-']) {
+        // Not the hyphens of the date: an offset sits after the time.
+        Some(at) if at > 10 => (
+            if local.as_bytes()[at] == b'+' { 1 } else { -1 },
+            &local[at + 1..],
+        ),
+        _ => return None,
+    };
+    let (hours, minutes) = rest.split_once(':')?;
+    let (hours, minutes): (i32, i32) = (hours.parse().ok()?, minutes.parse().ok()?);
+    (hours < 24 && minutes < 60).then_some(sign * (hours * 3600 + minutes * 60))
+}
+
 /// One read, as the store records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HermesRead {
@@ -797,7 +849,7 @@ impl Reads {
         connection: &str,
         window: (&str, &str),
         delivery: &str,
-    ) -> Result<Option<Vec<(i64, i64)>>, ReadRefusal> {
+    ) -> Result<Option<Checked>, ReadRefusal> {
         let request = ReadRequest {
             connection: Some(connection.to_owned()),
             from: Some(window.0.to_owned()),
@@ -806,17 +858,22 @@ impl Reads {
             ..ReadRequest::default()
         };
         let answer = self.read_checked(connection, &request).await?;
-        Ok(answer.free.map(|gaps| {
-            gaps.iter()
+        let zone = answer.timezone.clone();
+        Ok(answer.free.map(|gaps| Checked {
+            gaps: gaps
+                .iter()
                 .filter_map(|gap| {
-                    let bound = |name: &str| {
-                        gap.get(name)
-                            .and_then(serde_json::Value::as_str)
-                            .and_then(crate::hermes_answer::parse_rfc3339_seconds)
-                    };
-                    Some((bound("start")?, bound("end")?))
+                    let member = |name: &str| gap.get(name).and_then(serde_json::Value::as_str);
+                    let bound =
+                        |name: &str| member(name).and_then(crate::hermes_answer::parse_rfc3339_seconds);
+                    Some(Gap {
+                        start: bound("start")?,
+                        end: bound("end")?,
+                        offset_seconds: member("start_local").and_then(offset_seconds),
+                    })
                 })
-                .collect()
+                .collect(),
+            zone,
         }))
     }
 
