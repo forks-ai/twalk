@@ -819,17 +819,20 @@ fn open_consent(
             "committed consent decisions were not published before the last stop; publishing them now"
         );
     }
-    Ok((
+    let outbox = Arc::new(Outbox::new(
         store.clone(),
-        Arc::new(Outbox::new(
-            store,
-            metrics.clone(),
-            consent.matrix_domain.clone(),
-            owner.clone(),
-            std::time::SystemTime::now,
-        )),
-        owner,
-    ))
+        metrics.clone(),
+        consent.matrix_domain.clone(),
+        owner.clone(),
+        std::time::SystemTime::now,
+    ));
+    // Both outbox gauges, before anything is served: `/metrics` gates the
+    // bridge-status series on the bridge gauge being set, and the drain that
+    // sets it only runs when a transition is waiting — so a freshly restarted
+    // Gateway exposed none of them, `held` and `settled` included, which are
+    // the two an operator watches precisely while nothing is published (#324).
+    outbox.observe_pending();
+    Ok((store, outbox, owner))
 }
 
 /// Resolves when the process is asked to stop (SIGTERM, or SIGINT from an

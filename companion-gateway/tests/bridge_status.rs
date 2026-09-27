@@ -772,6 +772,26 @@ const GRACE: u64 = 2;
 #[tokio::test]
 async fn a_bridge_that_blinks_inside_the_grace_produces_nothing_at_all() -> Result<()> {
     let fixture = Fixture::start_with_grace("bridge-status-blink", GRACE).await?;
+
+    // Before anything is published at all, the series an operator watches are
+    // already on `/metrics`. They are gated on the bridge outbox's gauge, and
+    // the drain that sets it only runs when a transition is waiting — so on a
+    // freshly restarted Gateway the whole family used to be invisible, `held`
+    // and `settled` included, which are the two that exist to be read
+    // *while nothing is being published*.
+    let metrics = reqwest::get(format!("{}/metrics", fixture.base))
+        .await?
+        .text()
+        .await?;
+    assert!(
+        metrics.contains("twalk_companion_gateway_bridge_status_outbox_pending"),
+        "the bridge outbox gauge is unset, so every bridge series is hidden: {metrics}"
+    );
+    assert!(
+        metrics.contains("twalk_companion_gateway_bridge_statuses_total{"),
+        "the bridge status series are hidden on a Gateway that has published no transition"
+    );
+
     connected_first(&fixture).await?;
 
     fixture

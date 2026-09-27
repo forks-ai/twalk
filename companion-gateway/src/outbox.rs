@@ -211,10 +211,23 @@ impl Outbox {
         Ok(committed)
     }
 
-    /// Republishes the outbox gauge from the store. Cheap (one indexed
-    /// count), and it keeps the number an operator scrapes honest whoever
+    /// Republishes the outbox gauges from the store. Cheap (two indexed
+    /// counts), and it keeps the numbers an operator scrapes honest whoever
     /// moved the outbox.
-    fn observe_pending(&self) {
+    ///
+    /// Public, and called once at startup, because until it has run the
+    /// **bridge** gauge is `None` — and `/metrics` gates the whole
+    /// `bridge_statuses_total` family on it (#56's rule: a Gateway with no
+    /// store exposes none of them). The consent drain runs at startup with
+    /// nothing to publish and sets its own; the bridge drain only runs when
+    /// there is a transition waiting, so on a freshly restarted Gateway every
+    /// bridge series was invisible until a bridge changed state.
+    ///
+    /// That was noticeable the moment #324 put two counters in that family
+    /// which exist to be watched *while nothing is being published*: `held` and
+    /// `settled` say a bridge blinked and produced no transition, and a
+    /// counter that only appears once a transition exists cannot say that.
+    pub fn observe_pending(&self) {
         match self.store.unpublished_count() {
             Ok(pending) => self.metrics.set_consent_outbox_pending(pending),
             Err(error) => warn!(%error, "failed to count the consent outbox"),
