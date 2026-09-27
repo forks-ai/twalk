@@ -133,6 +133,17 @@ test.describe.serial('the bootstrap journey', () => {
 		await page.getByLabel('Username', { exact: true }).fill(stack.owner);
 		await page.getByLabel('Password', { exact: true }).fill(password);
 		await page.getByLabel('Confirm password').fill(password);
+
+		// Before anything is created: the screen says that creating this account
+		// also creates a device on it, and how to revoke it (#228's fifth
+		// criterion). ADR 0025's mitigation for a long-lived credential at rest is
+		// that the user can revoke the device from any client — and a mitigation
+		// they learn about afterwards is not one.
+		const said = page.getByTestId('acting-device');
+		await expect(said).toBeVisible();
+		await expect(said).toContainText(ACTING_DEVICE_NAME);
+		await expect(said).toContainText(/revoke/i);
+
 		await page.getByTestId('create-account').click();
 
 		await expect(page.getByTestId('screen-recovery-key')).toBeVisible({ timeout: 180_000 });

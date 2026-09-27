@@ -96,6 +96,8 @@
 // caller a device list the machine never saw, which is exactly the answer that
 // would make a broken handover look ready.
 
+import { homeserverCalls, refusalOf, waitFor, type Answer, type Call } from './homeserver';
+
 /** The `m.room.create` type that says this room is not a conversation. */
 export const HANDOVER_ROOM_TYPE = 'fr.linagora.twalk.handover';
 
@@ -334,37 +336,7 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 		return { kind: 'failed', detail: `${userId} is not a Matrix user ID` };
 	}
 
-	const call = async (
-		method: string,
-		path: string,
-		body?: unknown
-	): Promise<{ status: number; document: Record<string, unknown> }> => {
-		const response = await doFetch(`${baseUrl}${path}`, {
-			method,
-			headers: {
-				authorization: `Bearer ${accessToken}`,
-				...(body === undefined ? {} : { 'content-type': 'application/json' })
-			},
-			...(body === undefined ? {} : { body: JSON.stringify(body) })
-		});
-		let document: Record<string, unknown> = {};
-		try {
-			const parsed: unknown = await response.json();
-			if (parsed !== null && typeof parsed === 'object') {
-				document = parsed as Record<string, unknown>;
-			}
-		} catch {
-			// A body that is not JSON leaves `document` empty; the status is
-			// what the callers below decide on.
-		}
-		return { status: response.status, document };
-	};
-
-	const errorOf = (document: Record<string, unknown>, status: number): string => {
-		const errcode = typeof document['errcode'] === 'string' ? document['errcode'] : '';
-		const error = typeof document['error'] === 'string' ? document['error'] : '';
-		return [String(status), errcode, error].filter((part) => part !== '').join(' ');
-	};
+	const call = homeserverCalls(doFetch, baseUrl, accessToken);
 
 	let roomId: string;
 	let created: boolean;
@@ -396,7 +368,7 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 				roomId = raced;
 				created = false;
 			} else {
-				return { kind: 'failed', detail: errorOf(creation.document, creation.status) };
+				return { kind: 'failed', detail: refusalOf(creation) };
 			}
 		}
 
@@ -425,7 +397,7 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 				invitation.status !== 200 &&
 				!String(invitation.document['error'] ?? '').includes('already in the room')
 			) {
-				return { kind: 'failed', detail: errorOf(invitation.document, invitation.status) };
+				return { kind: 'failed', detail: refusalOf(invitation) };
 			}
 		}
 
@@ -467,12 +439,6 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 		: { kind: 'sensor-untracked', roomId };
 }
 
-type Call = (
-	method: string,
-	path: string,
-	body?: unknown
-) => Promise<{ status: number; document: Record<string, unknown> }>;
-
 /**
  * Makes sure the Sensor may write [`HANDOVER_HELD_TYPE`] in this room, and
  * nothing else. Answers `null` when it may, or the homeserver's words.
@@ -496,13 +462,23 @@ async function grantTheAcknowledgement(call: Call, roomId: string): Promise<stri
 	if (events[HANDOVER_HELD_TYPE] === 0) {
 		return null;
 	}
-	const amended = await call('PUT', path, {
-		...current.document,
-		events: { ...events, [HANDOVER_HELD_TYPE]: 0 }
-	});
-	return amended.status === 200
+	const amended = { ...current.document, events: { ...events, [HANDOVER_HELD_TYPE]: 0 } };
+	let written = await call('PUT', path, amended);
+	if (written.status !== 200) {
+		// Once more, after whatever the homeserver asked for. Synapse rate-limits
+		// state sends, and a `429` on this one request would otherwise fail an
+		// onboarding that is being re-run — the room is there, the Sensor is in it,
+		// and the only thing missing is a power level it already agreed to. A
+		// refusal that is not about rate is answered the same way and costs one
+		// extra request.
+		const askedFor = written.document['retry_after_ms'];
+		const wait = typeof askedFor === 'number' ? Math.min(askedFor, 5_000) : 1_000;
+		await new Promise((resolve) => setTimeout(resolve, wait));
+		written = await call('PUT', path, amended);
+	}
+	return written.status === 200
 		? null
-		: `${amended.status} granting the Sensor the one state event it may write`;
+		: `${written.status} granting the Sensor the one state event it may write`;
 }
 
 /** The room the handover alias points at, or `null`. */
@@ -522,23 +498,3 @@ async function memberOf(call: Call, roomId: string, userId: string): Promise<str
 	return answer.status === 200 && typeof membership === 'string' ? membership : null;
 }
 
-/**
- * Polls `condition` until it holds or the deadline passes. Answers whether it
- * held — a deadline is an answer about the system, never an exception.
- */
-async function waitFor(
-	condition: () => Promise<boolean>,
-	deadlineMs: number,
-	intervalMs: number
-): Promise<boolean> {
-	const deadline = Date.now() + deadlineMs;
-	for (;;) {
-		if (await condition()) {
-			return true;
-		}
-		if (Date.now() >= deadline) {
-			return false;
-		}
-		await new Promise((resolve) => setTimeout(resolve, intervalMs));
-	}
-}

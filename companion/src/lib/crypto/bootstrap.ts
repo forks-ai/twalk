@@ -491,18 +491,8 @@ export function handoverCrypto(): (HandoverCrypto & CredentialCrypto) | null {
 			client.stopClient();
 		},
 		async trackedDeviceCount(userId: string): Promise<number> {
-			const crypto = client.getCrypto();
-			if (crypto === undefined) {
-				return 0;
-			}
-			// `downloadUncached` is **false**, and that is the whole assertion.
-			// With `true` the SDK falls back to a plain HTTP `/keys/query` whose
-			// answer the Olm machine never sees, so it would report devices for
-			// a user the machine does not track — which is exactly the state in
-			// which the credential send goes out empty. False means the answer
-			// comes from the machine's own store or not at all.
-			const devices = await crypto.getUserDeviceInfo([userId], false);
-			return devices.get(userId)?.size ?? 0;
+			// One question, asked once: how many is the length of which ones.
+			return (await this.sensorDevices(userId)).length;
 		},
 		deviceId(): string | null {
 			return client.getDeviceId();
@@ -512,8 +502,12 @@ export function handoverCrypto(): (HandoverCrypto & CredentialCrypto) | null {
 			if (crypto === undefined) {
 				return [];
 			}
-			// `downloadUncached` false, for the reason `trackedDeviceCount` gives:
-			// the machine's own store or nothing.
+			// `downloadUncached` is **false**, and that is the whole assertion.
+			// With `true` the SDK falls back to a plain HTTP `/keys/query` whose
+			// answer the Olm machine never sees, so it would report devices for a
+			// user the machine does not track — which is exactly the state in which
+			// the credential send goes out empty. False means the answer comes from
+			// the machine's own store or not at all.
 			const devices = await crypto.getUserDeviceInfo([userId], false);
 			return [...(devices.get(userId)?.keys() ?? [])];
 		},

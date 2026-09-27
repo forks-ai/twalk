@@ -49,6 +49,7 @@
 // indistinguishable from the first's. The credential never does.
 
 import { HANDOVER_HELD_TYPE, HANDOVER_OFFER_TYPE, localpartOf } from './handover';
+import { homeserverCalls, refusalOf, waitFor } from './homeserver';
 
 /** The device name the user will see in their own device list. */
 export const ACTING_DEVICE_NAME = 'twalk';
@@ -100,11 +101,14 @@ export type CredentialOutcome =
 	 */
 	| { kind: 'sensor-untracked' }
 	/**
-	 * The batch left this browser with fewer devices in it than were asked for:
-	 * the machine skipped one it does not know. No credential was created, or the
-	 * one created was never sent.
+	 * The batch left this browser with fewer devices in it than were asked for —
+	 * the machine skipped one it does not know — **and** the Sensor never
+	 * acknowledged. Both facts, because the send has already happened by then: the
+	 * short batch is reported only when it turned out to matter, since the
+	 * acknowledgement is the source of truth and a batch that missed a stale
+	 * device of the Sensor's is a handover that worked.
 	 */
-	| { kind: 'not-encrypted-to'; missing: number; deviceId?: string }
+	| { kind: 'not-encrypted-to'; missing: number; deviceId: string }
 	/** Something the homeserver or the browser refused. `detail` is its words. */
 	| { kind: 'failed'; detail: string };
 
@@ -156,6 +160,10 @@ export async function handOverTheDevice(
 		pollIntervalMs = 1_000
 	} = options;
 	const doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+	// As the owner, for everything but the login, which authenticates with the
+	// password instead and is the one call that mints anything.
+	const asTheOwner = homeserverCalls(doFetch, baseUrl, accessToken);
+	const withThePassword = homeserverCalls(doFetch, baseUrl, null);
 
 	const offeringDevice = crypto.deviceId();
 	if (offeringDevice === null || offeringDevice === '') {
@@ -166,7 +174,14 @@ export async function handOverTheDevice(
 		return { kind: 'failed', detail: `${userId} is not a Matrix user ID` };
 	}
 
-	let deviceId: string | undefined;
+	/** How many of the Sensor's devices the encrypted batch did not reach. */
+	let missing = 0;
+	/**
+	 * The device the login below minted, once there is one. A plain string rather
+	 * than `string | undefined` so that no outcome has to assert it: the only paths
+	 * that reach the outcomes naming a device are the ones that have set it.
+	 */
+	let created = '';
 	try {
 		// Asked before the device is created, so a deployment whose Sensor this
 		// browser cannot encrypt to does not leave a device behind for nothing.
@@ -177,26 +192,22 @@ export async function handOverTheDevice(
 
 		// The offer, before the credential: what the Sensor reads to know which
 		// device may hand one over.
-		const offered = await call(doFetch, baseUrl, accessToken, {
-			method: 'PUT',
-			path: `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${HANDOVER_OFFER_TYPE}/`,
-			body: { device_id: offeringDevice }
-		});
+		const offered = await asTheOwner(
+			'PUT',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${HANDOVER_OFFER_TYPE}/`,
+			{ device_id: offeringDevice }
+		);
 		if (offered.status !== 200) {
-			return { kind: 'failed', detail: errorOf(offered) };
+			return { kind: 'failed', detail: refusalOf(offered) };
 		}
 
 		// The device. A password login is what mints one, which is why the password
 		// is still in memory at this point in onboarding and nowhere else.
-		const login = await call(doFetch, baseUrl, null, {
-			method: 'POST',
-			path: '/_matrix/client/v3/login',
-			body: {
-				type: 'm.login.password',
-				identifier: { type: 'm.id.user', user: localpart },
-				password,
-				initial_device_display_name: ACTING_DEVICE_NAME
-			}
+		const login = await withThePassword('POST', '/_matrix/client/v3/login', {
+			type: 'm.login.password',
+			identifier: { type: 'm.id.user', user: localpart },
+			password,
+			initial_device_display_name: ACTING_DEVICE_NAME
 		});
 		const credential = {
 			user_id: asString(login.document['user_id']),
@@ -209,23 +220,23 @@ export async function handOverTheDevice(
 			credential.device_id === null ||
 			credential.access_token === null
 		) {
-			return { kind: 'failed', detail: errorOf(login) };
+			return { kind: 'failed', detail: refusalOf(login) };
 		}
-		deviceId = credential.device_id;
+		created = credential.device_id;
 
-		const encryptedTo = await crypto.sendEncrypted(
+		// The count is kept and not acted on yet. `sendEncrypted` has already put
+		// the batch on the wire — a device the machine skipped is simply not in it —
+		// so returning here would report "not sent" about a credential the Sensor
+		// may well be holding: the Sensor's own acknowledgement is what this design
+		// trusts, and a short batch that reached the one live device of the Sensor's
+		// is a handover that worked. It is reported below, where it explains a
+		// missing acknowledgement rather than pre-empting one.
+		missing = sensorDevices.length - (await crypto.sendEncrypted(
 			sensorUserId,
 			sensorDevices,
 			HANDOVER_EVENT_TYPE,
 			credential
-		);
-		if (encryptedTo < sensorDevices.length) {
-			return {
-				kind: 'not-encrypted-to',
-				missing: sensorDevices.length - encryptedTo,
-				deviceId
-			};
-		}
+		));
 	} catch (cause) {
 		return {
 			kind: 'failed',
@@ -237,83 +248,24 @@ export async function handOverTheDevice(
 	// anything this browser remembers: the Sensor wrote it or it did not.
 	const acknowledged = await waitFor(
 		async () => {
-			const held = await call(doFetch, baseUrl, accessToken, {
-				method: 'GET',
-				path: `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${HANDOVER_HELD_TYPE}/`
-			});
-			return held.status === 200 && asString(held.document['device_id']) === deviceId;
+			const held = await asTheOwner(
+				'GET',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${HANDOVER_HELD_TYPE}/`
+			);
+			return held.status === 200 && asString(held.document['device_id']) === created;
 		},
 		ackDeadlineMs,
 		pollIntervalMs
 	);
-	return acknowledged
-		? { kind: 'held', deviceId: deviceId as string }
-		: { kind: 'not-acknowledged', deviceId: deviceId as string };
-}
-
-interface Answer {
-	status: number;
-	document: Record<string, unknown>;
-}
-
-/**
- * One request to the homeserver. `token` is `null` for the login, which is the
- * one call here that authenticates with the password instead.
- */
-async function call(
-	doFetch: typeof fetch,
-	baseUrl: string,
-	token: string | null,
-	request: { method: string; path: string; body?: unknown }
-): Promise<Answer> {
-	const response = await doFetch(`${baseUrl}${request.path}`, {
-		method: request.method,
-		headers: {
-			...(token === null ? {} : { authorization: `Bearer ${token}` }),
-			...(request.body === undefined ? {} : { 'content-type': 'application/json' })
-		},
-		...(request.body === undefined ? {} : { body: JSON.stringify(request.body) })
-	});
-	let document: Record<string, unknown> = {};
-	try {
-		const parsed: unknown = await response.json();
-		if (parsed !== null && typeof parsed === 'object') {
-			document = parsed as Record<string, unknown>;
-		}
-	} catch {
-		// A body that is not JSON leaves `document` empty; the status decides.
+	if (acknowledged) {
+		return { kind: 'held', deviceId: created };
 	}
-	return { status: response.status, document };
+	return missing > 0
+		? { kind: 'not-encrypted-to', missing, deviceId: created }
+		: { kind: 'not-acknowledged', deviceId: created };
 }
 
+/** A non-empty string, or `null`: the shape every field of a login answer has. */
 function asString(value: unknown): string | null {
 	return typeof value === 'string' && value !== '' ? value : null;
-}
-
-/** The homeserver's own words about a refusal, for a screen to show. */
-function errorOf(answer: Answer): string {
-	const errcode = asString(answer.document['errcode']) ?? '';
-	const error = asString(answer.document['error']) ?? '';
-	return [String(answer.status), errcode, error].filter((part) => part !== '').join(' ');
-}
-
-/**
- * Polls `condition` until it holds or the deadline passes. Answers whether it
- * held — a deadline is an answer about the system, never an exception.
- */
-async function waitFor(
-	condition: () => Promise<boolean>,
-	deadlineMs: number,
-	intervalMs: number
-): Promise<boolean> {
-	const deadline = Date.now() + deadlineMs;
-	for (;;) {
-		if (await condition()) {
-			return true;
-		}
-		if (Date.now() >= deadline) {
-			return false;
-		}
-		await new Promise((resolve) => setTimeout(resolve, intervalMs));
-	}
 }

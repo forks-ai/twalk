@@ -120,6 +120,36 @@ impl Bot {
         })
     }
 
+    /// A login that names its device, the way the Companion's own does when it
+    /// creates the device Twalk acts through (`initial_device_display_name`,
+    /// ADR 0034): what the owner then sees in their device list.
+    pub async fn login_named(localpart: &str, device_name: &str) -> Result<Self> {
+        let mut bot = Self::login(localpart).await?;
+        bot.send_json(
+            reqwest::Method::PUT,
+            &format!("/_matrix/client/v3/devices/{}", esc(&bot.device_id)),
+            Some(&serde_json::json!({ "display_name": device_name })),
+            "name the device",
+        )
+        .await?;
+        // A no-op that keeps `bot` mutable-free for callers.
+        let _ = &mut bot;
+        Ok(bot)
+    }
+
+    /// The account's devices, as the owner's own client lists them.
+    pub async fn devices(&self) -> Result<Vec<Value>> {
+        let answer = self
+            .send_json(
+                reqwest::Method::GET,
+                "/_matrix/client/v3/devices",
+                None,
+                "list devices",
+            )
+            .await?;
+        Ok(answer["devices"].as_array().cloned().unwrap_or_default())
+    }
+
     pub fn user_id(&self) -> &str {
         &self.user_id
     }

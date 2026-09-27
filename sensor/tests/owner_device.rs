@@ -1036,7 +1036,7 @@ async fn a_handover_makes_the_deployment_reply_as_the_owner_with_no_restart() ->
     // The device the browser creates for Twalk to act through: an ordinary login
     // on the owner's own account, which is what `initial_device_display_name:
     // twalk` is in the Companion.
-    let acting = Bot::login("owner").await?;
+    let acting = Bot::login_named("owner", "twalk").await?;
     assert_ne!(
         acting.device_id(),
         browser.device_id(),
@@ -1083,6 +1083,21 @@ async fn a_handover_makes_the_deployment_reply_as_the_owner_with_no_restart() ->
         !acknowledgement.to_string().contains(acting.access_token()),
         "the acknowledgement is unencrypted state in a room and must not carry the credential"
     );
+
+    // And it is a device the owner can see and revoke, under the name the
+    // Companion gives it: that is ADR 0025's whole mitigation for a long-lived
+    // credential at rest, and a mitigation nobody can find is not one.
+    let listed = acting.devices().await?;
+    let named: Vec<&Value> = listed
+        .iter()
+        .filter(|device| device["display_name"].as_str() == Some("twalk"))
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "exactly one device named twalk is in the owner's device list: {listed:?}"
+    );
+    assert_eq!(named[0]["device_id"].as_str(), Some(acting.device_id()));
 
     // It is on the volume, readable by nobody else, so the next restart still has
     // it — an acknowledgement for a credential held only in memory would be a

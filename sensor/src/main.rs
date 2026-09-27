@@ -339,9 +339,9 @@ async fn main() -> Result<()> {
     // over while the Sensor runs, and the send path asks the cell per approval
     // for the same reason it already asks the metrics whether the credential is
     // still good (#229).
-    let acting_device = Arc::new(ActingDevice::new());
+    let owner_device = Arc::new(OwnerDevice::new());
     if let Some(device) = bring_up_owner_device(&config, owner.as_ref(), &metrics).await? {
-        acting_device
+        owner_device
             .hold(device, bridge_bots.clone(), metrics.clone())
             .await;
     }
@@ -1136,7 +1136,7 @@ async fn main() -> Result<()> {
     // the room knowledge the send path needs.
     {
         let client = client.clone();
-        let acting_device = acting_device.clone();
+        let owner_device = owner_device.clone();
         let jetstream = jetstream.clone();
         let retry_base = config.send_retry_base;
         let max_attempts = config.send_retry_max_attempts;
@@ -1144,7 +1144,7 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             consume_approved_replies(
                 client,
-                acting_device,
+                owner_device,
                 jetstream,
                 retry_base,
                 max_attempts,
@@ -1172,7 +1172,7 @@ async fn main() -> Result<()> {
             homeserver_url: config.homeserver_url.clone(),
             state_dir: config.state_dir.clone(),
             bridge_bots: bridge_bots.clone(),
-            acting: acting_device.clone(),
+            held: owner_device.clone(),
             metrics: metrics.clone(),
         })
     });
@@ -1431,8 +1431,9 @@ async fn whoami(homeserver_url: &str, access_token: &str) -> Result<WhoAmI> {
     })
 }
 
-/// The device Twalk acts through, which is not the same device for the life of
-/// the process (#228, ADR 0034).
+/// The **owner device** (`CONTEXT.md`) — the device of the owner's own account
+/// that Twalk acts through — which is not the same device for the life of the
+/// process (#228, ADR 0034).
 ///
 /// Before this it was an `Option<Client>` built at startup and captured by the
 /// send path, which was true while the only way to get one was configuration.
@@ -1447,7 +1448,7 @@ async fn whoami(homeserver_url: &str, access_token: &str) -> Result<WhoAmI> {
 /// token, and a replaced device must not leave the previous one's loop running —
 /// it would go on syncing a credential nothing acts through, and go on reporting
 /// its room counts over the new device's.
-struct ActingDevice {
+struct OwnerDevice {
     held: tokio::sync::RwLock<Held>,
 }
 
@@ -1458,7 +1459,7 @@ struct Held {
     syncing: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl ActingDevice {
+impl OwnerDevice {
     fn new() -> Self {
         Self {
             held: tokio::sync::RwLock::new(Held::default()),
@@ -1501,6 +1502,29 @@ impl ActingDevice {
             client: Some(client),
             syncing: Some(syncing),
         };
+    }
+}
+
+/// Where the credential the owner device runs on came from, which is the only
+/// thing two of its refusals need to name: the variable an operator would edit,
+/// or the act a user would repeat. A refusal that named neither would be one
+/// nobody can do anything about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialFrom {
+    /// `SENSOR_OWNER_DEVICE_ACCESS_TOKEN`: provisioned by script, and an
+    /// operator's to fix.
+    Configuration,
+    /// The owner's browser, over the handover room (ADR 0034). Theirs to repeat,
+    /// and arriving while this process runs.
+    AHandover,
+}
+
+impl CredentialFrom {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Configuration => "SENSOR_OWNER_DEVICE_ACCESS_TOKEN",
+            Self::AHandover => "the credential the owner's browser handed over",
+        }
     }
 }
 
@@ -1549,7 +1573,8 @@ fn load_held_credential(path: &Path) -> Option<owner_device::Handover> {
 ///
 /// `None` — no credential configured and none handed over — is the behaviour
 /// every deployment had before ADR 0034: approved replies are posted by
-/// `@sensor:`, and on a bridged conversation the contact receives nothing. That is said once, here, at
+/// `@sensor:`, and on a bridged conversation the contact receives nothing. That
+/// is said once, here, at
 /// startup, and named after the issue, because a degradation nobody is told
 /// about is the failure this product has shipped repeatedly.
 ///
@@ -1639,16 +1664,16 @@ async fn bring_up_owner_device(
     };
     let (access_token, device_id) = credential;
     let handed_over = held.is_some();
-    let opened = open_acting_device(
+    let opened = open_owner_device(
         &config.homeserver_url,
         config.state_dir.as_deref(),
         owner.matrix_id(),
         access_token,
         device_id,
         if handed_over {
-            "the credential the owner's browser handed over"
+            CredentialFrom::AHandover
         } else {
-            "SENSOR_OWNER_DEVICE_ACCESS_TOKEN"
+            CredentialFrom::Configuration
         },
         false,
     )
@@ -1723,26 +1748,24 @@ async fn bring_up_owner_device(
 /// credential file was removed by hand while the store on disk still belonged to
 /// the device the file named, and a Sensor that refused to start over it would be
 /// down for a credential it no longer has.
-async fn open_acting_device(
+async fn open_owner_device(
     homeserver_url: &str,
     state_dir: Option<&Path>,
     owner: &str,
     access_token: &str,
     device_id: &str,
-    // What to call this credential when refusing it: the variable an operator
-    // would edit, or the act a user would repeat. A refusal that named neither
-    // would be one nobody can do anything about.
-    source: &str,
+    source: CredentialFrom,
     clear_store: bool,
 ) -> Result<Client> {
     let identity = whoami(homeserver_url, access_token)
         .await
-        .context("could not ask the homeserver whose acting-device credential this is")?;
+        .context("could not ask the homeserver whose owner-device credential this is")?;
     if identity.user_id != owner {
         anyhow::bail!(
-            "{source} belongs to {} and SENSOR_OWNER is {}: the device Twalk acts through must be \
+            "{} belongs to {} and SENSOR_OWNER is {}: the device Twalk acts through must be \
              a device of the owner's own account, because that is the only account a bridge \
              relays. Refusing it rather than writing into conversations as somebody else",
+            source.as_str(),
             identity.user_id,
             owner
         );
@@ -1752,15 +1775,16 @@ async fn open_acting_device(
     if let Some(reported) = &identity.device_id {
         if reported != device_id {
             anyhow::bail!(
-                "{source} was issued for device {reported} and the deployment names {device_id}: \
-                 the crypto store is bound to the device"
+                "{} was issued for device {reported} and the deployment names {device_id}: the \
+                 crypto store is bound to the device",
+                source.as_str()
             );
         }
     }
 
     let store_dir = state_dir.map(|dir| dir.join(owner_device::STORE_SUBDIR));
     if clear_store {
-        clear_acting_store(store_dir.as_deref(), device_id);
+        clear_owner_device_store(store_dir.as_deref(), device_id);
     }
     let session = MatrixSession {
         meta: matrix_sdk::SessionMeta {
@@ -1779,11 +1803,11 @@ async fn open_acting_device(
             warn!(
                 %error,
                 device_id,
-                "the acting device's crypto store could not be opened: clearing it and starting \
+                "the owner device's crypto store could not be opened: clearing it and starting \
                  this device on a clean one. Nothing is lost — the device Twalk acts through reads \
                  no history and holds no room keys anybody will ask for again"
             );
-            clear_acting_store(store_dir.as_deref(), device_id);
+            clear_owner_device_store(store_dir.as_deref(), device_id);
             open_with_store(homeserver_url, store_dir.as_deref(), session).await
         }
         Err(error) => Err(error),
@@ -1804,17 +1828,17 @@ async fn open_with_store(
         Some(dir) => builder.sqlite_store(dir, None).build().await,
         None => builder.build().await,
     }
-    .context("failed to build the acting device's client")?;
+    .context("failed to build the owner device's client")?;
     client
         .restore_session(session)
         .await
-        .context("failed to start from the acting device's token")?;
+        .context("failed to start from the owner device's token")?;
     Ok(client)
 }
 
-/// Removes the crypto store the previous acting device built. Never fatal: a
+/// Removes the crypto store the previous owner device built. Never fatal: a
 /// store that cannot be removed is reported and the open below says what it means.
-fn clear_acting_store(store_dir: Option<&Path>, for_device: &str) {
+fn clear_owner_device_store(store_dir: Option<&Path>, for_device: &str) {
     let Some(dir) = store_dir else {
         return;
     };
@@ -1825,13 +1849,13 @@ fn clear_acting_store(store_dir: Option<&Path>, for_device: &str) {
         Ok(()) => info!(
             store = %dir.display(),
             device_id = for_device,
-            "cleared the previous acting device's crypto store: a crypto store belongs to one \
+            "cleared the previous owner device's crypto store: a crypto store belongs to one \
              device, and this one reads no history"
         ),
         Err(error) => warn!(
             store = %dir.display(),
             %error,
-            "could not clear the previous acting device's crypto store"
+            "could not clear the previous owner device's crypto store"
         ),
     }
 }
@@ -1848,7 +1872,7 @@ struct Handovers {
     /// The device's own sync loop needs them to tell a portal invitation from a
     /// room a stranger built, exactly as the startup path does.
     bridge_bots: BridgeBots,
-    acting: Arc<ActingDevice>,
+    held: Arc<OwnerDevice>,
     metrics: Arc<Metrics>,
 }
 
@@ -1954,15 +1978,29 @@ async fn receive_handovers(client: &Client, events: &[ProcessedToDeviceEvent], c
         // it needs. The room that offered this device is the room the
         // acknowledgement belongs in.
         let mut taken = None;
-        let mut refusal = owner_device::handover_in(&delivered, &content, None, &ctx.owner);
+        // With no offer the policy refuses on the device, so that is the reason to
+        // report unless an offer produced a **better** one: `Unreadable` and
+        // `NotTheOwners` are facts about the delivery itself and say the same thing
+        // whichever offer was passed, while a second `UnexpectedSender` says only
+        // that another room expects another device. Keeping the last refusal would
+        // report whichever offer happened to be read last.
+        let mut refusal = owner_device::NotAHandover::UnexpectedSender;
         for (room, offered) in &offers {
             match owner_device::handover_in(&delivered, &content, Some(offered), &ctx.owner) {
                 Ok(handover) => {
                     taken = Some((room.clone(), handover));
                     break;
                 }
-                Err(why) => refusal = Err(why),
+                Err(why) => {
+                    if why != owner_device::NotAHandover::UnexpectedSender {
+                        refusal = why;
+                    }
+                }
             }
+        }
+        if offers.is_empty() {
+            refusal = owner_device::handover_in(&delivered, &content, None, &ctx.owner)
+                .expect_err("a handover with nothing offered is refused");
         }
         match taken {
             Some((room, handover)) => {
@@ -1970,7 +2008,7 @@ async fn receive_handovers(client: &Client, events: &[ProcessedToDeviceEvent], c
                 take_the_handover(&room, handover, &offered_by, ctx).await;
             }
             None => {
-                let why = refusal.expect_err("nothing was taken, so the policy refused");
+                let why = refusal;
                 ctx.metrics.record_handover_refused(why);
                 warn!(
                     why = why.as_str(),
@@ -2100,17 +2138,17 @@ async fn take_the_handover(
     offered_by: &str,
     ctx: &Handovers,
 ) {
-    let replacing = ctx.acting.device_id().await;
+    let replacing = ctx.held.device_id().await;
     let clear_store = replacing
         .as_deref()
         .is_some_and(|held| held != handover.device_id);
-    let acting = match open_acting_device(
+    let opened = match open_owner_device(
         &ctx.homeserver_url,
         ctx.state_dir.as_deref(),
         &ctx.owner,
         &handover.access_token,
         &handover.device_id,
-        "the credential the owner's browser handed over",
+        CredentialFrom::AHandover,
         clear_store,
     )
     .await
@@ -2150,8 +2188,8 @@ async fn take_the_handover(
         ),
     }
 
-    ctx.acting
-        .hold(acting, ctx.bridge_bots.clone(), ctx.metrics.clone())
+    ctx.held
+        .hold(opened, ctx.bridge_bots.clone(), ctx.metrics.clone())
         .await;
     ctx.metrics.record_handover_held();
 
@@ -3082,7 +3120,7 @@ const CONSUMER_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// for as long as the Sensor runs.
 async fn consume_approved_replies(
     client: Client,
-    acting_device: Arc<ActingDevice>,
+    owner_device: Arc<OwnerDevice>,
     jetstream: async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
@@ -3091,7 +3129,7 @@ async fn consume_approved_replies(
     loop {
         match run_approved_reply_consumer(
             &client,
-            &acting_device,
+            &owner_device,
             &jetstream,
             retry_base,
             max_attempts,
@@ -3110,7 +3148,7 @@ async fn consume_approved_replies(
 /// consumer and processes its messages until the stream ends.
 async fn run_approved_reply_consumer(
     client: &Client,
-    acting_device: &ActingDevice,
+    owner_device: &OwnerDevice,
     jetstream: &async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
@@ -3194,7 +3232,7 @@ async fn run_approved_reply_consumer(
         // revoked while this process runs, which is the whole of #229 — and since
         // #228 a credential can *arrive* while it runs too, so the device itself
         // is read here and not captured when the consumer was built.
-        let held = acting_device.current().await;
+        let held = owner_device.current().await;
         let acting = match &held {
             Some(device) if metrics.owner_device_can_act() => Acting::OwnersDevice(device),
             Some(_) => Acting::CredentialGone,

@@ -184,7 +184,10 @@
 			// (#228). Only when the room is `ready`: that outcome is precisely the
 			// one that says this browser's crypto machine can enumerate the Sensor's
 			// devices, which is what stops the send below from going out empty.
-			if (handover.kind === 'ready' && crypto !== null) {
+			// `signedIn.sensor` is read again rather than asserted: a `ready` room
+			// implies the deployment named a Sensor — that is the outcome
+			// `no-sensor` exists for — and narrowing says so without a cast.
+			if (handover.kind === 'ready' && crypto !== null && signedIn.sensor !== null) {
 				step = 'credential';
 				const { handOverTheDevice } = await import('$lib/matrix/credential');
 				credential = await handOverTheDevice({
@@ -192,7 +195,7 @@
 					userId: session.userId,
 					password,
 					accessToken: session.accessToken,
-					sensorUserId: signedIn.sensor as string,
+					sensorUserId: signedIn.sensor,
 					roomId: handover.roomId,
 					crypto
 				});
@@ -340,7 +343,7 @@
 						{:else if credential.kind === 'sensor-untracked'}
 							{$t('handover.credential.problem.untracked')}
 						{:else if credential.kind === 'not-encrypted-to'}
-							{$t('handover.credential.problem.notEncrypted')}
+							{$t('handover.credential.problem.notEncrypted', { name: ACTING_DEVICE_NAME })}
 						{:else}
 							{$t('handover.credential.problem.failed', { detail: credential.detail })}
 						{/if}

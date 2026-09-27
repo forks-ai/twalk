@@ -182,6 +182,21 @@ describe('handing the device over', () => {
 		}
 	});
 
+	it('talks to the homeserver and to nothing else', async () => {
+		const server = homeserver();
+		await hand(server, machine());
+
+		// ADR 0034's claim is about where the credential can possibly go, so it is
+		// asserted over every request rather than at the one call that carries it:
+		// this module reaches one origin, and the Companion Gateway is not it. The
+		// recorded fake throws on any path it does not serve, so a request to
+		// another host would fail this test loudly rather than quietly.
+		expect(server.made.length).toBeGreaterThan(2);
+		for (const request of server.made) {
+			expect(request.path.startsWith('/_matrix/client/'), request.path).toBe(true);
+		}
+	});
+
 	it('is not held when the Sensor said nothing', async () => {
 		const outcome = await hand(homeserver({ acknowledges: null }), machine());
 
@@ -213,8 +228,23 @@ describe('handing the device over', () => {
 		expect(machinery.sent).toEqual([]);
 	});
 
-	it('says how many devices the batch missed rather than waiting for an answer', async () => {
-		const outcome = await hand(homeserver(), machine({ devices: ['ONE', 'TWO'], encryptsTo: 1 }));
+	it('is held when a short batch still reached the Sensor, because the Sensor said so', async () => {
+		// The batch is already on the wire by the time its length is known, so a
+		// short one is not a failure on its own: the Sensor has one live device and
+		// may have a stale one this browser's machine still lists. What this design
+		// trusts is the acknowledgement, and it arrived.
+		const outcome = await hand(homeserver(), machine({ devices: ['LIVE', 'STALE'], encryptsTo: 1 }));
+
+		expect(outcome).toEqual({ kind: 'held', deviceId: CREATED_DEVICE });
+	});
+
+	it('says how many devices the batch missed when the Sensor then said nothing', async () => {
+		// Both facts, and in this order: no acknowledgement, and here is the thing
+		// that most likely explains it.
+		const outcome = await hand(
+			homeserver({ acknowledges: null }),
+			machine({ devices: ['ONE', 'TWO'], encryptsTo: 1 })
+		);
 
 		expect(outcome).toEqual({ kind: 'not-encrypted-to', missing: 1, deviceId: CREATED_DEVICE });
 	});
