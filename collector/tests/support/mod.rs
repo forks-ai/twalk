@@ -25,6 +25,10 @@ pub struct Run {
     pub dir: tempfile::TempDir,
     pub mail: String,
     pub calendar: String,
+    /// This run's own stamp, the one both connection ids are built from: what
+    /// a fixture keys on when it needs nothing but to be this run's
+    /// (`Bus::publish_event` says why it must).
+    pub stamp: String,
     /// The bus's head when the run was prepared: what it publishes is after
     /// it, and the shared bus's history is not walked at every read.
     pub since: u64,
@@ -52,6 +56,7 @@ impl Run {
             dir,
             mail: format!("mail-{name}-{unique}"),
             calendar: format!("cal-{name}-{unique}"),
+            stamp: format!("{name}-{unique}"),
             since,
         })
     }

@@ -23,6 +23,13 @@
 //! `Drop` that kills the runtime and removes the containers. Containers left
 //! behind because a run was killed outside Rust's control go with
 //! `docker rm -f $(docker ps -aq --filter name=h23-)`.
+//!
+//! A stream of this run's own is also why a fixture here may key its event id
+//! on a literal, where the collector's, the Gateway's and the Sensor's suites
+//! may not (#390, `Bus::publish_event`): deduplication is a property of a
+//! stream, and this one is named for the run — pid and nanoseconds — so it is
+//! born with nothing of an earlier run in it to absorb. Its deletion at
+//! shutdown is tidiness and not the safeguard.
 
 use std::path::PathBuf;
 use std::process::Stdio;

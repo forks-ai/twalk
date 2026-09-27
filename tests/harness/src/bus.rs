@@ -83,6 +83,21 @@ impl Bus {
     /// Publishes a CloudEvent the way a component does: with `Nats-Msg-Id`
     /// set to the event's `id`, so the bus de-duplicates a re-published
     /// event.
+    ///
+    /// Which is why **a fixture whose arrival a test waits for has to carry
+    /// its run in its id** (#390). The deduplication window is the Sensor's
+    /// policy, not this function's: on any stack a Sensor has started against
+    /// it is a day ([ADR 0037]), and the shared `twalk` stream of the
+    /// long-lived test stack is such a stack — the Sensor's, the collector's
+    /// and the Gateway's suites all publish there. So a fixture keyed on a
+    /// literal is published once a day and absorbed for the rest of it: the
+    /// event never arrives, and what the test reports is a timeout on
+    /// whatever it was waiting on — a log line, a report on the bus — with
+    /// nothing in it that names deduplication. A suite that gives itself a
+    /// stream of its own is the exception, because a stream born empty at the
+    /// start of a run has nothing of an earlier one to absorb.
+    ///
+    /// [ADR 0037]: ../../../docs/architecture/adr/0037-the-bus-keeps-ninety-days-and-two-gigabytes-and-no-more.md
     pub async fn publish_event(&self, subject: &str, event: &Value) -> Result<()> {
         let id = event["id"].as_str().context("the event has no string id")?;
         let mut headers = async_nats::HeaderMap::new();
