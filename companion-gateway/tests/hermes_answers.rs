@@ -786,12 +786,28 @@ async fn a_draft_is_checked_against_the_calendar_and_the_suggestion_says_what_wa
         "a draft offering an hour the owner is busy in was published anyway"
     );
 
+    // The second wake reads for itself, under its own reference — which is
+    // what an agent does, and what makes the path of one attempt a thing that
+    // exists (#395).
+    let second = hermes_reference("assistant", &trigger_id, 2);
+    let query = harness::freebusy_query(connection, "2026-10-12T06:00:00Z", "2026-10-12T18:00:00Z");
+    let timestamp = harness::rfc3339_now();
+    let (status, read) = harness::freebusy_read(
+        &running.base,
+        &query,
+        &harness::freebusy_signature(&query, &timestamp),
+        &timestamp,
+        Some(&second),
+    )
+    .await?;
+    assert_eq!(status, 200, "the second wake's own read was refused: {read}");
+
     // An hour inside a gap: published, and the suggestion says how many
     // times were checked — the fact the approval screen and the clerk's post
     // both draw their line from.
     let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
     let push = hermes_push(&harness::hermes_answer_proposing(
-        &hermes_reference("assistant", &trigger_id, 2),
+        &second,
         "Lundi 12 à 16h ?",
         &["2026-10-12T14:00:00Z"],
     ));
@@ -809,6 +825,33 @@ async fn a_draft_is_checked_against_the_calendar_and_the_suggestion_says_what_wa
     );
     validate_against_contract(&published, "persona.suggest.produced")
         .context("the suggestion the check marks is one the contract allows")?;
+
+    // And what the owner reads about that draft is **that draft's** work
+    // (#395): one read, its own.
+    //
+    // Three rows exist in the journal for this message by now — the first
+    // wake's read, this one's, and the check the Gateway made of the time it
+    // offered — and the screen shows one. The other two are a draft that was
+    // never published and a read this process made itself, and neither is
+    // *what your assistant did*. Before this, a post on the reference
+    // deployment carried twelve such lines and the draft was the thirteenth.
+    let published_id = published["id"].as_str().context("the suggestion's id")?;
+    let (status, listing) = running
+        .get(&format!("/api/suggestions/{published_id}"))
+        .await?;
+    assert_eq!(status, 200, "{listing}");
+    let path = listing["path"].as_array().context("a path")?;
+    assert_eq!(
+        path.len(),
+        1,
+        "the path is not this attempt's alone: {:?}",
+        path.iter()
+            .map(|step| (step["kind"].clone(), step["at"].clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(path[0]["kind"], "freebusy", "{listing}");
+    assert_eq!(path[0]["from"], "2026-10-12T06:00:00Z", "{listing}");
+    assert_eq!(path[0]["outcome"], "served", "{listing}");
 
     // A reply that names an hour and offers none: published, and said to be
     // unverified. Not refused — this is the case the ticket refuses to

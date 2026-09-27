@@ -391,6 +391,11 @@ impl ReadRefusal {
     }
 }
 
+/// Who made a read (#395): the drafting agent, through the signed route.
+pub const MADE_BY_HERMES: &str = "hermes";
+/// Or this process, checking a time a draft offered (#383).
+pub const MADE_BY_GATEWAY: &str = "gateway";
+
 /// One read, as the store records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HermesRead {
@@ -403,6 +408,12 @@ pub struct HermesRead {
     pub outcome: String,
     /// How many intervals were answered; `None` on a refusal.
     pub intervals: Option<u64>,
+    /// [`MADE_BY_HERMES`] or [`MADE_BY_GATEWAY`] (#395).
+    ///
+    /// Both are reads of the owner's calendar and both belong in their
+    /// journal. Only one of them is *what their assistant did*, which is what
+    /// the approval screen and the clerk's post draw.
+    pub made_by: &'static str,
 }
 
 /// What one event carries, as the collector answered (#355). Counts, a
@@ -481,25 +492,34 @@ impl Reads {
     /// whatever the outcome, since the point of the record is the reads
     /// that were refused as much as the ones that were served.
     pub async fn read(&self, request: &ReadRequest) -> Result<FreeBusy, ReadRefusal> {
-        self.record(self.serve(request).await, request)
+        self.record(self.serve(request).await, request, MADE_BY_HERMES)
     }
 
     /// The same, for the Gateway checking a time the draft proposed (#383):
     /// the connection is known rather than taken from a signature, and the
     /// read is recorded exactly as every other is — the owner's journal shows
     /// the check that was made on their behalf.
+    ///
+    /// Recorded as the **Gateway's** (#395), so that the journal holds it and
+    /// *what your assistant did* does not: drawn there it read as the agent
+    /// looking at the same week twice.
     async fn read_checked(
         &self,
         connection: &str,
         request: &ReadRequest,
     ) -> Result<FreeBusy, ReadRefusal> {
-        self.record(self.serve_checked(connection, request).await, request)
+        self.record(
+            self.serve_checked(connection, request).await,
+            request,
+            MADE_BY_GATEWAY,
+        )
     }
 
     fn record(
         &self,
         outcome: Result<FreeBusy, ReadRefusal>,
         request: &ReadRequest,
+        made_by: &'static str,
     ) -> Result<FreeBusy, ReadRefusal> {
         let (label, intervals) = match &outcome {
             Ok(answer) => ("served".to_owned(), Some(answer.busy.len() as u64)),
@@ -525,6 +545,7 @@ impl Reads {
             delivery: cut(&request.delivery),
             outcome: label,
             intervals,
+            made_by,
         };
         if let Err(error) = self.store.record_hermes_read(&record) {
             // Said loudly, and the read still answered: a record that could
