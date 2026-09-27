@@ -36,6 +36,17 @@
 //! declare their primary address; a service's list would be a convenience that
 //! silently narrows the answer.
 //!
+//! # One concept, and the word for it
+//!
+//! What this module holds is the collector's half of `CONTEXT.md`'s **owner
+//! identity**: the set of identities the owner's own traffic arrives under,
+//! confirmed by the deployment because it cannot be derived from a service. On
+//! the Sensor's side those are Matrix IDs (network ghosts); here they are the
+//! addresses of a mailbox, which is why the type speaks of addresses and the
+//! variable an operator sets is named for what they would call them. The rule is
+//! the same on either side: an identity the deployment has not confirmed stays a
+//! contact, because unknown is not the owner.
+//!
 //! Nothing here reads a mailbox or a calendar. It is one question — *is this
 //! address the owner's?* — asked in five places that used to each lowercase a
 //! string and compare it.
@@ -51,8 +62,10 @@ pub struct Owner {
     /// a refusal names, what the reply path prefers to send as, and what the
     /// consent cache knows them by.
     primary: String,
-    /// `COLLECTOR_OWNER_ALIASES`: every other address that is theirs. Never
-    /// contains `primary`, never empty strings, and holds no duplicates.
+    /// `COLLECTOR_OWNER_ALIASES`: every other address that is theirs — each one an
+    /// **owner identity** in `CONTEXT.md`'s terms, spelled as an address because
+    /// that is what a mailbox compares. Never contains `primary`, never empty
+    /// strings, and holds no duplicates.
     aliases: Vec<String>,
 }
 
@@ -110,6 +123,22 @@ impl Owner {
     /// ID to name them by (ADR 0021).
     pub fn mailtos(&self) -> impl Iterator<Item = String> + '_ {
         self.addresses().map(crate::side::owner_mailto)
+    }
+
+    /// Whether this **subject** is the owner's: `holds`, for the places that hold
+    /// a `mailto:` rather than an address — an event's organizer and its
+    /// participants. Here rather than at the caller, so that the one question is
+    /// asked in one place whichever spelling it arrives in.
+    pub fn holds_mailto(&self, subject: &str) -> bool {
+        self.mailtos()
+            .any(|mine| mine == crate::side::owner_mailto(subject))
+    }
+
+    /// The owner named by one address and holding no other: what a test that is
+    /// not about this type wants, in one place rather than in each test module.
+    #[cfg(test)]
+    pub fn named(email: &str) -> Self {
+        Self::new(email, Vec::<String>::new())
     }
 }
 
@@ -179,7 +208,7 @@ mod tests {
     fn an_owner_with_no_alias_is_exactly_what_it_was() {
         // The deployment that declares nothing must behave as it did, because
         // this ticket is a fix and not a change of policy.
-        let owner = Owner::new(PRIMARY, Vec::<String>::new());
+        let owner = Owner::named(PRIMARY);
 
         assert!(owner.aliases().is_empty());
         assert!(owner.holds(PRIMARY));

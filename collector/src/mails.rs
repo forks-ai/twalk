@@ -446,7 +446,10 @@ impl Mailbox {
             .already_answered(&session, credential, account, &sent_id, &reply.event_id)
             .await?
         {
-            return Ok(Sent { already_sent: true });
+            return Ok(Sent {
+                already_sent: true,
+                posted_as: None,
+            });
         }
         let sending = jmap::identity_for(&response.result(1)?, &self.owner).ok_or_else(|| {
             SendError::Permanent(format!(
@@ -525,10 +528,10 @@ impl Mailbox {
                 SendError::Permanent("the mail answered could not be read back".to_owned())
             })?;
         outbound::original_is_from_recipient(reply, &original).map_err(SendError::Permanent)?;
+        let posted_as = sending.email.clone();
         let sender = outbound::Sender {
             account_id: account.to_owned(),
-            identity_id: sending.id,
-            owner_email: sending.email,
+            sending,
             drafts_id,
             sent_id,
         };
@@ -554,6 +557,7 @@ impl Mailbox {
         if submitted.pointer("/created/submission").is_some() {
             return Ok(Sent {
                 already_sent: false,
+                posted_as: Some(posted_as),
             });
         }
         // The submission was refused: the draft is not left behind, and the
@@ -746,11 +750,16 @@ async fn json_of(response: reqwest::Response) -> Result<Value, SideError> {
 }
 
 /// What `send_reply` came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sent {
     /// The mailbox already held a reply for this approval: nothing was sent
     /// again, and the report says it reached the contact all the same.
     pub already_sent: bool,
+    /// The address the reply actually left as, when this run is what sent it
+    /// (#322). `None` for a reply already in Sent: this run chose no identity,
+    /// and the report then names the address the owner is known by rather than
+    /// guessing at what an earlier run used.
+    pub posted_as: Option<String>,
 }
 
 /// `EmailSubmission/set` refusal types (RFC 8621 §7.5) a retry cannot

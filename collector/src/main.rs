@@ -155,19 +155,22 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
         );
     }
     // Which address answered, and not merely that none mismatched: a mailbox that
-    // answers an alias is the ordinary case (#322), and an operator reading this
-    // is checking their own identity.
+    // answers another address of the owner's is the ordinary case (#322), and an
+    // operator reading this is checking their own identity. Printed whether or not
+    // every service answered, because a deployment where one service is silent is
+    // the reference deployment's own shape (#321) and the address that *did*
+    // answer is the fact being checked.
     let answered = identities
         .owner_matches(&config.owner)
         .into_iter()
         .map(|(service, account)| format!("{service} as {account}"))
         .collect::<Vec<_>>()
         .join(", ");
+    if !answered.is_empty() {
+        eprintln!("   Answered as the owner: {answered}.");
+    }
     if unanswered.is_empty() {
-        eprintln!(
-            "Both services answer as {}. The collector can start.",
-            answered
-        );
+        eprintln!("Every service answers as the owner. The collector can start.");
     } else {
         // The grant is the owner's as far as anyone answered; what did not
         // answer is said, with the state the collector will report for it.

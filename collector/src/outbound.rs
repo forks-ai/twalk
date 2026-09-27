@@ -186,8 +186,13 @@ impl ApprovedReply {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sender {
     pub account_id: String,
-    pub identity_id: String,
-    pub owner_email: String,
+    /// The identity the reply leaves as, **and its own address** (#322): the
+    /// `From` and the envelope's `mailFrom` are that address and not the one the
+    /// owner is named by, because a mailbox that can only send as another address
+    /// of theirs would otherwise be asked to send a mail it is entitled to
+    /// refuse. `jmap::identity_for` keeps the two together for that reason, and
+    /// unpacking them here would be undoing it.
+    pub sending: crate::jmap::Sending,
     pub drafts_id: String,
     pub sent_id: String,
 }
@@ -206,11 +211,14 @@ pub fn reply_calls(
 ) -> Vec<(&'static str, Value)> {
     let Sender {
         account_id,
-        identity_id,
-        owner_email,
+        sending,
         drafts_id,
         sent_id,
     } = sender;
+    let crate::jmap::Sending {
+        id: identity_id,
+        email: sending_address,
+    } = sending;
     let subject = if original
         .subject
         .trim_start()
@@ -238,7 +246,7 @@ pub fn reply_calls(
     let email = json!({
         "mailboxIds": { drafts_id: true },
         "keywords": { "$draft": true, "$seen": true },
-        "from": [{ "name": null, "email": owner_email }],
+        "from": [{ "name": null, "email": sending_address }],
         "to": [{ "name": original.from.name, "email": recipient_address(&reply.recipient) }],
         "subject": subject,
         "inReplyTo": [bare(&reply.in_reply_to)],
@@ -266,7 +274,7 @@ pub fn reply_calls(
                         "emailId": "#reply",
                         "identityId": identity_id,
                         "envelope": {
-                            "mailFrom": { "email": owner_email },
+                            "mailFrom": { "email": sending_address },
                             "rcptTo": [{ "email": recipient_address(&reply.recipient) }]
                         }
                     }
@@ -460,6 +468,48 @@ mod tests {
         assert!(ApprovedReply::parse(&malformed, &held).is_err());
     }
 
+    /// The reply leaves as the identity that sends it, in both places a mail
+    /// carries an address (#322).
+    ///
+    /// The fallback exists because a mailbox may only be able to send as another
+    /// address of the owner's; a reply built with the address they are *named* by
+    /// would be one the server is entitled to refuse, per reply and for ever. So
+    /// the assertion is on what `reply_calls` builds and not only on which identity
+    /// was chosen — the test that stops at the choice passes while the mail is
+    /// wrong.
+    #[test]
+    fn the_from_and_the_envelope_are_the_sending_identitys_own_address() {
+        const AS_THE_MAILBOX_SPELLS_IT: &str = "Michel.Maudet@example.com";
+        let held = vec!["mail-linagora".to_owned()];
+        let Parsed::Ours(reply) = ApprovedReply::parse(&approval(), &held).unwrap() else {
+            panic!()
+        };
+        let sender = Sender {
+            account_id: "u1".to_owned(),
+            sending: crate::jmap::Sending {
+                id: "id-alias".to_owned(),
+                email: AS_THE_MAILBOX_SPELLS_IT.to_owned(),
+            },
+            drafts_id: "drafts-1".to_owned(),
+            sent_id: "sent-1".to_owned(),
+        };
+
+        let calls = reply_calls(&reply, &original(), &sender);
+
+        let (_, set) = &calls[0];
+        assert_eq!(
+            set["create"]["reply"]["from"][0]["email"], AS_THE_MAILBOX_SPELLS_IT,
+            "the `From` is the identity's address"
+        );
+        let (_, submission) = &calls[1];
+        assert_eq!(submission["create"]["submission"]["identityId"], "id-alias");
+        assert_eq!(
+            submission["create"]["submission"]["envelope"]["mailFrom"]["email"],
+            AS_THE_MAILBOX_SPELLS_IT,
+            "and so is the envelope's, which is what the server compares"
+        );
+    }
+
     #[test]
     fn the_reply_goes_to_the_sender_alone_in_the_thread_from_the_owner_and_lands_in_sent() {
         let held = vec!["mail-linagora".to_owned()];
@@ -468,8 +518,10 @@ mod tests {
         };
         let sender = Sender {
             account_id: "u1".to_owned(),
-            identity_id: "id-owner".to_owned(),
-            owner_email: "michel@example.com".to_owned(),
+            sending: crate::jmap::Sending {
+                id: "id-owner".to_owned(),
+                email: "michel@example.com".to_owned(),
+            },
             drafts_id: "drafts-1".to_owned(),
             sent_id: "sent-1".to_owned(),
         };

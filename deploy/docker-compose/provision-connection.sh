@@ -13,13 +13,15 @@
 # to be copied afterwards.
 #
 # What happens, in order: the collector prints a link; you open it in a
-# browser and sign in as COLLECTOR_OWNER_EMAIL; the SSO redirects the browser
+# browser and sign in as COLLECTOR_OWNER_EMAIL — or as any address named in
+# COLLECTOR_OWNER_ALIASES, since a mailbox usually answers to several and the
+# collector prints which one answered (#322); the SSO redirects the browser
 # to COLLECTOR_OIDC_REDIRECT_URI, where nothing listens; you copy the whole
 # address from the address bar and paste it here. The collector exchanges the
 # code with PKCE, refuses a grant that came with no refresh token, writes the
-# grant, and asks both services who the token belongs to — printing what they
-# answered, and never a token. A grant for another account is refused there
-# and then.
+# grant, and asks both services who the token belongs to — printing which
+# address each answered with, and never a token. A grant for an account that is
+# none of the owner's addresses is refused there and then.
 #
 # Idempotent: a grant already in the volume is left alone and this script
 # says so; --renew replaces it explicitly — what you do after revoking the

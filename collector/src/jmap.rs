@@ -455,20 +455,23 @@ pub fn email_by_message_id(account_id: &str, message_id: &str) -> (&'static str,
 pub fn identity_for(identity_get: &Value, owner: &crate::owner::Owner) -> Option<Sending> {
     let identities = identity_get.get("list").and_then(Value::as_array)?;
     let with_address = |wanted: &str| -> Option<Sending> {
-        identities
-            .iter()
-            .find(|identity| {
-                identity
-                    .get("email")
-                    .and_then(Value::as_str)
-                    .is_some_and(|email| email.trim().eq_ignore_ascii_case(wanted))
-            })
-            .and_then(|identity| identity.get("id"))
-            .and_then(Value::as_str)
-            .map(|id| Sending {
-                id: id.to_owned(),
-                email: wanted.to_owned(),
-            })
+        let identity = identities.iter().find(|identity| {
+            identity
+                .get("email")
+                .and_then(Value::as_str)
+                .is_some_and(|email| email.trim().eq_ignore_ascii_case(wanted))
+        })?;
+        // The address **as the identity spells it**, not as the operator declared
+        // it: what leaves is the identity's, ADR 0038 rests on the submission
+        // being the identity's own, and a server is entitled to compare the two.
+        Some(Sending {
+            id: identity.get("id").and_then(Value::as_str)?.to_owned(),
+            email: identity
+                .get("email")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_owned(),
+        })
     };
     owner.addresses().find_map(with_address)
 }
@@ -903,7 +906,14 @@ pub fn frontier(mail: &Mail, owner: &crate::owner::Owner) -> Result<(), Dropped>
 
 /// `direct` when the owner was the only recipient, `group` otherwise.
 pub fn audience(mail: &Mail, owner: &crate::owner::Owner) -> &'static str {
-    let only_the_owner = mail.to.len() == 1 && owner.holds(&mail.to[0].email) && mail.cc.is_empty();
+    // "The owner was the only recipient" reads over **every address they hold**
+    // (#322), which is what the sentence meant all along: a mail addressed to
+    // their other address alone is a mail to them, and one addressed to two of
+    // their addresses is still a mail to nobody else. With one address compared,
+    // both were published as a group's.
+    let only_the_owner = !mail.to.is_empty()
+        && mail.to.iter().all(|person| owner.holds(&person.email))
+        && mail.cc.is_empty();
     if only_the_owner {
         "direct"
     } else {
@@ -1111,12 +1121,6 @@ impl Envelopes {
 
 #[cfg(test)]
 mod tests {
-
-    /// The owner, named by one address and holding no other: what every test here
-    /// passed as a string before #322 gave the question a type.
-    fn an_owner(email: &str) -> crate::owner::Owner {
-        crate::owner::Owner::new(email, Vec::<String>::new())
-    }
     use super::*;
 
     /// #331's other half: a reply already in Sent is recognised by the
@@ -1278,7 +1282,7 @@ mod tests {
             "mail.example.com",
             "u1",
             "inbox-1",
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
         );
         let event = envelopes.message_received(&mail, Consent::Granted, "2026-09-21T08:15:03Z");
         let fixture: Value = serde_json::from_str(include_str!(
@@ -1312,7 +1316,7 @@ mod tests {
             "h",
             "u1",
             "i",
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
         );
         let event = envelopes.message_received(&mail, Consent::Pending, "2026-09-21T08:15:03Z");
         assert_eq!(
@@ -1341,44 +1345,53 @@ mod tests {
     #[test]
     fn the_frontier_drops_on_a_positive_signal_only() {
         let mut mail = Mail::parse(&email_object()).unwrap();
-        assert_eq!(frontier(&mail, &an_owner("michel@example.com")), Ok(()));
-        assert_eq!(audience(&mail, &an_owner("Michel@example.com")), "direct");
+        assert_eq!(
+            frontier(&mail, &crate::owner::Owner::named("michel@example.com")),
+            Ok(())
+        );
+        assert_eq!(
+            audience(&mail, &crate::owner::Owner::named("Michel@example.com")),
+            "direct"
+        );
 
         mail.auto_submitted = Some("no".to_owned());
         assert_eq!(
-            frontier(&mail, &an_owner("michel@example.com")),
+            frontier(&mail, &crate::owner::Owner::named("michel@example.com")),
             Ok(()),
             "Auto-Submitted: no is a person"
         );
         mail.auto_submitted = Some("auto-generated".to_owned());
         assert_eq!(
-            frontier(&mail, &an_owner("michel@example.com")),
+            frontier(&mail, &crate::owner::Owner::named("michel@example.com")),
             Err(Dropped::NonHumanSender)
         );
         mail.auto_submitted = None;
         mail.list_unsubscribe = Some("<https://example.org/unsubscribe>".to_owned());
         assert_eq!(
-            frontier(&mail, &an_owner("michel@example.com")),
+            frontier(&mail, &crate::owner::Owner::named("michel@example.com")),
             Err(Dropped::NonHumanSender)
         );
         mail.list_unsubscribe = None;
         mail.precedence = Some("Bulk".to_owned());
         assert_eq!(
-            frontier(&mail, &an_owner("michel@example.com")),
+            frontier(&mail, &crate::owner::Owner::named("michel@example.com")),
             Err(Dropped::NonHumanSender)
         );
         mail.precedence = Some("first-class".to_owned());
-        assert_eq!(frontier(&mail, &an_owner("michel@example.com")), Ok(()));
+        assert_eq!(
+            frontier(&mail, &crate::owner::Owner::named("michel@example.com")),
+            Ok(())
+        );
 
         mail.has_itip_part = true;
         assert_eq!(
-            frontier(&mail, &an_owner("michel@example.com")),
+            frontier(&mail, &crate::owner::Owner::named("michel@example.com")),
             Err(Dropped::CalendarInvitation)
         );
         mail.has_itip_part = false;
         mail.from.email = "michel@example.com".to_owned();
         assert_eq!(
-            frontier(&mail, &an_owner("Michel@Example.com")),
+            frontier(&mail, &crate::owner::Owner::named("Michel@Example.com")),
             Err(Dropped::Owner)
         );
 
@@ -1386,7 +1399,10 @@ mod tests {
             name: None,
             email: "bob@example.org".to_owned(),
         });
-        assert_eq!(audience(&mail, &an_owner("michel@example.com")), "group");
+        assert_eq!(
+            audience(&mail, &crate::owner::Owner::named("michel@example.com")),
+            "group"
+        );
     }
 
     /// Every address the owner holds is theirs, in the three places that used to
@@ -1405,7 +1421,7 @@ mod tests {
         mail.from.email = ALIAS.to_owned();
         assert_eq!(frontier(&mail, &owner), Err(Dropped::Owner));
         assert_eq!(
-            frontier(&mail, &an_owner(PRIMARY)),
+            frontier(&mail, &crate::owner::Owner::named(PRIMARY)),
             Ok(()),
             "and an undeclared alias is exactly what it was: a contact. That is what the variable \
              buys, and what its absence costs"
@@ -1420,7 +1436,7 @@ mod tests {
         }];
         assert_eq!(audience(&mail, &owner), "direct");
         assert_eq!(
-            audience(&mail, &an_owner(PRIMARY)),
+            audience(&mail, &crate::owner::Owner::named(PRIMARY)),
             "group",
             "a mail to an address nobody declared is a mail to somebody else"
         );
@@ -1459,9 +1475,10 @@ mod tests {
             identity_for(&identities(&[("i2", "MICHEL.MAUDET@linagora.com")]), &owner),
             Some(Sending {
                 id: "i2".to_owned(),
-                email: ALIAS.to_owned()
+                email: "MICHEL.MAUDET@linagora.com".to_owned()
             }),
-            "the address recorded is the owner's, spelled as they declared it"
+            "the address recorded is the **identity's own**, as the mailbox spells it: what leaves \
+             is the identity's, and a server is entitled to compare the two"
         );
 
         // None of theirs: still nothing, and the caller still says so once and

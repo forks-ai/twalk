@@ -160,7 +160,14 @@ async fn run(
         match mailbox.send_reply(&reply, &token).await {
             Ok(sent) => {
                 metrics.record_published("persona.reply.approved.posted");
-                report_posted(jetstream, &message, &reply.event_id, owner).await;
+                report_posted(
+                    jetstream,
+                    &message,
+                    &reply.event_id,
+                    owner,
+                    sent.posted_as.as_deref(),
+                )
+                .await;
                 if let Err(error) = message.ack().await {
                     warn!(id = %reply.event_id, %error, "ack failed after a sent reply");
                 }
@@ -296,6 +303,8 @@ async fn report_posted(
     message: &async_nats::jetstream::Message,
     event_id: &str,
     owner: &crate::owner::Owner,
+    // The address this run's submission left as, when this run sent it.
+    posted_as: Option<&str>,
 ) {
     let mut headers = async_nats::header::HeaderMap::new();
     headers.insert(
@@ -306,11 +315,13 @@ async fn report_posted(
     headers.insert(outbound::POSTED_REACH_HEADER, "contact");
     headers.insert(
         outbound::POSTED_AS_HEADER,
-        // The address the owner is **named** by, whichever of theirs the reply
-        // left as (#322): `posted-as` is the owner's subject, the same one the
-        // calendar's envelopes and the consent cache use, and not the transport's
-        // `From`. One owner, one subject.
-        crate::side::owner_mailto(owner.primary()).as_str(),
+        // What the reply was posted **by**, which is what `openapi.yaml` defines
+        // this header as and what the approval screen renders ("your Sensor
+        // posted it as …"). When the mailbox cannot send as the address the owner
+        // is named by, the contact sees another address of theirs and so must the
+        // owner (#322). A reply an earlier run already sent names no identity
+        // here, and then the address they are known by is the honest answer.
+        crate::side::owner_mailto(posted_as.unwrap_or_else(|| owner.primary())).as_str(),
     );
     if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&message.payload) {
         duplicate_extensions(&event, &mut headers);

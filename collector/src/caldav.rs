@@ -776,13 +776,13 @@ pub fn reduce(
     location: Location,
     decide: impl Fn(&str) -> Consent,
 ) -> Value {
-    // Every address the owner holds, not the one they are named by (#322): an
-    // event the owner attends under their other address would otherwise have that
-    // address withheld or counted like a third party's.
-    let theirs: Vec<String> = owner.mailtos().collect();
     let mut withheld = 0u64;
     let mut withhold = |identity: &str| -> bool {
-        if theirs.iter().any(|mine| mine == identity) {
+        // Every address the owner holds, not the one they are named by (#322): an
+        // event the owner attends under their other address would otherwise have
+        // that address withheld or counted like a third party's. The question is
+        // `owner.rs`'s, here as everywhere.
+        if owner.holds_mailto(identity) {
             return false;
         }
         let withheld_one = decide(identity).reduces_publication();
@@ -1051,12 +1051,6 @@ mod window_tests {
 
 #[cfg(test)]
 mod tests {
-
-    /// The owner, named by one address and holding no other: what every test here
-    /// passed as a string before #322 gave the question a type.
-    fn an_owner(email: &str) -> crate::owner::Owner {
-        crate::owner::Owner::new(email, Vec::<String>::new())
-    }
     use super::*;
 
     const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Paris\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8\r\nSUMMARY:Weekly sync\\, with commas\\; and more\r\nDESCRIPTION:Pasted notes nobody decided to share\r\nLOCATION:Salle B\\, 4e étage\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:Michel@Example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=\"Martin, Alice\";ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nATTENDEE;CUTYPE=ROOM;CN=Salle B:urn:uuid:room-b\r\nATTACH:https://files.example/secret.pdf\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -1258,7 +1252,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         };
         let published = reduce(
             &event,
-            &an_owner("Michel@example.com"),
+            &crate::owner::Owner::named("Michel@example.com"),
             Location::Withheld,
             decide,
         );
@@ -1282,7 +1276,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // Nobody decided: nobody withheld, pending is not a reduction.
         let untouched = reduce(
             &event,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |_| Consent::Pending,
         );
@@ -1296,7 +1290,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         });
         let reduced = reduce(
             &foreign,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |_| Consent::Revoked,
         );
@@ -1347,9 +1341,12 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
 
         // And with the alias undeclared, the owner is a third party in their own
         // meeting — which is what this ticket found.
-        let mistaken = reduce(&event, &an_owner(PRIMARY), Location::Withheld, |_| {
-            Consent::Revoked
-        });
+        let mistaken = reduce(
+            &event,
+            &crate::owner::Owner::named(PRIMARY),
+            Location::Withheld,
+            |_| Consent::Revoked,
+        );
         assert!(mistaken["participants"].as_array().unwrap().is_empty());
         assert!(mistaken["organizer"].is_null());
         assert_eq!(
@@ -1368,7 +1365,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         let event = parse_vevent(WEEKLY).unwrap();
         let after = reduce(
             &event,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |_| Consent::Granted,
         );
@@ -1387,7 +1384,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // same change.
         let carried = reduce(
             &event,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Carried,
             |_| Consent::Granted,
         );
@@ -1467,7 +1464,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
 
         let shut = reduce(
             &event,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |_| Consent::Granted,
         );
@@ -1478,7 +1475,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         );
         let open = reduce(
             &event,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Carried,
             |_| Consent::Granted,
         );
@@ -1495,7 +1492,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
                 .unwrap();
         let withheld = reduce(
             &foreign,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Carried,
             |_| Consent::Revoked,
         );
@@ -1524,7 +1521,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         moved.location = Some("Salle A".to_owned());
         let after = reduce(
             &moved,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Carried,
             |_| Consent::Granted,
         );
@@ -1532,7 +1529,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // With the switch shut, nothing moved, because nothing was said.
         let after_shut = reduce(
             &moved,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |_| Consent::Granted,
         );
@@ -1544,7 +1541,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         let event = parse_vevent(WEEKLY).unwrap();
         let before = reduce(
             &event,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |_| Consent::Pending,
         );
@@ -1553,7 +1550,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         moved.end = "2026-10-05T10:30:00+02:00".to_owned();
         let after = reduce(
             &moved,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |_| Consent::Pending,
         );
@@ -1562,7 +1559,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // A participant newly revoked moves the count and nothing named.
         let fewer = reduce(
             &event,
-            &an_owner("michel@example.com"),
+            &crate::owner::Owner::named("michel@example.com"),
             Location::Withheld,
             |id| {
                 if id == "mailto:bob@example.org" {
@@ -1576,7 +1573,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
 
         let envelopes = Envelopes::new(
             "agenda-linagora",
-            &an_owner("Michel@example.com"),
+            &crate::owner::Owner::named("Michel@example.com"),
             "calendar.example.com",
             "/dav/calendars/64f1c0a2e9b1d3f4a5b6c7d8/64f1c0a2e9b1d3f4a5b6c7d8/",
         );
