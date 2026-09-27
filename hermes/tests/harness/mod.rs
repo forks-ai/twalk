@@ -25,6 +25,17 @@
 //! `Drop` that removes the container. A container left behind because a run
 //! was killed outside Rust's control goes with
 //! `docker compose -p <project> -f hermes/tests/compose.assistant.yaml down -v`.
+//!
+//! A stream of this run's own is also why a fixture here may key its event id
+//! on a literal, where the collector's, the Gateway's and the Sensor's suites
+//! may not (#390, `Bus::publish_event`): deduplication is a property of a
+//! stream, and this one is named for the run — pid and nanoseconds — so it is
+//! born with nothing of an earlier run in it to absorb. Its deletion at
+//! shutdown is tidiness and not the safeguard; a run killed outside Rust's
+//! control leaves a stream behind and nothing is any less isolated. The one
+//! harness in this module that publishes to a stream called `twalk` is
+//! `deployment`, and it is safe for a different reason, which
+//! `DEPLOY_STREAM` gives.
 
 // Every test binary compiles this module but uses only a subset of it.
 #![allow(dead_code, unused_imports)]

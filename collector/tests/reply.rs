@@ -6,6 +6,13 @@
 //! one whose target is a room is left to the Sensor; one the mailbox
 //! refuses is dead-lettered with the reason; one the server does not answer
 //! is retried, then dead-lettered.
+//!
+//! The bus is shared by every suite and every run, so every fixture here
+//! keys its id on this run (`Run::stamp`). A fixture that did not was this
+//! suite's own defect for a while: the stream deduplicates on the event's id
+//! for a day, so the second run of a day published nothing and the wait for
+//! it timed out naming a timeout (#390). The rule, and the reason it is the
+//! bus's and not this file's, is at `Bus::publish_event`.
 
 mod support;
 
@@ -59,9 +66,11 @@ fn approval_to(run: &Run, in_reply_to: &str, recipient: &str, body: &str, label:
     event
 }
 
-/// The Sensor's approval: a room target.
-fn room_approval(label: &str) -> Value {
-    let suggestion = sha256_hex(&format!("suggestion:{label}:room"));
+/// The Sensor's approval: a room target. Keyed on this run like the ones
+/// above — on the stamp rather than on a connection, because a room is on
+/// neither of this run's two.
+fn room_approval(run: &Run, label: &str) -> Value {
+    let suggestion = sha256_hex(&format!("suggestion:{label}:room:{}", run.stamp));
     json!({
         "specversion": "1.0",
         "id": sha256_hex(&format!("{suggestion}:@michel:example.com")),
@@ -219,7 +228,7 @@ async fn an_approved_reply_leaves_from_the_owners_mailbox_to_the_sender_alone_an
 
     // A room target is the Sensor's: acknowledged, nothing sent, nothing
     // dead-lettered.
-    let room = room_approval("reply");
+    let room = room_approval(&run, "reply");
     bus.publish_event(APPROVED_SUBJECT, &room).await?;
     collector.wait_logged("not this collector's", 1).await?;
     assert_eq!(run.sso.submissions().len(), 1);

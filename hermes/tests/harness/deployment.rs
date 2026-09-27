@@ -93,6 +93,12 @@ const SERVICE_TOKEN: &str = "loop-test-only-gateway-service-token-long-enough";
 /// The bus namespace a deployment publishes under: not a per-run prefix, as
 /// in the other Hermes suites, because this *is* a deployment and it is torn
 /// down whole.
+///
+/// It shares the name of the long-lived test stack's stream and nothing else:
+/// this one lives on the deployment's own NATS, is created with it and goes
+/// with it. So the rule at `Bus::publish_event` — a fixture whose arrival is
+/// awaited carries its run in its id, or the day's second run has it
+/// deduplicated away — has nothing to bite here either (#390).
 pub const DEPLOY_STREAM: &str = "twalk";
 
 /// The one contract type this ticket adds to the Hermes suite's vocabulary:

@@ -843,11 +843,15 @@ fn approval_suggestion_event(trigger: &Value, expires_in_seconds: i64) -> Value 
 /// approval screen; this one counts it in a listing and answers `409
 /// suggestion_unreadable` when asked about it directly, which is the third
 /// thing "it is not there" must not be confused with.
-fn unreadable_suggestion_event() -> Value {
-    let trigger_id = sha256_hex("openapi-g97-unreadable-trigger");
+///
+/// Keyed on `run` like the fillers below, and for the reason spelled out
+/// there: an id folded from literals alone is published once a day and
+/// absorbed for the rest of it (#390).
+fn unreadable_suggestion_event(run: u128) -> Value {
+    let trigger_id = sha256_hex(&format!("openapi-g97-unreadable-trigger:{run}"));
     json!({
         "specversion": "1.0",
-        "id": sha256_hex("openapi-g97-unreadable-suggest"),
+        "id": sha256_hex(&format!("openapi-g97-unreadable-suggest:{run}")),
         "source": format!("hermes://{SERVER_NAME}/personas/assistant"),
         "type": "fr.linagora.twalk.persona.suggest.produced.v1",
         "time": "2026-09-17T10:00:00Z",
@@ -3491,6 +3495,14 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         withheld.body
     );
 
+    // This run's stamp: every fixture from here down folds it into its id,
+    // so that a second run inside the bus's duplicate window publishes
+    // events of its own instead of having them absorbed.
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_nanos();
+
     // --- reading suggestions (#97), on the same Gateway and the same bus:
     // the listing the approval screen draws from, and one suggestion by id.
     // Its behaviour is `tests/suggestions.rs`'s; what is driven here is every
@@ -3499,15 +3511,10 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // One suggestion this build cannot read, so that the listing's tolerance
     // and the single read's refusal are both exercised against a real
     // message on the real bus.
-    bus.publish_event(
-        "twalk.persona.suggest.produced.v1",
-        &unreadable_suggestion_event(),
-    )
-    .await?;
-    let unreadable_id = unreadable_suggestion_event()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let unreadable = unreadable_suggestion_event(run);
+    bus.publish_event("twalk.persona.suggest.produced.v1", &unreadable)
+        .await?;
+    let unreadable_id = unreadable["id"].as_str().unwrap().to_owned();
     let listing = call
         .check(
             Method::GET,
@@ -3669,10 +3676,6 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // not `404 not found`. Two answers for two different facts, and the
     // description declares both.
     //
-    let run = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("the clock is after 1970")
-        .as_nanos();
     // Traffic after the suggestion, so that it is genuinely behind the head:
     // a window of one position only excludes it once something newer exists.
     //
