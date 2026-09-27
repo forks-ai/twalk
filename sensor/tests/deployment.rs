@@ -222,6 +222,20 @@ async fn compose(env_file: &Path, args: &[&str], what: &str) -> Result<()> {
         .await
         .with_context(|| format!("failed to run docker compose {what}"))?;
     if !output.status.success() {
+        // An `up` that failed may not be about this stack at all: a host with no
+        // subnet left for another network, a port held by something else, a full
+        // disk. Those are environment failures and the harness names them as
+        // such (#128), because a test that could not *start* reported as a test
+        // that failed sends the reader into the code.
+        if args.first() == Some(&"up") {
+            return Err(harness::compose_up_failed(
+                &deploy_stack(),
+                output.status,
+                &output.stdout,
+                &output.stderr,
+            )
+            .await);
+        }
         bail!(
             "docker compose {what} failed with {}:\n{}",
             output.status,

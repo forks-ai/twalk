@@ -299,6 +299,130 @@ pub async fn hold_deploy_stack(project: &str) -> Result<StackHeld> {
     .context("the task holding the deploy stack was cancelled")?
 }
 
+// ---------------------------------------------------------------------------
+// A stack that cannot start says so, and says it is not the code (#128)
+// ---------------------------------------------------------------------------
+
+/// What Docker says when the **host** is out of something, and what frees it.
+///
+/// One row per exhaustion this project has actually met or can name precisely.
+/// Matched on Docker's own words because those are the only stable part of the
+/// answer: the exit status is always `1`, and a caller that reported only the
+/// status is a caller that said nothing.
+const EXHAUSTED: [(&str, &str); 5] = [
+    (
+        "address pools",
+        "the Docker daemon has no subnet left for another network. Every compose \
+         project takes one, and a host that also runs unrelated services shares \
+         that pool with them.",
+    ),
+    (
+        "already allocated",
+        "a host port this stack wants is held by something else — another test \
+         stack on the same default port, or a service of the host's own.",
+    ),
+    (
+        "no space left on device",
+        "the filesystem Docker builds and stores on is full.",
+    ),
+    (
+        "cannot allocate memory",
+        "the host cannot give this stack the memory it asked for.",
+    ),
+    (
+        "Cannot connect to the Docker daemon",
+        "the Docker daemon is not answering on this host.",
+    ),
+];
+
+/// Turns a failed `docker compose up` into an error that says whether the host
+/// or the stack is at fault, and what would free it.
+///
+/// A test that could not *start* used to report as a test that failed, which is
+/// the defect #128 is about and not a matter of tidiness: the first reading of
+/// `docker compose up failed with exit status 1` is "my change broke the
+/// deployment tests", and the second — if the operator is unlucky — is to go
+/// looking in the code. This project has shipped that confusion in the product
+/// three times (#116, #111, and a login token refused as a wrong password); the
+/// test suite does not get to add a fourth.
+///
+/// So the answer names the exhaustion when Docker named it, counts what is
+/// holding the resource, and says the command that frees it — and when Docker
+/// said something this function has never heard of, it says *that*, with the
+/// whole of Docker's output, rather than inventing a diagnosis.
+pub async fn compose_up_failed(
+    project: &str,
+    status: std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> anyhow::Error {
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    let exhausted = EXHAUSTED
+        .iter()
+        .find(|(needle, _)| said.contains(needle))
+        .map(|(_, explanation)| *explanation);
+    let Some(explanation) = exhausted else {
+        return anyhow::anyhow!(
+            "docker compose up for {project} failed with {status}, and this harness does not \
+             recognise the reason. Docker said:\n{}",
+            said.trim()
+        );
+    };
+    anyhow::anyhow!(
+        "THE HOST, NOT THE CODE: the stack {project} could not be created. {explanation}\n\
+         \n\
+         This is an environment failure and not a test failure: nothing under test ran. \
+         `tools/twalk-test-stacks.sh` lists what this host is holding and prints the command \
+         that frees the stale part of it.\n\
+         \n\
+         {}\n\
+         \n\
+         Docker said:\n{}",
+        host_holdings().await,
+        said.trim()
+    )
+}
+
+/// What this host is holding, in the two numbers an exhausted daemon is about.
+///
+/// Best-effort and never fatal: this runs on a path that is already failing, and
+/// a diagnosis that panicked would replace a bad message with none.
+async fn host_holdings() -> String {
+    let networks = Command::new("docker")
+        .args(["network", "ls", "--format", "{{.Name}}"])
+        .output()
+        .await
+        .ok()
+        .map(|done| String::from_utf8_lossy(&done.stdout).into_owned())
+        .unwrap_or_default();
+    let all = networks.lines().filter(|line| !line.is_empty()).count();
+    let ours = networks
+        .lines()
+        .filter(|line| line.starts_with("twalk"))
+        .count();
+    let free = Command::new("df")
+        .args(["-h", "--output=avail", "/"])
+        .output()
+        .await
+        .ok()
+        .map(|done| {
+            String::from_utf8_lossy(&done.stdout)
+                .lines()
+                .nth(1)
+                .unwrap_or("?")
+                .trim()
+                .to_owned()
+        })
+        .unwrap_or_else(|| "?".to_owned());
+    format!(
+        "This host holds {all} Docker networks, {ours} of them Twalk's, and has {free} free on /."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +519,81 @@ mod tests {
         drop(after);
 
         let _ = std::fs::remove_file(std::env::temp_dir().join(format!("{project}.deploy-lock")));
+    }
+
+    fn failed() -> std::process::ExitStatus {
+        // The status every failed `docker compose up` has, which is why it is
+        // not what this function reports on.
+        std::process::Command::new("false")
+            .status()
+            .expect("running `false` is possible")
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_host_is_named_as_the_host_and_not_as_a_failure_of_the_code() {
+        let said = b"Error response from daemon: all predefined address pools have been fully \
+                     subnetted\nfailed to create network twalk-d112b_default\n";
+        let error = compose_up_failed("twalk-d112b", failed(), b"", said).await;
+        let message = error.to_string();
+
+        assert!(
+            message.starts_with("THE HOST, NOT THE CODE"),
+            "the first words decide how the failure is read: {message}"
+        );
+        assert!(
+            message.contains("no subnet left"),
+            "it names what was exhausted: {message}"
+        );
+        assert!(
+            message.contains("nothing under test ran"),
+            "and says so, because that is the sentence the reader needs: {message}"
+        );
+        assert!(
+            message.contains("tools/twalk-test-stacks.sh"),
+            "and the command that frees it: {message}"
+        );
+        assert!(
+            message.contains("Docker networks"),
+            "with what this host is actually holding: {message}"
+        );
+        assert!(
+            message.contains("all predefined address pools"),
+            "and Docker's own words, never paraphrased: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_exhaustion_this_harness_names_is_recognised_from_dockers_own_words() {
+        for (needle, explanation) in EXHAUSTED {
+            let said = format!("Error response from daemon: {needle} something something");
+            let message = compose_up_failed("twalk-test", failed(), b"", said.as_bytes())
+                .await
+                .to_string();
+            assert!(
+                message.contains(explanation),
+                "{needle:?} must be recognised and explained: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reason_this_harness_does_not_know_says_that_rather_than_guessing() {
+        let said = b"Error response from daemon: something nobody here has met\n";
+        let message = compose_up_failed("twalk-test", failed(), b"", said)
+            .await
+            .to_string();
+
+        assert!(
+            message.contains("does not recognise the reason"),
+            "an unknown reason is said to be unknown: {message}"
+        );
+        assert!(
+            message.contains("something nobody here has met"),
+            "with the whole of what Docker said: {message}"
+        );
+        assert!(
+            !message.contains("THE HOST, NOT THE CODE"),
+            "and never claims to know whose fault it is: {message}"
+        );
     }
 }
