@@ -853,6 +853,49 @@ async fn a_draft_is_checked_against_the_calendar_and_the_suggestion_says_what_wa
     assert_eq!(path[0]["from"], "2026-10-12T06:00:00Z", "{listing}");
     assert_eq!(path[0]["outcome"], "served", "{listing}");
 
+    // A reply whose sentence names a day none of its instants falls on:
+    // nothing published (#397). The instant below is inside a gap and inside
+    // a window this wake read — everything a machine had checked until now
+    // was right — and 12 October 2026 is a **Monday**.
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&harness::hermes_answer_proposing(
+        &hermes_reference("assistant", &trigger_id, 6),
+        "En revanche mardi 12, de 16h à 17h (heure de Paris), je suis libre",
+        &["2026-10-12T14:00:00Z"],
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body: Value = serde_json::from_str(&response.text().await?)?;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "hermes_answer_proposed_wrong_day");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("mardi") && detail.contains("lundi"),
+        "the refusal says the word it wrote and the day the times actually are: {body}"
+    );
+    assert!(
+        nothing_about(watch, &trigger_id).await,
+        "a draft naming the wrong day was published anyway"
+    );
+
+    // And the same instant with the right day publishes: the rule is overlap,
+    // so a reply may name a day it is *declining* as long as one of the days
+    // it names is a day it offers.
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&harness::hermes_answer_proposing(
+        &hermes_reference("assistant", &trigger_id, 7),
+        "Jeudi est pris. En revanche lundi 12, de 16h à 17h (heure de Paris), je suis libre",
+        &["2026-10-12T14:00:00Z"],
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body = response.text().await?;
+    assert_eq!(status, 200, "a draft that names the day it offers was refused: {body}");
+    assert!(
+        published_about(watch, &trigger_id).await.is_some(),
+        "the draft naming the right day was not published"
+    );
+
     // A reply that names an hour and offers none: published, and said to be
     // unverified. Not refused — this is the case the ticket refuses to
     // refuse — and not silent either.

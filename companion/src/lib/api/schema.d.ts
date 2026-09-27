@@ -5431,6 +5431,16 @@ export interface operations {
              *       it is in a sentence.
              *     - `hermes_answer_proposed_not_free` — one of them falls in a
              *       meeting, asked of the calendar again at that moment.
+             *     - `hermes_answer_proposed_wrong_day` — the reply names weekdays
+             *       and not one of them is a day it offers (#397): the instants
+             *       were checked and the sentence around them was not. A contact
+             *       reads the word and writes it in their diary, and the hour being
+             *       right does not save them. Overlap, not agreement: a reply may
+             *       name a day it is *declining* — *"Thursday is taken, how about
+             *       Monday at noon"* — as long as one of the days it names is a day
+             *       it offers. The days are counted in the owner's own time, read
+             *       off the gaps' `start_local` (#379); a deployment whose gaps
+             *       carry none checks nothing here.
              *     - `hermes_answer_proposed_uncheckable` — the check could not be
              *       made. Nothing is published, because a proposal nobody verified
              *       is what the check exists against.
@@ -5442,7 +5452,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_language_unsupported" | "hermes_answer_is_empty" | "hermes_answer_too_long" | "hermes_answer_summary_is_empty" | "hermes_answer_summary_too_long" | "hermes_answer_deferral_is_empty" | "hermes_answer_proposed_unreadable" | "hermes_answer_proposed_too_many" | "hermes_answer_proposed_not_read" | "hermes_answer_proposed_not_free" | "hermes_answer_proposed_uncheckable";
+                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_language_unsupported" | "hermes_answer_is_empty" | "hermes_answer_too_long" | "hermes_answer_summary_is_empty" | "hermes_answer_summary_too_long" | "hermes_answer_deferral_is_empty" | "hermes_answer_proposed_unreadable" | "hermes_answer_proposed_too_many" | "hermes_answer_proposed_not_read" | "hermes_answer_proposed_not_free" | "hermes_answer_proposed_wrong_day" | "hermes_answer_proposed_uncheckable";
                     };
                 };
             };

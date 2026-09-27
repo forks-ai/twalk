@@ -45,6 +45,8 @@ When your reply proposes a time, put the instants beside it in your answer:
 
 They are **copied from `free`** — the `start` of a gap, or a moment inside one — and they are in UTC, which is what the gap gives you. The sentence stays in the owner's local time; `proposed` is the same moments as data.
 
+**The day comes from the gap too, like the hour.** `start_local` says `2026-10-12T12:30:00+02:00`; the day that is, is the day you write. Never work it out from the date — on 2026-09-27 a draft offered a verified gap and called it *"mardi 12"*, and the 12th was a Monday. The Gateway checks the weekday your sentence names against the days your instants fall on, and a reply that names no day it offers publishes nothing (#397). Your contact reads the word, not the instant.
+
 **The Gateway checks every one of them before it publishes anything** (#383): that it falls inside a window you actually read for this message, and that the owner is free then — asked of their calendar again at that moment. A time that fails either check produces **no suggestion at all**, and you are told which time and why. This is not a formality: on 2026-09-26 a draft offered two Monday slots from a week it had never read, and the owner was in a meeting at both. The check exists because three rounds of clearer instructions did not stop that.
 
 So: never offer a time from a window you did not read — read it first, it costs one call. And if you cannot read it, say you will come back rather than naming an hour.

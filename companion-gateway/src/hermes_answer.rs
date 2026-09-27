@@ -84,7 +84,7 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::approval::{
     is_event_id, Approvals, Format, Refusal, TriggerEnvelope, CONTRACT_MAX_BODY, MAX_BODY,
@@ -261,6 +261,56 @@ pub enum Outcome {
 /// summary's, for the same reason: it is a sentence a human reads on a
 /// screen, not a document.
 pub const MAX_ASKED: usize = MAX_SUMMARY;
+
+/// The ISO weekday an instant falls on — `1` is Monday — from seconds since
+/// the epoch **already shifted into the owner's own time**.
+///
+/// 1970-01-01 was a Thursday. Euclidean division, so an instant before the
+/// epoch is not a day out.
+fn weekday_of(local_seconds: i64) -> u32 {
+    let days = local_seconds.div_euclid(86_400);
+    (days.rem_euclid(7) as u32 + 3) % 7 + 1
+}
+
+/// The seven weekday names, in the five languages this deployment's disclosure
+/// knows (ADR 0031), by ISO weekday — `1` is Monday.
+///
+/// Written out rather than computed from a locale library, for the reason the
+/// disclosure's own sentences are: the set is small, it is read by people, and
+/// a dependency that pluralised or capitalised differently between versions
+/// would change what a draft is refused for. Italian's accent is accepted both
+/// ways, because an agent typing `lunedi` means Monday.
+///
+/// A language this build does not have is a reply whose days are simply not
+/// found — and then nothing is refused, which is the right answer to "I cannot
+/// read this" (#397).
+const WEEKDAY_NAMES: [(u32, &[&str]); 7] = [
+    (1, &["lundi", "monday", "montag", "lunes", "lunedì", "lunedi"]),
+    (2, &["mardi", "tuesday", "dienstag", "martes", "martedì", "martedi"]),
+    (3, &["mercredi", "wednesday", "mittwoch", "miércoles", "miercoles", "mercoledì", "mercoledi"]),
+    (4, &["jeudi", "thursday", "donnerstag", "jueves", "giovedì", "giovedi"]),
+    (5, &["vendredi", "friday", "freitag", "viernes", "venerdì", "venerdi"]),
+    (6, &["samedi", "saturday", "samstag", "sonnabend", "sábado", "sabado", "sabato"]),
+    (7, &["dimanche", "sunday", "sonntag", "domingo", "domenica"]),
+];
+
+/// The weekdays a reply names, by ISO number.
+///
+/// Whole words on a lowercased text, splitting on anything that is not a
+/// letter or a digit: `mardi,` and `(mardi)` are the day, `Midi-Pyrénées` is
+/// not a Sunday.
+fn weekdays_named(text: &str) -> std::collections::BTreeSet<u32> {
+    let lowered = text.to_lowercase();
+    let words: std::collections::BTreeSet<&str> = lowered
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    WEEKDAY_NAMES
+        .iter()
+        .filter(|(_, names)| names.iter().any(|name| words.contains(name)))
+        .map(|(weekday, _)| *weekday)
+        .collect()
+}
 
 /// Whether a reply's text names something time-like: a digit against an hour
 /// mark (`14h`, `14 h 30`, `14:00`), a digit against a meridiem (`2pm`), or
@@ -680,6 +730,12 @@ pub enum AnswerRefusal {
     ProposedNotRead { instant: String },
     /// A proposed instant inside a window it read, and inside a meeting.
     ProposedNotFree { instant: String },
+    /// The reply names weekdays and not one of them is a day it offers (#397):
+    /// the instants were checked and the sentence around them was not.
+    ProposedWrongDay {
+        named: String,
+        offered: String,
+    },
     /// The freedom of a proposed instant could not be checked, so nothing is
     /// published: an unverified proposal is the thing this refusal exists
     /// against.
@@ -714,6 +770,7 @@ impl AnswerRefusal {
             AnswerRefusal::TooManyProposed(_) => "hermes_answer_proposed_too_many",
             AnswerRefusal::ProposedNotRead { .. } => "hermes_answer_proposed_not_read",
             AnswerRefusal::ProposedNotFree { .. } => "hermes_answer_proposed_not_free",
+            AnswerRefusal::ProposedWrongDay { .. } => "hermes_answer_proposed_wrong_day",
             AnswerRefusal::ProposedUncheckable(_) => "hermes_answer_proposed_uncheckable",
             AnswerRefusal::Shared(refusal) => refusal.code(),
         }
@@ -743,6 +800,7 @@ impl AnswerRefusal {
             | AnswerRefusal::TooManyProposed(_)
             | AnswerRefusal::ProposedNotRead { .. }
             | AnswerRefusal::ProposedNotFree { .. }
+            | AnswerRefusal::ProposedWrongDay { .. }
             | AnswerRefusal::ProposedUncheckable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AnswerRefusal::Shared(refusal) => refusal.status(),
         }
@@ -818,6 +876,12 @@ impl AnswerRefusal {
             AnswerRefusal::ProposedNotFree { instant } => format!(
                 "the answer offers {instant}, and the user is busy then. Offer a moment inside \
                  one of the `free` gaps the read gave you"
+            ),
+            AnswerRefusal::ProposedWrongDay { named, offered } => format!(
+                "the reply says {named} and the times it offers are on {offered}. The day comes \
+                 from the gap, like the hour: read it off `start_local` rather than working it \
+                 out from the date — a contact reads the word and writes it in their diary, and \
+                 the hour being right does not save them."
             ),
             AnswerRefusal::ProposedUncheckable(detail) => format!(
                 "the answer offers a time this Gateway could not check ({detail}), so nothing \
@@ -1100,6 +1164,8 @@ impl Answers {
             answer.reference.trigger_event_id,
             answer.reference.attempt
         );
+        let mut zone: Option<String> = None;
+        let mut offered_days: std::collections::BTreeSet<u32> = Default::default();
         for (index, offered) in by_window {
             let (connection, from, to) = &windows[index];
             let gaps = reads
@@ -1110,14 +1176,19 @@ impl Answers {
             // it is *not* an empty week: concluding "the owner is busy" from
             // it would refuse every draft of that deployment with a sentence
             // about the owner's calendar instead of about the deployment.
-            let Some(gaps) = gaps else {
+            let Some(checked) = gaps else {
                 return Err(AnswerRefusal::ProposedUncheckable(format!(
                     "the calendar read of {from}–{to} answered no free gaps at all, so this \
                      deployment cannot tell a free moment from a busy one"
                 )));
             };
-            for (instant, at) in offered {
-                if !gaps.iter().any(|gap| covers(*gap, at)) {
+            let gaps = checked.gaps;
+            // The zone, for the log line that says what the days were counted
+            // in (#397).
+            zone = zone.or(checked.zone.clone());
+            for (instant, at) in &offered {
+                let at = *at;
+                let Some(gap) = gaps.iter().find(|gap| covers((gap.start, gap.end), at)) else {
                     warn!(
                         %instant,
                         trigger = %answer.reference.trigger_event_id,
@@ -1125,17 +1196,94 @@ impl Answers {
                         "a draft offered a time the owner is busy in; nothing published"
                     );
                     return Err(AnswerRefusal::ProposedNotFree {
-                        instant: instant.to_owned(),
+                        instant: (*instant).to_owned(),
                     });
+                };
+                // The day that instant is, in the owner's own time — from the
+                // gap's own offset, which the collector spelled (#379). A
+                // deployment that knows no zone contributes no day, and the
+                // check below then has nothing to disagree with.
+                if let Some(offset) = gap.offset_seconds {
+                    offered_days.insert(weekday_of(at + i64::from(offset)));
                 }
             }
         }
+        self.check_the_days_it_names(answer, &offered_days, zone.as_deref())?;
         info!(
             trigger = %answer.reference.trigger_event_id,
             proposed = answer.proposed.len(),
             "every time the draft offers was read and is free"
         );
         Ok(())
+    }
+
+    /// Whether the weekdays the sentence names are days the reply actually
+    /// offers (#397).
+    ///
+    /// The fifth defect of one family, and the first that is about a **word**.
+    /// Measured on the reference deployment on 2026-09-27: a draft offered
+    /// `2026-10-12T10:00:00Z` — noon in Paris, inside a gap it had read, in a
+    /// window it had read — and wrote *"mardi 12"*. The 12th is a Monday. Every
+    /// instant was checked and the sentence around them was not, and a contact
+    /// reads the word, not the instant.
+    ///
+    /// The rule is **overlap, not agreement**: a reply is refused when it names
+    /// weekdays and *none* of them is a day it offers. A draft that says
+    /// *"Thursday is taken, how about Monday 12 at noon"* names two days and
+    /// offers one of them, which is exactly right and must publish. Requiring
+    /// every named day to be offered would refuse it for the half that is the
+    /// most useful thing in the sentence.
+    ///
+    /// Two silences, both deliberate. A reply that names **no** weekday is not
+    /// refused: `proposed` is what this Gateway checks, and a sentence with no
+    /// day in it makes no claim to be wrong about. And a deployment whose
+    /// **zone is unknown** checks nothing here at all — which day an instant
+    /// falls on is a question about where the owner lives, and refusing a draft
+    /// on a weekday computed in UTC would be this process inventing the very
+    /// kind of fact the check exists against.
+    fn check_the_days_it_names(
+        &self,
+        answer: &Answer,
+        offered: &std::collections::BTreeSet<u32>,
+        zone: Option<&str>,
+    ) -> Result<(), AnswerRefusal> {
+        let named = weekdays_named(&answer.reply);
+        if named.is_empty() {
+            return Ok(());
+        }
+        if offered.is_empty() {
+            debug!(
+                trigger = %answer.reference.trigger_event_id,
+                "the draft names a weekday and no gap it offers carried the owner's own time; \
+                 the word is not checked"
+            );
+            return Ok(());
+        }
+        if offered.iter().any(|day| named.contains(day)) {
+            return Ok(());
+        }
+        let say = |days: &std::collections::BTreeSet<u32>| {
+            days.iter()
+                .filter_map(|day| {
+                    WEEKDAY_NAMES
+                        .iter()
+                        .find(|(weekday, _)| weekday == day)
+                        .and_then(|(_, names)| names.first().copied())
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        warn!(
+            trigger = %answer.reference.trigger_event_id,
+            named = %say(&named),
+            offered = %say(offered),
+            zone = zone.unwrap_or("(unknown)"),
+            "a draft named a day none of the times it offers falls on; nothing published"
+        );
+        Err(AnswerRefusal::ProposedWrongDay {
+            named: say(&named),
+            offered: say(offered),
+        })
     }
 
     /// A wake that ended in a question to the owner instead of a draft
@@ -1442,6 +1590,43 @@ mod tests {
     use super::*;
 
     const TRIGGER: &str = "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0";
+
+    #[test]
+    fn the_day_an_instant_falls_on_is_the_owners_day_and_not_utcs() {
+        // 1970-01-01 was a Thursday, and the arithmetic has to hold on both
+        // sides of the epoch.
+        assert_eq!(weekday_of(0), 4);
+        assert_eq!(weekday_of(-86_400), 3, "the day before was a Wednesday");
+        // The case that opened #397: noon in Paris on 12 October 2026 is
+        // 10:00Z, and the 12th is a **Monday**.
+        let noon_in_paris = parse_rfc3339_seconds("2026-10-12T10:00:00Z").expect("an instant");
+        assert_eq!(weekday_of(noon_in_paris + 7_200), 1);
+        // And the case the offset is there for: half past eleven at night in
+        // Paris is already Tuesday, while the same instant in London is not.
+        let late = parse_rfc3339_seconds("2026-10-12T22:30:00Z").expect("an instant");
+        assert_eq!(weekday_of(late + 7_200), 2, "Tuesday in Paris");
+        assert_eq!(weekday_of(late), 1, "still Monday in UTC");
+    }
+
+    #[test]
+    fn the_weekdays_a_reply_names_are_read_in_five_languages_and_only_as_whole_words() {
+        let day = |text: &str| weekdays_named(text).into_iter().collect::<Vec<u32>>();
+        assert_eq!(day("En revanche mardi 12, de 12h à 14h"), vec![2]);
+        assert_eq!(day("How about Monday at noon?"), vec![1]);
+        assert_eq!(day("Am Donnerstag bin ich frei"), vec![4]);
+        assert_eq!(day("El miércoles a las 10"), vec![3]);
+        assert_eq!(day("Va bene giovedì?"), vec![4]);
+        assert_eq!(day("Va bene giovedi?"), vec![4], "the accent is optional");
+        // Several days, in the order a week runs.
+        assert_eq!(
+            day("Jeudi prochain est pris. En revanche lundi 12, de 12h à 14h"),
+            vec![1, 4]
+        );
+        // Whole words only, and nothing where there is no day.
+        assert_eq!(day("Je suis en Midi-Pyrénées"), Vec::<u32>::new());
+        assert_eq!(day("Bien reçu, je te réponds vite"), Vec::<u32>::new());
+        assert_eq!(day("mardis et jeudis"), Vec::<u32>::new(), "not the plural");
+    }
 
     #[test]
     fn a_reply_that_names_an_hour_is_recognised_and_one_that_names_none_is_not() {
