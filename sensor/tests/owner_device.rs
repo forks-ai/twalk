@@ -46,11 +46,13 @@
 
 mod harness;
 
-use anyhow::Result;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
 use harness::crypto::{make_encrypted_whatsapp_portal, CryptoBot};
 use harness::{
     contract_fixture, ensure_stack, fresh_state_dir, make_whatsapp_portal, poll_until,
-    sensor_env_with, validate_against_contract, Bot, Bus, SensorProc, StoredMessage,
+    sensor_env_with, validate_against_contract, wait_up_to, Bot, Bus, SensorProc, StoredMessage,
     SENSOR_USER_ID,
 };
 use serde_json::{json, Value};
@@ -590,6 +592,181 @@ async fn a_token_for_another_account_is_refused_at_startup() -> Result<()> {
     assert!(
         !sensor.is_running(),
         "the Sensor must exit rather than run as a device of somebody else's account"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// Revoking the acting device is noticed and named, not a silent stop
+/// (issue #229).
+///
+/// ADR 0025 accepted a long-lived token for the owner's own account at rest, and
+/// the mitigation it named was neither encryption nor scope: the token is a
+/// device among the owner's devices, revocable from any Matrix client without
+/// Twalk's involvement. A mitigation nobody can observe is not one, and until
+/// this ticket nothing observed it — the sync loop warned every thirty seconds
+/// for ever, approvals went on being accepted, and nothing arrived.
+///
+/// The revocation here is a `POST /logout` with the device's own token, which is
+/// what the owner's phone does to a device it deletes: the homeserver forgets
+/// both, and every later request with that token answers `M_UNKNOWN_TOKEN`.
+#[tokio::test]
+async fn a_revoked_acting_device_is_noticed_and_named_and_no_reply_goes_out_as_the_owner(
+) -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let owner = Bot::login("owner").await?;
+    let bridge = Bot::login("whatsappbot").await?;
+
+    let portal = make_whatsapp_portal(&bridge, "owner-device-revoked").await?;
+    bridge.invite(&portal, SENSOR_USER_ID).await?;
+    bridge.invite(&portal, OWNER).await?;
+
+    let sensor = SensorProc::start(&owner_device_env(
+        "revoked-device",
+        Some((owner.access_token(), owner.device_id())),
+    ))?;
+    bridge.wait_for_membership(&portal, OWNER, "join").await?;
+
+    // The owner revokes it from somewhere else entirely. Nothing tells the
+    // Sensor; it finds out because its next sync is refused.
+    owner.revoke_this_device().await?;
+
+    // 1. It is noticed **without a restart**, and named: which credential is
+    //    gone, what puts it back, and that this is not a homeserver that is
+    //    merely away — those are two situations and must not share one signal.
+    //
+    //    Waited for longer than the harness's twenty seconds, and the reason is
+    //    the thing under test: the device holds a sync long-poll open for
+    //    `OWNER_DEVICE_SYNC_TIMEOUT` (thirty seconds), so a revocation is
+    //    noticed when that poll comes back and not when it happens. Twenty
+    //    seconds is shorter than that by construction, which is how the first
+    //    version of this test failed.
+    let said = wait_up_to(Duration::from_secs(90), || async {
+        let logs = sensor.logs().await;
+        logs.iter()
+            .any(|line| {
+                line.contains("SENSOR_OWNER_DEVICE_ACCESS_TOKEN")
+                    && line.contains("no longer knows")
+            })
+            .then_some(())
+    })
+    .await;
+    if said.is_err() {
+        let logs = sensor.logs().await;
+        anyhow::bail!("the revocation was never named; the Sensor's log was:\n{logs:#?}");
+    }
+    let logs = sensor.logs().await;
+    assert!(
+        logs.iter()
+            .any(|line| line.contains("not a homeserver that is unreachable")),
+        "the message tells the two situations apart: {logs:#?}"
+    );
+
+    // 2. And no reply is accepted for sending under the identity the deployment
+    //    no longer holds. Not posted as the Sensor either: that would put a
+    //    message in the contact's room that the contact cannot see, which is
+    //    #123's worst answer wearing a success's clothes.
+    let body = "Cette réponse ne doit pas sortir.";
+    let approved = approved_reply(&portal, body)?;
+    let approval_id = approved["id"].as_str().unwrap().to_owned();
+    bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
+
+    // The retries are exhausted in under a second here
+    // (`SENSOR_SEND_RETRY_BASE_MS`, `SENSOR_SEND_RETRY_MAX_ATTEMPTS`), and what
+    // the owner sees is the dead letter: the approval screen reads its `reason`
+    // (#311), so the credential and the remedy are what they are told.
+    let dead = wait_up_to(Duration::from_secs(60), || async {
+        bus.fetch_all_with_headers(STREAM, "twalk.persona.reply.approved.v1.dead")
+            .await
+            .ok()?
+            .into_iter()
+            .find(|message| message.header("event-id") == Some(approval_id.as_str()))
+    })
+    .await
+    .context("the approval was never dead-lettered")?;
+    // A dead letter is a copy of the approval it gave up on, so it is still an
+    // event the contract allows — asserted, because a suite that checked only
+    // the headers would not notice a copy that had stopped being one.
+    validate_against_contract(&dead.payload, "persona.reply.approved")?;
+    let reason = dead
+        .header("reason")
+        .expect("a dead letter says why the Sensor gave up");
+    assert!(
+        reason.contains("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"),
+        "the reason names the credential the owner has to replace: {reason}"
+    );
+    assert!(
+        !reason.contains(body),
+        "the reason names the failure and never quotes the reply: {reason}"
+    );
+
+    // Nothing in the room, under either identity: read once and asked of both.
+    let events = bridge.room_events(&portal, 50).await?;
+    for sender in [OWNER, SENSOR_USER_ID] {
+        assert!(
+            !events.iter().any(|event| {
+                event["sender"].as_str() == Some(sender)
+                    && event.pointer("/content/body").and_then(Value::as_str) == Some(body)
+            }),
+            "no reply may be posted as {sender} once the acting credential is gone"
+        );
+    }
+
+    sensor.stop().await;
+
+    // 3. Re-provisioning restores delivery, with no other step: a new device of
+    //    the same account, the token and the id set, and the reply the owner
+    //    approved goes out as them. The restart is the provisioning — today the
+    //    credential is an environment variable an operator sets (#228 is the
+    //    handover that removes that step) — and nothing else is asked for: no
+    //    invitation to re-accept, no state to clear.
+    let replacement = Bot::login("owner").await?;
+    let mut env = owner_device_env(
+        "revoked-device-replaced",
+        Some((replacement.access_token(), replacement.device_id())),
+    );
+    // A longer send schedule than the other tests use, and for a reason that is
+    // part of what is under test. The owner's *account* is already joined to the
+    // portal — the revoked device joined it, and a membership belongs to the
+    // account and not to the device — so there is no join to wait for here. What
+    // there is to wait for is the new device's first sync, after which it knows
+    // the room at all; until then a reply to a portal is a transient failure by
+    // design ("the owner's device has not joined this portal room"), and with
+    // the suite's default schedule of three attempts a hundred milliseconds
+    // apart the retries are spent before the first sync returns. Lengthening it
+    // makes this test wait for the design instead of racing it.
+    for (name, value) in &mut env {
+        if name == "SENSOR_SEND_RETRY_BASE_MS" {
+            *value = "500".to_owned();
+        }
+        if name == "SENSOR_SEND_RETRY_MAX_ATTEMPTS" {
+            *value = "8".to_owned();
+        }
+    }
+    let sensor = SensorProc::start(&env)?;
+    let again = "Cette réponse-là sort.";
+    let approved = approved_reply(&portal, again)?;
+    bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
+    let posted = wait_up_to(Duration::from_secs(120), || async {
+        bridge
+            .room_events(&portal, 50)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|event| {
+                event["sender"].as_str() == Some(OWNER)
+                    && event.pointer("/content/body").and_then(Value::as_str) == Some(again)
+            })
+    })
+    .await
+    .context("the re-provisioned device never posted the reply as the owner")?;
+    assert_eq!(
+        posted["sender"].as_str(),
+        Some(OWNER),
+        "a re-provisioned device sends as the owner again"
     );
 
     sensor.stop().await;

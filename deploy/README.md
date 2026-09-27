@@ -90,6 +90,27 @@ SMS through Google Messages needs more than a phone, and the deployment stops we
 
 What this deployment gives you is a bridge that is up, healthy and waiting. Three things about it are not the deployment's to fix and are yours to know: SMS transits Google Messages Web so this path is not sovereign, it needs a Google account and is unavailable to an iOS-only user, and mautrix documents no lifetime for those cookies, so nothing here promises a re-login cadence. v0.2 replaces this path with the first-party Twake SMS Companion; the network stays `sms` across that migration and only the `bridge_id` changes.
 
+### When the acting device is revoked
+
+The Sensor posts an approved reply as a **device of the owner's own account**, because a mautrix bridge relays to its network only what the logged-in user's own account sends ([ADR 0025](../docs/architecture/adr/0025-twalk-acts-as-the-user-through-a-device-of-their-account.md)). That is a long-lived access token for the owner's account, sitting in `SENSOR_OWNER_DEVICE_ACCESS_TOKEN`, and the mitigation the ADR named for it was neither encryption nor scope: it is **a device among the owner's devices**, which they can revoke from any Matrix client without asking anybody here.
+
+A mitigation nobody can observe is not one, so [#229](https://github.com/linagora/twalk/issues/229) made the revocation visible. The owner deletes the device from their phone; the next thing Twalk asks the homeserver under that token is refused with `M_UNKNOWN_TOKEN` — its sync, or the send of a reply approved in the half-minute before the sync's long poll comes back; and then, without a restart:
+
+- one `ERROR` naming the credential, what puts it back, and — deliberately — that this is *not* a homeserver that is merely unreachable, because those are two situations with two remedies and they used to share one silence;
+- `twalk_sensor_owner_device_credential_gone 1` on `/metrics`, for a deployment whose logs nobody is reading;
+- the sync loop **ends**, rather than retrying a token nothing in this process can renew;
+- and every approved reply for a **bridged** conversation is refused rather than posted. Not posted as `@sensor:` either: that returns an event id from Synapse and reaches nobody, which is the outcome this whole arc exists to remove. The refusal is *transient*, so the approval is never acknowledged on the bus: re-provision and restart the Sensor inside the retry schedule and the bus hands that reply to the new process, which sends it as the owner. Let the schedule run out and it is dead-lettered with that same sentence as its reason, which is what the approval screen shows the owner ([#311](https://github.com/linagora/twalk/issues/311)).
+
+A **native** Matrix conversation is unaffected: no bridge stands between the room and the person reading it, so the Sensor's own account posting there always reached the contact and still does.
+
+The gauge is the one to alert on, because from the moment it is `1` no reply to a bridged conversation can leave and every approval the owner makes ends in a dead letter:
+
+```promql
+twalk_sensor_owner_device_credential_gone > 0
+```
+
+The remedy is `docker-compose/provision-owner-device.sh` and a restart of the Sensor — nothing else. No invitation to re-accept: the new device joins the portals as the bridges' own bots invite it, which is the same path the first one took. The restart is there because the credential is an environment variable an operator sets; [#228](https://github.com/linagora/twalk/issues/228) is the handover that removes that step.
+
 ### Choosing which conversations are observed
 
 A bridge builds a portal room **when a conversation becomes active**, not once at login. On the reference deployment one WhatsApp account produced eighteen of them over a single day, as people wrote — and mautrix invites only *the user* into each. So a connected network does not put anything on the bus by itself, and the set of conversations keeps growing for as long as the deployment runs.

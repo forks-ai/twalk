@@ -89,6 +89,23 @@ pub struct Metrics {
     /// configured bridge bot invited it, and a climbing `refused` with a flat
     /// `joined` is `SENSOR_BRIDGE_BOTS` naming the wrong accounts.
     owner_device_present: AtomicBool,
+    /// The acting credential is gone: the homeserver no longer knows the token
+    /// `SENSOR_OWNER_DEVICE_ACCESS_TOKEN` names (issue #229). Set when a sync
+    /// says so and never cleared, because nothing in this process can put it
+    /// back — a new device is a new token and a restart.
+    ///
+    /// A gauge of its own, and not the absence of this whole block of samples —
+    /// which is how "this deployment was never given a device" is already said.
+    /// That and "it was given one and the owner revoked it" are two situations
+    /// with two remedies, and ADR 0025's whole mitigation is that the second one
+    /// is *visible*.
+    ///
+    /// The room gauges beside it are left alone and still count what they say:
+    /// the portals the owner's **account** is joined to, which a revocation does
+    /// not change — a membership belongs to the account and not to the device.
+    /// What has changed is that nothing can act as it, which is this gauge's to
+    /// say.
+    owner_device_credential_gone: AtomicBool,
     owner_device_rooms: AtomicU64,
     owner_device_invites_joined: AtomicU64,
     owner_device_invites_refused: AtomicU64,
@@ -205,6 +222,7 @@ impl Metrics {
             consent_refused_no_connection: AtomicU64::new(0),
             consent_refused_malformed: AtomicU64::new(0),
             owner_device_present: AtomicBool::new(false),
+            owner_device_credential_gone: AtomicBool::new(false),
             owner_device_rooms: AtomicU64::new(0),
             owner_device_invites_joined: AtomicU64::new(0),
             owner_device_invites_refused: AtomicU64::new(0),
@@ -302,6 +320,20 @@ impl Metrics {
 
     pub fn record_invite_failed(&self) {
         self.invites_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The homeserver no longer knows the acting credential: recorded when a
+    /// sync says so, and never unset in this process (#229).
+    pub fn record_owner_device_credential_gone(&self) {
+        self.owner_device_credential_gone
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Whether this deployment still holds a usable device of the owner's
+    /// account: what the send path asks before it posts as them (#229).
+    pub fn owner_device_can_act(&self) -> bool {
+        self.owner_device_present.load(Ordering::Relaxed)
+            && !self.owner_device_credential_gone.load(Ordering::Relaxed)
     }
 
     /// The deployment holds a device of the owner's own account: recorded once
@@ -488,6 +520,16 @@ impl Metrics {
         // @sensor: and no bridge relays them" (issue #123) rather than "the
         // device is in no rooms yet". Two facts a zero would merge.
         if self.owner_device_present.load(Ordering::Relaxed) {
+            // Whether the credential still works, beside the rooms it joined
+            // (#229). Rendered only where the rooms are, for the same reason
+            // they are: on a deployment that was never given a device there is
+            // no credential to have lost.
+            out.push_str("# HELP twalk_sensor_owner_device_credential_gone 1 when the homeserver no longer knows the acting device's token — the owner revoked it, or an admin did — so no reply can be sent as them until a new device is provisioned.\n");
+            out.push_str("# TYPE twalk_sensor_owner_device_credential_gone gauge\n");
+            out.push_str(&format!(
+                "twalk_sensor_owner_device_credential_gone {}\n",
+                u8::from(self.owner_device_credential_gone.load(Ordering::Relaxed))
+            ));
             out.push_str("# HELP twalk_sensor_owner_device_rooms Portal rooms the owner's own device has joined, and whose conversations a bridge will therefore relay its replies to.\n");
             out.push_str("# TYPE twalk_sensor_owner_device_rooms gauge\n");
             out.push_str(&format!(
@@ -519,6 +561,39 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_revoked_acting_credential_is_a_gauge_of_its_own() {
+        // Never given a device: no sample at all, which is the distinction the
+        // room gauge already makes — "replies go out as @sensor:" is not
+        // "the device is in no rooms yet", and neither is "the owner revoked it".
+        let metrics = Metrics::new();
+        let body = metrics.render(1_000);
+        assert!(
+            !body.contains("twalk_sensor_owner_device_credential_gone"),
+            "a deployment with no device has no credential to have lost: {body}"
+        );
+
+        // Given one and still holding it.
+        let metrics = Metrics::new();
+        metrics.record_owner_device_present();
+        assert!(metrics.owner_device_can_act());
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_sensor_owner_device_credential_gone 0\n"),
+            "{body}"
+        );
+
+        // And revoked (#229): the gauge is what an operator's alert reads, and
+        // the send path asks the same question before it posts as the owner.
+        metrics.record_owner_device_credential_gone();
+        assert!(!metrics.owner_device_can_act());
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_sensor_owner_device_credential_gone 1\n"),
+            "{body}"
+        );
+    }
 
     #[test]
     fn the_exposition_is_prometheus_shaped() {

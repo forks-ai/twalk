@@ -1614,14 +1614,32 @@ async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<
                 metrics.record_owner_device_rooms(client.joined_rooms().len() as u64);
                 metrics.record_owner_device_unjoinable_portals(decided.unjoinable.len() as u64);
             }
-            Err(error) => {
-                warn!(
-                    %error,
-                    "the owner's device could not sync; approved replies stay unsendable as the \
-                     user until it does, and are retried rather than reported as sent. Retrying"
-                );
-                tokio::time::sleep(OWNER_DEVICE_RETRY_DELAY).await;
-            }
+            Err(error) => match owner_device::after_refusal(matrix_errcode(&error).as_deref()) {
+                owner_device::AfterRefusal::CredentialGone => {
+                    // ADR 0025's mitigation for a long-lived token at rest is
+                    // that the owner can revoke it from any Matrix client
+                    // without Twalk's involvement — which is only a mitigation
+                    // if revoking it produces a visible result (#229). So: said
+                    // once at `error` with the credential and the remedy named,
+                    // recorded on `/metrics` for a deployment nobody is
+                    // watching the logs of, and this loop **ends**. Nothing in
+                    // this process can put the token back, and a revocation
+                    // retried every thirty seconds for ever is the silence
+                    // wearing a warning's clothes.
+                    metrics.record_owner_device_credential_gone();
+                    error!(%error, "{}", owner_device::REVOKED_REMEDY);
+                    return;
+                }
+                owner_device::AfterRefusal::Retry => {
+                    warn!(
+                        %error,
+                        "the owner's device could not sync; approved replies stay unsendable as \
+                         the user until it does, and are retried rather than reported as sent. \
+                         Retrying"
+                    );
+                    tokio::time::sleep(OWNER_DEVICE_RETRY_DELAY).await;
+                }
+            },
         }
     }
 }
@@ -1644,6 +1662,16 @@ struct Decided {
     /// next attempt may be made. Removed on success, or when the failure
     /// turns out to be permanent.
     retrying: HashMap<matrix_sdk::ruma::OwnedRoomId, (u32, tokio::time::Instant)>,
+}
+
+/// The Matrix error code a failure carries, when it carries one: what
+/// [`owner_device::after_refusal`] decides on (#229). `None` for anything that
+/// is not a Matrix API error — nothing answered, TLS, a proxy's HTML page.
+fn matrix_errcode(error: &matrix_sdk::Error) -> Option<String> {
+    error
+        .as_client_api_error()
+        .and_then(|error| error.error_kind())
+        .map(|kind| kind.errcode().to_string())
 }
 
 /// Reduces a failed join to what the homeserver answered, for
@@ -2500,7 +2528,14 @@ async fn run_approved_reply_consumer(
                 continue;
             }
         };
-        match post_approved_reply(client, owner_device, &job).await {
+        // Asked per approval and not once at startup: the credential can be
+        // revoked while this process runs, which is the whole of #229.
+        let acting = match owner_device {
+            Some(device) if metrics.owner_device_can_act() => Acting::OwnersDevice(device),
+            Some(_) => Acting::CredentialGone,
+            None => Acting::NotConfigured,
+        };
+        match post_approved_reply(client, acting, &job, metrics).await {
             Ok(posted) => {
                 metrics.record_reply_reach(posted.reach);
                 // Reported before the ack, like the dead-letter copy is, so the
@@ -3008,12 +3043,29 @@ struct Posted {
     posted_as: OwnedUserId,
 }
 
+/// What the send path may act as, as the outbound loop finds it.
+///
+/// Three states and not an `Option`, because the middle one is the whole of
+/// #229: a deployment that was **given** a device of the owner's account and no
+/// longer holds a working credential for it is in a different situation from one
+/// that was never given a device, and the two want different answers. Asked per
+/// approval, because a credential can be revoked while this process runs.
+enum Acting<'a> {
+    /// A device of the owner's own account, usable now.
+    OwnersDevice(&'a Client),
+    /// One was configured and the homeserver no longer knows its token.
+    CredentialGone,
+    /// None was configured: every deployment before ADR 0025, and a supported
+    /// state rather than a fault.
+    NotConfigured,
+}
+
 /// Posts one approved reply into its target room, as a native reply to the
 /// original message when the approval names one, **as the owner's own account
 /// wherever that is what the conversation needs** (ADR 0025, issue #123).
 ///
 /// Which identity sends is the whole of this function's judgement, and it is
-/// three cases rather than two.
+/// four cases.
 ///
 /// The owner's device is a **joined member** of the target room: it sends. That
 /// is the case the product is for — the reply really is the user's, so the
@@ -3029,6 +3081,17 @@ struct Posted {
 /// next attempt may well succeed; and when it never does, the retry schedule
 /// dead-letters the approval, which is a reply an operator can find.
 ///
+/// The owner's device was configured and its **credential is gone**, and the
+/// room is a portal: nothing is sent either, and for a harder reason (#229).
+/// The identity this reply would have to go out under is one the deployment no
+/// longer holds, and no attempt can change that until a new device is
+/// provisioned. Transient like the case above, because the approval is then left
+/// unacked: an operator who re-provisions inside the retry schedule restarts the
+/// Sensor, this delivery was never acknowledged, and the bus hands the reply to
+/// the new process — so the owner's reply still goes out. When nobody does, the
+/// schedule dead-letters it carrying [`owner_device::REVOKED_REMEDY`], which is
+/// what the approval screen shows (#311).
+///
 /// There is no owner's device, or there is one and the room is **not a portal**:
 /// the Sensor's own account sends, exactly as it did before any of this existed.
 /// For native Matrix traffic (ADR 0009) that is not a degradation at all — no
@@ -3037,8 +3100,9 @@ struct Posted {
 /// has, kept unchanged and now *reported* rather than passed off as sent.
 async fn post_approved_reply(
     sensor: &Client,
-    owner_device: Option<&Client>,
+    acting: Acting<'_>,
     job: &outbound::ApprovedReply,
+    metrics: &Metrics,
 ) -> Result<Posted, PostError> {
     // Deliberate v1 limitation, mirroring the inbound text-only skeleton:
     // only text/plain is posted; markdown and HTML dead-letter as permanent
@@ -3054,15 +3118,36 @@ async fn post_approved_reply(
 
     let the_room_is_a_portal = the_room_is_a_portal(sensor, &room_id).await;
 
+    let owners_device = match acting {
+        Acting::OwnersDevice(device) => Some(device),
+        Acting::CredentialGone | Acting::NotConfigured => None,
+    };
     let (room, by_the_owners_device) =
-        match owner_device.and_then(|device| joined_room(device, &room_id)) {
+        match owners_device.and_then(|device| joined_room(device, &room_id)) {
             Some(room) => (room, true),
-            None if owner_device.is_some() && the_room_is_a_portal => {
+            None if owners_device.is_some() && the_room_is_a_portal => {
                 return Err(PostError::Transient(anyhow!(
                     "the owner's device has not joined this portal room: a mautrix bridge relays \
                      only the logged-in user's own account, so posting as the Sensor would return \
                      an event id and reach nobody. The device joins a portal when that bridge's \
                      own bot invites it — check SENSOR_BRIDGE_BOTS"
+                )))
+            }
+            // The deployment was given a device of the owner's account and the
+            // homeserver no longer knows it (#229). Nothing is posted: this
+            // reply would have gone out as the owner, and the identity the
+            // deployment would have to act under is one it no longer holds.
+            //
+            // *Transient*, like the unjoined portal above and for the same
+            // reason: the remedy is an operator's and it may arrive inside the
+            // retry schedule, in which case the owner's reply still goes out.
+            // When it does not, the schedule dead-letters the approval with this
+            // reason — which is where the owner learns of it, on the approval
+            // screen (#311), rather than from a reply that silently never came.
+            None if matches!(acting, Acting::CredentialGone) && the_room_is_a_portal => {
+                return Err(PostError::Transient(anyhow!(
+                    "{}",
+                    owner_device::REVOKED_REMEDY
                 )))
             }
             None => (
@@ -3095,7 +3180,7 @@ async fn post_approved_reply(
     room.send(content)
         .with_transaction_id(transaction_id)
         .await
-        .map_err(classify_send_error)?;
+        .map_err(|error| classify_send_error(error, metrics))?;
     Ok(Posted {
         reach: owner_device::reach(by_the_owners_device, the_room_is_a_portal),
         posted_as,
@@ -3218,7 +3303,22 @@ fn duplicate_extensions(event: &serde_json::Value, headers: &mut async_nats::hea
 /// schedule before dead-lettering — notably `M_FORBIDDEN`, which a portal
 /// room's power levels raise and which clears once the Sensor is granted the
 /// right to post, and `M_LIMIT_EXCEEDED`, network and server errors.
-fn classify_send_error(error: matrix_sdk::Error) -> PostError {
+fn classify_send_error(error: matrix_sdk::Error, metrics: &Metrics) -> PostError {
+    // The acting credential, refused by the send rather than by a sync (#229).
+    // This is the thirty-second window the sync loop cannot close on its own: it
+    // learns of a revocation when its long poll comes back, and an approval that
+    // arrives before that is sent under a token the homeserver has already
+    // forgotten. Read here too, so the failure names the credential and the
+    // remedy instead of "matrix send failed", and so the gauge an operator alerts
+    // on moves at the first symptom rather than at the next sync.
+    if matches!(
+        owner_device::after_refusal(matrix_errcode(&error).as_deref()),
+        owner_device::AfterRefusal::CredentialGone
+    ) {
+        metrics.record_owner_device_credential_gone();
+        error!("{}", owner_device::REVOKED_REMEDY);
+        return PostError::Transient(anyhow!("{}", owner_device::REVOKED_REMEDY));
+    }
     let permanent = matches!(
         error.client_api_error_kind(),
         Some(
