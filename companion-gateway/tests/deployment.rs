@@ -52,7 +52,11 @@
 //! run fast. Set TWALK_DEPLOY_TEST_TEARDOWN=1 to drop them at the end of a
 //! passing run instead — by hand, `docker compose -p <stack> down -v`
 //! followed by `docker image rm twalk/companion-gateway:<stack>
-//! twalk/sensor:<stack>`.
+//! twalk/sensor:<stack> twalk/hermes:<stack>
+//! twalk/persona-assistant:<stack>` — all **four** locally built images the
+//! compose file has are tagged per stack since #163, because under its own
+//! `:local` fallback this suite was overwriting the two an operator's stack
+//! runs.
 //!
 //! **One stack, one owner, one teardown** (issue #199). Those three scenarios
 //! share a single compose project, and each of them used to be a
@@ -238,6 +242,67 @@ fn sensor_image() -> String {
         .unwrap_or_else(|| format!("twalk/sensor:{}", deploy_stack()))
 }
 
+/// Same rule for the two images #158 added to the compose file: the Hermes
+/// runtime and the persona image its one-shot service builds (#163).
+///
+/// This suite builds those services by name, and until this ticket it built them
+/// under the shared `:local` tags the compose file falls back to — which is what
+/// #38 exists to prevent: two worktrees racing for one tag, and a run beside a
+/// live reference deployment rebuilding the image that deployment's Hermes will
+/// start the next time it restarts a persona.
+///
+/// `HERMES_PERSONAS` is unset here, so `hermes` idles and hosts nothing: the
+/// tags have to be this stack's, and nothing else has to be kept in step.
+fn hermes_image() -> String {
+    format!("twalk/hermes:{}", deploy_stack())
+}
+
+/// [`hermes_image`] for the persona image the stack's one-shot service builds.
+fn persona_image() -> String {
+    format!("twalk/persona-assistant:{}", deploy_stack())
+}
+
+/// The tags this suite builds under, asserted the cheap way the ticket asks for
+/// — by what the suite decides, never by inspecting the daemon (#163).
+///
+/// `:local` is the compose file's own fallback and what an **operator's** stack
+/// runs. A suite that built under it would overwrite the image that stack's
+/// Hermes starts the next time it restarts a persona, and two worktrees would
+/// race for one tag (#38).
+///
+/// The Sensor's and the Gateway's tags are overridable, as they are for an
+/// operator, so they are only asserted when nothing overrode them: a run that
+/// passed a tag in chose it, and this test has no business second-guessing it.
+/// The two added here take no override, so they are asserted unconditionally.
+#[test]
+fn every_image_this_suite_builds_is_tagged_per_stack_and_never_local() {
+    let stack = deploy_stack();
+    let per_stack = format!(":{stack}");
+
+    for image in [hermes_image(), persona_image()] {
+        assert!(
+            image.ends_with(&per_stack),
+            "{image} must carry this stack's tag, not the compose file's :local"
+        );
+    }
+
+    for (variable, image) in [
+        ("TWALK_SENSOR_IMAGE", sensor_image()),
+        ("TWALK_GATEWAY_IMAGE", gateway_image()),
+    ] {
+        if std::env::var(variable)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        assert!(
+            image.ends_with(&per_stack),
+            "{image} must carry this stack's tag when {variable} did not choose one"
+        );
+    }
+}
+
 fn deploy_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../deploy/docker-compose")
 }
@@ -254,6 +319,7 @@ fn write_env_file() -> Result<PathBuf> {
         std::process::id()
     ));
     let (gateway_image, sensor_image) = (gateway_image(), sensor_image());
+    let (hermes_image, persona_image) = (hermes_image(), persona_image());
     let (gateway_port, synapse_port, nats_port) = (gateway_port(), synapse_port(), nats_port());
     let owner = owner_user_id();
     let credential_path = credential_file();
@@ -282,7 +348,9 @@ fn write_env_file() -> Result<PathBuf> {
          GATEWAY_SERVICE_TOKEN={SERVICE_TOKEN}\n\
          HERMES_LLM_API_KEY_FILE={credential_file}\n\
          TWALK_GATEWAY_IMAGE={gateway_image}\n\
-         TWALK_SENSOR_IMAGE={sensor_image}\n"
+         TWALK_SENSOR_IMAGE={sensor_image}\n\
+         TWALK_HERMES_IMAGE={hermes_image}\n\
+         TWALK_PERSONA_IMAGE={persona_image}\n"
     );
     // The credential the operator supplies as a file (#98). compose mounts
     // this same host path into the Gateway and into the Hermes runtime, so
@@ -372,7 +440,12 @@ fn teardown_requested() -> bool {
 /// #199, where three tests each tore down a stack the others were using.
 async fn teardown(env_file: &Path) -> Result<()> {
     compose_change(env_file, &["down", "-v", "--remove-orphans"], "down -v").await?;
-    for image in [gateway_image(), sensor_image()] {
+    for image in [
+        gateway_image(),
+        sensor_image(),
+        hermes_image(),
+        persona_image(),
+    ] {
         let output = Command::new("docker")
             .args(["image", "rm", &image])
             .output()
