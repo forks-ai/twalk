@@ -29,6 +29,153 @@ use crate::bridge_bot::BridgeBots;
 /// same reason it is per-session everywhere else — its rooms, its sync token.
 pub const STORE_SUBDIR: &str = "owner-device";
 
+/// The to-device event the browser hands the credential over in (ADR 0034,
+/// issue #228), and what the Sensor must refuse.
+///
+/// # The channel, and why it is this one
+///
+/// ADR 0025 needs a device of the owner's own account; ADR 0034 decided it is
+/// created **in the browser** during onboarding and reaches the Sensor as an
+/// Olm-encrypted to-device message addressed to the Sensor's own device — so the
+/// Companion Gateway is not in the path at all, and ADR 0011's sentence about
+/// the Gateway storing no Matrix token stays literally true rather than being
+/// amended. A long-lived credential of the user's account relayed through a
+/// Gateway would sit in request bodies and logs for the life of the deployment;
+/// what transits there today is a token the browser already had and the Gateway
+/// drops within one call, which is a different thing.
+///
+/// # Three refusals, and they are one answer
+///
+/// A handover is accepted **only** when it arrived decrypted and the device that
+/// sent it is the one this deployment expects. Everything else is discarded and
+/// counted:
+///
+/// - **in the clear**: either an attacker's or a bug, and the two deserve the
+///   same answer. Nothing about a plaintext to-device event says which, so
+///   neither is trusted;
+/// - **undecryptable**: the same, from the other side. It is also what a future
+///   hardening of the Sensor's trust requirement would turn this channel into
+///   (ADR 0034 records that), so it must read as a refusal and not as an error
+///   nobody recognises;
+/// - **from a device nobody expected**: any account on any homeserver can send
+///   a to-device event to the Sensor. The sender being the owner is necessary
+///   and not sufficient — the owner's *browser* is one of their devices, and the
+///   credential must come from the one the handover room is with.
+///
+/// Refusing is not the same as failing: the Sensor goes on doing everything else
+/// it does. A deployment whose onboarding was interrupted is one with no acting
+/// device, which is the state it was already in.
+pub const HANDOVER_EVENT_TYPE: &str = "fr.linagora.twalk.owner_device.handover";
+
+/// What the browser puts in it: the credential, and nothing that is not needed
+/// to use it.
+///
+/// The `device_id` travels beside the token because the crypto store is bound to
+/// one device (matrix-sdk refuses to open one belonging to another), so a token
+/// without its device id is a credential the Sensor cannot act under. The
+/// `user_id` travels because the Sensor refuses a credential for an account that
+/// is not the owner's, at startup today and here too: a device of somebody
+/// else's account would join portal rooms as a stranger and write into other
+/// people's conversations under a Matrix ID nobody chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handover {
+    pub user_id: String,
+    pub device_id: String,
+    pub access_token: String,
+}
+
+/// Why a to-device event is not a handover this Sensor will act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotAHandover {
+    /// Another to-device event entirely. The ordinary case: a homeserver
+    /// delivers key requests, verification starts and whatever else on the same
+    /// channel, and a Sensor that logged about each would drown the one that
+    /// matters.
+    AnotherType,
+    /// It arrived in the clear, or this Sensor could not decrypt it.
+    NotEncrypted,
+    /// Decrypted, and from a device this deployment does not expect.
+    UnexpectedSender,
+    /// The shape is wrong: a field missing, or one that is not a string.
+    Unreadable,
+    /// A credential for an account that is not the owner's.
+    NotTheOwners,
+}
+
+impl NotAHandover {
+    /// The label of `twalk_sensor_handovers_refused_total{why}`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AnotherType => "another_type",
+            Self::NotEncrypted => "not_encrypted",
+            Self::UnexpectedSender => "unexpected_sender",
+            Self::Unreadable => "unreadable",
+            Self::NotTheOwners => "not_the_owners",
+        }
+    }
+}
+
+/// What the Sensor knows about a to-device event before it reads its content.
+///
+/// A struct of what matrix-sdk can be asked rather than the SDK's own types, for
+/// the reason [`JoinAnswer`] and [`SyncAnswer`] are: the decision is policy,
+/// gets tested without a homeserver, and `main.rs` does the asking.
+#[derive(Debug, Clone)]
+pub struct Delivered<'a> {
+    pub event_type: &'a str,
+    /// Whether the event arrived Olm-encrypted **and decrypted**: the two are
+    /// one question here, because an event this Sensor could not decrypt is one
+    /// it knows nothing about.
+    pub decrypted: bool,
+    /// The sender's device, as the decryption itself reported it — never as the
+    /// event's own content claims it. A field inside a payload is the sender's
+    /// word; `EncryptionInfo` is the crypto machine's.
+    pub sender_device: Option<&'a str>,
+}
+
+/// Reads a to-device event for the credential, or says why it is not one.
+///
+/// `expected_device` is the device the handover is expected from — the browser
+/// that shares the handover room with this Sensor. `owner` is the account the
+/// credential must belong to.
+pub fn handover_in(
+    delivered: &Delivered<'_>,
+    content: &serde_json::Value,
+    expected_device: Option<&str>,
+    owner: &str,
+) -> Result<Handover, NotAHandover> {
+    if delivered.event_type != HANDOVER_EVENT_TYPE {
+        return Err(NotAHandover::AnotherType);
+    }
+    if !delivered.decrypted {
+        return Err(NotAHandover::NotEncrypted);
+    }
+    // An expected device that is not configured refuses everything: a Sensor
+    // that accepted a credential from any device of the owner's would accept one
+    // from a browser session somebody else opened on their account.
+    match (expected_device, delivered.sender_device) {
+        (Some(expected), Some(sender)) if expected == sender => {}
+        _ => return Err(NotAHandover::UnexpectedSender),
+    }
+    let string = |name: &str| -> Result<String, NotAHandover> {
+        content
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .filter(|value| !value.is_empty())
+            .ok_or(NotAHandover::Unreadable)
+    };
+    let handover = Handover {
+        user_id: string("user_id")?,
+        device_id: string("device_id")?,
+        access_token: string("access_token")?,
+    };
+    if handover.user_id != owner {
+        return Err(NotAHandover::NotTheOwners);
+    }
+    Ok(handover)
+}
+
 /// What the owner's device may do with one pending invitation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Invitation {
@@ -503,5 +650,146 @@ mod tests {
         assert!(
             reach(false, true).as_str() == "nobody" && !reach(false, true).reaches_the_contact()
         );
+    }
+    /// The handover's three refusals and its one acceptance (#228).
+    #[test]
+    fn a_handover_is_accepted_only_decrypted_and_from_the_device_expected() {
+        const BROWSER: &str = "BROWSERDEV";
+        let content = serde_json::json!({
+            "user_id": OWNER,
+            "device_id": "TWALKDEVICE",
+            "access_token": "syt_the-owners-own-device",
+        });
+        let delivered =
+            |event_type: &'static str, decrypted: bool, sender: Option<&'static str>| Delivered {
+                event_type,
+                decrypted,
+                sender_device: sender,
+            };
+        let read = |d: Delivered<'_>, content: &serde_json::Value, expected: Option<&str>| {
+            handover_in(&d, content, expected, OWNER)
+        };
+
+        // The one that is accepted, and what it yields.
+        assert_eq!(
+            read(
+                delivered(HANDOVER_EVENT_TYPE, true, Some(BROWSER)),
+                &content,
+                Some(BROWSER)
+            ),
+            Ok(Handover {
+                user_id: OWNER.to_owned(),
+                device_id: "TWALKDEVICE".to_owned(),
+                access_token: "syt_the-owners-own-device".to_owned(),
+            })
+        );
+
+        // Another to-device event entirely: the ordinary case, and not worth a
+        // word in the log.
+        assert_eq!(
+            read(
+                delivered("m.room_key_request", true, Some(BROWSER)),
+                &content,
+                Some(BROWSER)
+            ),
+            Err(NotAHandover::AnotherType)
+        );
+
+        // In the clear: either an attacker's or a bug, and the two get the same
+        // answer because nothing about a plaintext event says which.
+        assert_eq!(
+            read(
+                delivered(HANDOVER_EVENT_TYPE, false, Some(BROWSER)),
+                &content,
+                Some(BROWSER)
+            ),
+            Err(NotAHandover::NotEncrypted)
+        );
+
+        // From a device nobody expected — including another device of the
+        // owner's own, which is the case a check on the *sender* would miss.
+        assert_eq!(
+            read(
+                delivered(HANDOVER_EVENT_TYPE, true, Some("SOMEOTHERDEV")),
+                &content,
+                Some(BROWSER)
+            ),
+            Err(NotAHandover::UnexpectedSender)
+        );
+        // When the deployment expects none, nothing is accepted: a Sensor that
+        // took a credential from any device of the owner's would take one from a
+        // browser session somebody else opened on their account.
+        assert_eq!(
+            read(
+                delivered(HANDOVER_EVENT_TYPE, true, Some(BROWSER)),
+                &content,
+                None
+            ),
+            Err(NotAHandover::UnexpectedSender)
+        );
+        // And a decryption that named no device is not a device that matched.
+        assert_eq!(
+            read(
+                delivered(HANDOVER_EVENT_TYPE, true, None),
+                &content,
+                Some(BROWSER)
+            ),
+            Err(NotAHandover::UnexpectedSender)
+        );
+
+        // A credential for somebody else's account: refused here for the reason
+        // it is refused at startup — a device of another account would join
+        // portal rooms as a stranger and write under a Matrix ID nobody chose.
+        let theirs = serde_json::json!({
+            "user_id": STRANGER,
+            "device_id": "TWALKDEVICE",
+            "access_token": "syt_not-the-owners",
+        });
+        assert_eq!(
+            read(
+                delivered(HANDOVER_EVENT_TYPE, true, Some(BROWSER)),
+                &theirs,
+                Some(BROWSER)
+            ),
+            Err(NotAHandover::NotTheOwners)
+        );
+
+        // And every shape that is not the credential.
+        for broken in [
+            serde_json::json!({ "user_id": OWNER, "device_id": "D" }),
+            serde_json::json!({ "user_id": OWNER, "device_id": "D", "access_token": "" }),
+            serde_json::json!({ "user_id": OWNER, "device_id": 7, "access_token": "t" }),
+            serde_json::json!("not an object at all"),
+        ] {
+            assert_eq!(
+                read(
+                    delivered(HANDOVER_EVENT_TYPE, true, Some(BROWSER)),
+                    &broken,
+                    Some(BROWSER)
+                ),
+                Err(NotAHandover::Unreadable),
+                "{broken}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_handover_refusal_has_a_label_of_its_own() {
+        // The labels are a metric's, so a collision would merge two facts an
+        // operator has to tell apart.
+        let labels: Vec<&str> = [
+            NotAHandover::AnotherType,
+            NotAHandover::NotEncrypted,
+            NotAHandover::UnexpectedSender,
+            NotAHandover::Unreadable,
+            NotAHandover::NotTheOwners,
+        ]
+        .iter()
+        .map(NotAHandover::as_str)
+        .collect();
+        let mut unique = labels.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(labels.len(), unique.len(), "{labels:?}");
     }
 }
