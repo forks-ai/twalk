@@ -1063,6 +1063,15 @@ export interface paths {
          *     this list is read, so an upgraded deployment stops offering the user a
          *     decision about their own ghost (ticket #149, ADR 0018, ADR 0021).
          *
+         *     **What a grant would answer.** With `?waiting=true`, each row carries a
+         *     `waiting`: how many of that contact's messages, on that row's
+         *     connection, arrived inside the reach and are still waiting for a
+         *     decision — the ones a grant made now would answer (#364, ADR 0040), and
+         *     `reach_seconds` is the window they were counted over. Counted from the
+         *     bus per request and stored nowhere, like a display name. Without the
+         *     parameter every `waiting` is `null`, and so it is when the count itself
+         *     failed: neither is `0`, which is the answer "nothing is waiting".
+         *
          *     **The numbers.** `total`, `connections` and `networks` always count
          *     the whole list, whatever `?connection=` or `?network=` narrows
          *     `contacts` to, so a badge and the list beside it can never disagree.
@@ -3723,9 +3732,10 @@ export interface components {
         };
         /**
          * @description One contact waiting for a decision, on one connection. An id, a
-         *     perimeter and two instants — and deliberately nothing else: a body, a
-         *     display name or a network identifier would each turn this list into
-         *     something else. `network` is the connection's kind (#270).
+         *     perimeter, two instants and what a grant would answer — and
+         *     deliberately nothing else: a body, a display name or a network
+         *     identifier would each turn this list into something else. `network` is
+         *     the connection's kind (#270).
          */
         PendingContact: {
             /**
@@ -3751,6 +3761,37 @@ export interface components {
              */
             last_seen: string;
             network: components["schemas"]["Network"];
+            /**
+             * @description How many messages from this contact a grant would answer if the
+             *     owner granted them now (#364): the ones that arrived on **this
+             *     row's connection** inside the reach and are still labelled
+             *     `pending`. `null` unless the request asked for it with
+             *     `?waiting=true`.
+             *
+             *     The connection is part of it because a decision is scoped to one
+             *     (ADR 0033): the same person's messages on another connection are
+             *     another row's number, and granting here does not answer them.
+             *
+             *     A grant reaches backwards a bounded distance — the reach,
+             *     `GATEWAY_GRANT_REACH_SECONDS`, an hour by default — because a
+             *     contact becomes interesting precisely because they just wrote: the
+             *     owner watches a message land, grants, and expects the thing they
+             *     granted for to be answered. This number is what lets the screen say
+             *     so *before* the decision, which is the difference between a replay
+             *     and a surprise.
+             *
+             *     Counted from the bus per request and stored nowhere, like a display
+             *     name: the Gateway holds no per-message history and this list is not
+             *     where one starts.
+             *
+             *     `0` means nothing is waiting — a real answer, and the one a screen
+             *     should show as "this grant answers nothing". `null` means it was not
+             *     counted: either the caller did not ask, or the bus read failed. Both
+             *     are different facts from `0`, the list beside them is still true, and
+             *     a screen must not render either as `0`.
+             * @example 1
+             */
+            waiting: number | null;
         };
         PendingContactCount: {
             /** @description How many contacts are waiting on that network. */
@@ -3778,6 +3819,22 @@ export interface components {
              *     than present at zero.
              */
             networks: components["schemas"]["PendingContactCount"][];
+            /**
+             * @description How far back a grant reaches on this deployment, in seconds
+             *     (`GATEWAY_GRANT_REACH_SECONDS`, an hour by default, #364): the
+             *     window each row's `waiting` is counted over.
+             *
+             *     Served with the list rather than with a row because it is the same
+             *     for every row, and served at all because a screen that shows a
+             *     count has to be able to name the window it counts — "two messages
+             *     will be answered" is a promise the owner can only weigh if they
+             *     know how far back it goes.
+             *
+             *     `0` is a deployment that has turned the reach off: every `waiting`
+             *     is then `0`, and a grant answers nothing that arrived before it.
+             * @example 3600
+             */
+            reach_seconds: number;
             /**
              * @description How many contacts are waiting for a decision in all - the
              *     dashboard's number. Counts the whole list, never only what a
@@ -7131,6 +7188,17 @@ export interface operations {
                  *     kind. The counts are unaffected.
                  */
                 network?: components["schemas"]["Network"];
+                /**
+                 * @description `true` fills each row's `waiting`: how many of that contact's
+                 *     messages a grant would answer (#364). Opt-in, because counting is a
+                 *     read of the bus over the reach's window and this endpoint is also
+                 *     what the dashboard polls for its badge — the consent screen asks for
+                 *     it when the owner is about to decide, and a screen that draws only
+                 *     the totals pays nothing. Any other value is refused
+                 *     (`400 unknown_value`) rather than read as `false`, so a caller
+                 *     never gets `null` because of a spelling.
+                 */
+                waiting?: "true";
             };
             header?: never;
             path?: never;

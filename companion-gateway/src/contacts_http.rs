@@ -38,10 +38,10 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::consent::Network;
-use crate::contacts::{pending_json, MAX_DISPLAY_NAME_LOOKUPS};
+use crate::contacts::{pending_json, Reach, MAX_DISPLAY_NAME_LOOKUPS};
 use crate::http::Gateway;
 use crate::store::SeenContact;
 
@@ -83,6 +83,16 @@ pub fn routes() -> Router<Gateway> {
 /// short row per contact the user has not answered about, and a list that
 /// grows without bound is a deployment whose owner has stopped deciding, not
 /// a shape problem.
+///
+/// `?waiting=true` adds, on each row, how many of that contact's messages a
+/// grant would answer (#364) — the ones inside the reach, on that row's
+/// connection, still labelled `pending`. It is opt-in because it is a read of
+/// the bus and this is also the endpoint the dashboard polls every fifteen
+/// seconds: the consent screen asks for it once, when the owner is about to
+/// decide, and the dashboard's badge pays nothing for a number it does not
+/// draw. Without it every row's `waiting` is `null`, which is also what a
+/// failed count gives — a screen must not render either as `0`, because zero
+/// is the answer "nothing is waiting" and the owner would act on it.
 async fn pending_contacts(
     State(gateway): State<Gateway>,
     Query(query): Query<HashMap<String, String>>,
@@ -119,8 +129,47 @@ async fn pending_contacts(
         },
         (None, None) => None,
     };
+    // What a grant will answer, counted on demand over the reach's own window
+    // (#364) — and only when the caller asks, because counting is a read of the
+    // bus and this endpoint is also what the dashboard polls every fifteen
+    // seconds for its badge. The screen that needs the number asks for it once;
+    // the screen that needs only the totals pays nothing.
+    //
+    // A refused read leaves the count out of every row rather than reporting
+    // zero: "nothing is waiting" is an answer the owner would act on, and it
+    // must not be what a failed bus read looks like.
+    let asked_to_count = match query.get("waiting").filter(|value| !value.is_empty()) {
+        None => false,
+        Some(value) if value == "true" => true,
+        Some(value) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "unknown_value",
+                &format!("waiting has the unknown value {value:?}: the only value is \"true\""),
+            )
+        }
+    };
+    let waiting = if !asked_to_count {
+        None
+    } else {
+        match contacts.waiting().await {
+            Ok(counted) => Some(counted),
+            Err(error) => {
+                warn!(%error, "failed to count the messages a grant would answer");
+                None
+            }
+        }
+    };
     match contacts.pending() {
-        Ok(pending) => Json(pending_document(&pending, filter.as_ref())).into_response(),
+        Ok(pending) => Json(pending_document(
+                &pending,
+                filter.as_ref(),
+                &Reach {
+                    seconds: contacts.grant_reach().as_secs(),
+                    counted: waiting.as_ref(),
+                },
+            ))
+        .into_response(),
         Err(error) => {
             error!(%error, "failed to read the pending contacts");
             api_error(
@@ -304,7 +353,11 @@ impl Filter {
 /// disagree without either being wrong. Two breakdowns: per connection —
 /// the one a screen that decides per connection reads (#272) — and per
 /// network, kept for a screen that has not learned connections yet.
-fn pending_document(pending: &[SeenContact], filter: Option<&Filter>) -> Value {
+fn pending_document(
+    pending: &[SeenContact],
+    filter: Option<&Filter>,
+    reach: &Reach<'_>,
+) -> Value {
     // A stable order whatever order the rows arrived in: the contract's own
     // ordering of network values, then the connection's id.
     let by_connection = tally(pending, |seen| {
@@ -313,6 +366,7 @@ fn pending_document(pending: &[SeenContact], filter: Option<&Filter>) -> Value {
     let by_network = tally(pending, |seen| (seen.network.as_str(), ""));
     json!({
         "total": pending.len(),
+        "reach_seconds": reach.seconds,
         "connections": by_connection
             .iter()
             .map(|((network, connection), count)| {
@@ -326,7 +380,7 @@ fn pending_document(pending: &[SeenContact], filter: Option<&Filter>) -> Value {
         "contacts": pending
             .iter()
             .filter(|seen| filter.is_none_or(|filter| filter.admits(seen)))
-            .map(pending_json)
+            .map(|seen| pending_json(seen, reach))
             .collect::<Vec<_>>(),
     })
 }
@@ -399,7 +453,7 @@ mod tests {
                 "2026-09-17T10:02:00.000Z",
             ),
         ];
-        let whole = pending_document(&pending, None);
+        let whole = pending_document(&pending, None, &Reach::uncounted(crate::contacts::DEFAULT_GRANT_REACH_SECONDS));
         assert_eq!(whole["total"], json!(3));
         assert_eq!(
             whole["networks"],
@@ -419,7 +473,7 @@ mod tests {
         );
         assert_eq!(whole["contacts"].as_array().map(Vec::len), Some(3));
 
-        let filtered = pending_document(&pending, Some(&Filter::Network(Network::Signal)));
+        let filtered = pending_document(&pending, Some(&Filter::Network(Network::Signal)), &Reach::uncounted(crate::contacts::DEFAULT_GRANT_REACH_SECONDS));
         assert_eq!(
             filtered["total"],
             json!(3),
@@ -456,7 +510,7 @@ mod tests {
                 "2026-09-17T10:02:00.000Z",
             ),
         ];
-        let whole = pending_document(&pending, None);
+        let whole = pending_document(&pending, None, &Reach::uncounted(crate::contacts::DEFAULT_GRANT_REACH_SECONDS));
         assert_eq!(
             whole["connections"],
             json!([
@@ -468,23 +522,36 @@ mod tests {
             whole["networks"],
             json!([{ "network": "whatsapp", "count": 3 }])
         );
-        let work = pending_document(&pending, Some(&Filter::Connection("wa-work".to_owned())));
+        let work = pending_document(
+            &pending,
+            Some(&Filter::Connection("wa-work".to_owned())),
+            &Reach::uncounted(crate::contacts::DEFAULT_GRANT_REACH_SECONDS),
+        );
         assert_eq!(work["contacts"].as_array().map(Vec::len), Some(2));
         assert_eq!(work["total"], json!(3), "the total is the whole list");
-        let whatsapp = pending_document(&pending, Some(&Filter::Network(Network::Whatsapp)));
+        let whatsapp = pending_document(&pending, Some(&Filter::Network(Network::Whatsapp)), &Reach::uncounted(crate::contacts::DEFAULT_GRANT_REACH_SECONDS));
         assert_eq!(whatsapp["contacts"].as_array().map(Vec::len), Some(3));
     }
 
     #[test]
     fn an_empty_list_is_a_document_and_not_an_absence() {
         assert_eq!(
-            pending_document(&[], None),
-            json!({ "total": 0, "connections": [], "networks": [], "contacts": [] })
+            pending_document(&[], None, &Reach::uncounted(crate::contacts::DEFAULT_GRANT_REACH_SECONDS)),
+            json!({
+                "total": 0,
+                // The reach travels with the list and not with a row, because
+                // it is the same for every one of them and the screen needs it
+                // to name the window even when there is nothing waiting (#364).
+                "reach_seconds": crate::contacts::DEFAULT_GRANT_REACH_SECONDS,
+                "connections": [],
+                "networks": [],
+                "contacts": []
+            })
         );
     }
 
     #[test]
-    fn a_pending_contact_carries_nothing_but_its_four_values() {
+    fn a_pending_contact_carries_nothing_but_the_values_it_is() {
         let document = pending_document(
             &[seen(
                 "@whatsapp_33612345678:example.com",
@@ -492,6 +559,7 @@ mod tests {
                 "2026-09-17T10:00:00.000Z",
             )],
             None,
+            &Reach::uncounted(crate::contacts::DEFAULT_GRANT_REACH_SECONDS),
         );
         let entry = &document["contacts"][0];
         let members: Vec<&String> = entry.as_object().expect("an object").keys().collect();
@@ -502,7 +570,11 @@ mod tests {
                 "contact",
                 "first_seen",
                 "last_seen",
-                "network"
+                "network",
+                // How many messages a grant would answer (#364): a number
+                // counted from the bus per request and held nowhere. The one
+                // member here that is not a column of the store.
+                "waiting"
             ],
             "a body, a display name or a network identifier must never be one of these"
         );

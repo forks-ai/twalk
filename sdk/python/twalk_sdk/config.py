@@ -18,6 +18,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from .language import USER_LANGUAGE_VARIABLE
 from .language import parse as parse_language
+from .consent import DEFAULT_GRANT_REACH_SECONDS, GrantReach
 from .policy import DEFAULT_SUGGESTION_TTL_SECONDS, SuggestionPolicy
 from .webhook import HermesSeam, SeamError
 
@@ -123,6 +124,14 @@ class Config:
     #: a persona's own judgement: the window the user gets to approve in is
     #: the operator's to set, while what to suggest is the persona's.
     suggestion: SuggestionPolicy = field(default_factory=SuggestionPolicy)
+    #: How far back a grant reaches (issue #364): the messages a newly granted
+    #: contact sent within it are answered, the older ones never are. The
+    #: operator's to set for the same reason the window above is — how long a
+    #: message stays worth answering is a deployment's judgement, not a
+    #: persona's — and it is the number the consent screen states before the
+    #: owner decides, which is why the Companion Gateway reads the same
+    #: variable.
+    reach: GrantReach = field(default_factory=GrantReach)
     #: The seam to Hermes (:mod:`twalk_sdk.webhook`), or ``None`` when this
     #: deployment configured none — in which case the persona reasons with
     #: the model endpoint above and speaks to nothing outside the deployment,
@@ -163,6 +172,22 @@ class Config:
         always comes back to the same consumer.
         """
         return self.consumer_name or f"persona-{self.persona_id}"
+
+    @property
+    def decisions_durable_name(self) -> str:
+        """The durable consumer's name for the owner's consent decisions.
+
+        A second consumer rather than a second filter on the first: the two
+        subjects are read at different paces and one of them must not hold the
+        other up, and a decision that fails to replay is retried without putting
+        a message's delivery count at risk. Durable for the same reason the first
+        one is — a grant made while this persona was restarting is still a grant
+        it has to act on (issue #364).
+
+        Where it starts from is not this property's business and is argued where
+        it is set, :meth:`twalk_sdk.persona.Persona._subscribe_to_decisions`.
+        """
+        return f"{self.durable_name}-decisions"
 
     def subject(self, event_type: str) -> str:
         """The bus subject of a contract event type.
@@ -231,6 +256,22 @@ class Config:
                 f"approvable, in whole seconds (got {ttl_raw!r}): {error}"
             ) from error
 
+        reach_raw = optional(
+            "TWALK_GRANT_REACH_SECONDS", str(DEFAULT_GRANT_REACH_SECONDS)
+        )
+        try:
+            reach = GrantReach(seconds=int(reach_raw))
+        except ValueError as error:
+            # `int()` and the reach's own refusals land here alike: a value
+            # that is not a number of seconds, a negative one, and one past the
+            # bus's duplicate window are all the same kind of mistake — an
+            # operator who has said something about how far back a grant
+            # reaches that cannot be honoured.
+            raise ConfigError(
+                "TWALK_GRANT_REACH_SECONDS is how far back a grant reaches, "
+                f"in whole seconds (got {reach_raw!r}): {error}"
+            ) from error
+
         try:
             user_language = parse_language(env.get(USER_LANGUAGE_VARIABLE))
         except ValueError as error:
@@ -265,6 +306,7 @@ class Config:
             consumer_name=(env.get("TWALK_PERSONA_CONSUMER") or "").strip() or None,
             log_level=optional("TWALK_LOG_LEVEL", "info"),
             suggestion=suggestion,
+            reach=reach,
             user_language=user_language,
             hermes=hermes,
         )

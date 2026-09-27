@@ -66,6 +66,12 @@ export interface Waiting {
 	total: number;
 	connections: PendingConnectionCount[];
 	networks: PendingCount[];
+	/**
+	 * How far back a grant reaches on this deployment, in seconds (#364): the
+	 * window each row's own `waiting` count was taken over, and the one the
+	 * screen names so that a count is a promise the owner can weigh.
+	 */
+	reachSeconds: number;
 }
 
 export interface Loaded {
@@ -113,7 +119,14 @@ const NAMES_PER_CALL = 200;
 /** Everything the screen draws, in one call. */
 export async function load(): Promise<Load> {
 	const [waitingAnswer, stateAnswer, registry] = await Promise.all([
-		gateway.GET('/api/contacts/pending').catch(() => null),
+		// `waiting=true` asks the Gateway to count what a grant would answer
+		// (#364). Opt-in at the API because counting is a read of the bus, and
+		// this screen is the one that needs it: it says the number before the
+		// owner decides. The dashboard reads the same endpoint for a badge and
+		// asks for no count.
+		gateway
+			.GET('/api/contacts/pending', { params: { query: { waiting: 'true' } } })
+			.catch(() => null),
 		gateway.GET('/api/consent/state').catch(() => null),
 		// The registry names an account when a kind has two (#272). A read
 		// that fails takes away only what it answers: the rows still read,
@@ -165,7 +178,12 @@ export async function load(): Promise<Load> {
 			waiting:
 				counted === undefined
 					? null
-					: { total: counted.total, connections: counted.connections, networks: counted.networks },
+					: {
+							total: counted.total,
+							connections: counted.connections,
+							networks: counted.networks,
+							reachSeconds: counted.reach_seconds
+						},
 			waitingProblem,
 			namesProblem: problem
 		}

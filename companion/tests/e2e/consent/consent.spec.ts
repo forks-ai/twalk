@@ -253,9 +253,19 @@ test.describe('the consent screen', () => {
 
 		// The two things the screen must say and that a user would otherwise
 		// discover by being confused.
-		await expect(page.getByTestId('not-retroactive')).toBeVisible();
+		await expect(page.getByTestId('about-the-past')).toBeVisible();
 		await expect(page.getByTestId('never-decided-explained')).toBeVisible();
 		await expect(page.getByTestId('not-theirs')).toBeVisible();
+
+		// And the third, which until #364 the screen got wrong on purpose: it
+		// told the owner to grant somebody and then wait for their next message,
+		// because that was all a grant could do. This contact wrote a moment
+		// ago, so the row says the message is waiting on this decision, and the
+		// legend names the window instead of leaving it to be inferred.
+		const willAnswer = row.getByTestId('row-will-answer');
+		await expect(willAnswer).toBeVisible();
+		expect(Number(await willAnswer.getAttribute('data-waiting'))).toBeGreaterThan(0);
+		await expect(page.getByTestId('about-the-past')).toContainText(/minute/i);
 	});
 
 	test('granting in the browser labels the next message granted on the bus', async ({
@@ -290,6 +300,11 @@ test.describe('the consent screen', () => {
 			// answer rather than from what it believes it just did.
 			await expect(row).toHaveAttribute('data-state', 'granted');
 			await expect(row).toHaveAttribute('data-decided-by', 'contact');
+
+			// What it says about the past is now true (#364): the decision just
+			// taken reaches the messages that were still waiting for it, and the
+			// confirmation says so rather than saying the opposite.
+			await expect(row.getByTestId('row-recorded')).toContainText(/minute/i);
 
 			// Two, and this is the criterion: a **subsequent** message carries
 			// `granted`. Resent until the label flips, because the Sensor's

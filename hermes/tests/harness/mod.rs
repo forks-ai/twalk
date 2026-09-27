@@ -407,6 +407,32 @@ impl PersonaRun {
         Ok(())
     }
 
+    /// Waits until the persona's log holds `needle` at least `times` over,
+    /// with the log itself in the failure.
+    ///
+    /// A log line is a weak assertion on its own and a strong one beside an
+    /// assertion about the bus: it says *why* the bus holds what it holds —
+    /// that a message was refused by the gate rather than never delivered,
+    /// that a grant reached three messages rather than one — and those are
+    /// the two failures a reader of this suite has to tell apart.
+    pub async fn wait_logged(&self, needle: &str, times: usize) -> Result<()> {
+        let seen = poll_until(
+            || async {
+                let logs = self.logs().await.ok()?;
+                (logs.matches(needle).count() >= times).then_some(())
+            },
+            &format!("{times}× {needle:?} in the persona's log"),
+        )
+        .await;
+        if seen.is_err() {
+            bail!(
+                "the persona never logged {needle:?} {times}×; its logs were:\n{}",
+                self.logs().await.unwrap_or_default()
+            );
+        }
+        Ok(())
+    }
+
     /// The bus subject a contract event type travels on, in this run's
     /// namespace.
     pub fn subject(&self, event_type: &str) -> String {

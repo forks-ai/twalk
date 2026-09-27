@@ -111,6 +111,19 @@ pub struct Config {
     /// with — and what filled the owner's activity feed with pairs that cancel
     /// themselves, five times in twelve hours.
     pub bridge_status_grace_seconds: u64,
+    /// How far back a grant reaches, in seconds
+    /// (`GATEWAY_GRANT_REACH_SECONDS`, default
+    /// [`crate::contacts::DEFAULT_GRANT_REACH_SECONDS`], #364). The Gateway
+    /// does not act on it: the persona does. What the Gateway does with it is
+    /// tell the owner, *before* they grant, how many of that contact's
+    /// messages a grant will answer — so this number has to be the one the
+    /// persona was given (`TWALK_GRANT_REACH_SECONDS`, by way of the runtime's
+    /// `HERMES_GRANT_REACH_SECONDS`), and the compose file wires all three
+    /// from one value because two that disagree make that sentence a lie.
+    ///
+    /// `0` is a deployment that has turned the reach off; the screen then says
+    /// a grant answers nothing, which is what will happen.
+    pub grant_reach_seconds: u64,
     /// How often the portal register is re-read in the background, in
     /// seconds (GATEWAY_PORTAL_REFRESH_SECONDS, default
     /// [`crate::portals::DEFAULT_REFRESH_SECONDS`], ticket #105). `0` turns
@@ -725,6 +738,28 @@ impl Config {
                 "GATEWAY_BRIDGE_STATUS_GRACE_SECONDS",
                 &crate::bridge_status::DEFAULT_GRACE_SECONDS.to_string(),
             )?,
+            grant_reach_seconds: {
+                let reach: u64 = optional(
+                    "GATEWAY_GRANT_REACH_SECONDS",
+                    &crate::contacts::DEFAULT_GRANT_REACH_SECONDS.to_string(),
+                )?;
+                // The same ceiling the persona SDK enforces, and refused here
+                // for the same reason (ADR 0037, ADR 0040): past the bus's
+                // duplicate window the same message can be answered twice. A
+                // Gateway that accepted a wider reach would state a number no
+                // persona on this deployment will ever honour — they refuse to
+                // start on it — so the refusal belongs on both sides or the
+                // runbook's claim is true of only one.
+                anyhow::ensure!(
+                    reach <= crate::contacts::MOST_GRANT_REACH_SECONDS,
+                    "environment variable GATEWAY_GRANT_REACH_SECONDS must be at most {}: \
+                     it is how far back a grant reaches, the bus remembers an event's id \
+                     for that long, and past it the same message can be answered twice \
+                     (got {reach})",
+                    crate::contacts::MOST_GRANT_REACH_SECONDS
+                );
+                reach
+            },
             portal_refresh_seconds: optional(
                 "GATEWAY_PORTAL_REFRESH_SECONDS",
                 &crate::portals::DEFAULT_REFRESH_SECONDS.to_string(),

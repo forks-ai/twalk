@@ -52,6 +52,16 @@ The cost of that namespace is that Hermes and every persona can reach anything b
 
 Which persona runs is still the user's decision and not this file's: a persona nobody activated is paused, receives nothing, and keeps running (`ADR 0013`). Activation happens on the Companion's `/personas` screen.
 
+### How far back a grant reaches
+
+Granting a contact answers the messages they have just sent. The window is `HERMES_GRANT_REACH_SECONDS`, **an hour** unless you say otherwise, and it exists because of the only order these two things ever happen in: a message lands, you read it, and *that* is when you decide about the person who sent it. Before [#364](https://github.com/linagora/twalk/issues/364) the message you had just watched arrive was the one message that would never be answered — the label is stamped at arrival and nothing went back for it — and the consent screen told you, in five languages, to grant somebody and then wait for their next message. Now every message from that contact that arrived within the window, on a connection the decision covers, and was still waiting for a decision, wakes the persona through the ordinary path: same trigger id, same arrival time, an ordinary suggestion, and nothing republished ([ADR 0040](../docs/architecture/adr/0040-a-grant-reaches-the-messages-still-waiting-for-it.md)).
+
+What you set it to is a judgement about how long a message stays worth answering, and the default is the hour a draft stays approvable for — the same judgement, deliberately the same number. `0` turns it off and a grant means nothing in the past tense again. Above `86400` the personas **refuse to start**, naming the variable: past the bus's own duplicate window ([ADR 0037](../docs/architecture/adr/0037-the-bus-keeps-ninety-days-and-two-gigabytes-and-no-more.md)) the same message can be answered twice, and inside it the suggestion's deterministic id makes a second replay collapse on the bus, which is what makes "revoke, grant again" safe rather than merely unlikely.
+
+`GATEWAY_GRANT_REACH_SECONDS` defaults to whatever you set above and should not be set to anything else. The Gateway does not act on the reach — the personas do — it **states** it: `/consent` says how many of a contact's messages a grant will answer *before* you grant, counted from the bus per request and stored nowhere, and names the window in its own words. Two different numbers there and the screen promises what the personas will not do.
+
+Two consequences worth knowing before you meet them. A grant taken while no persona has ever run is missed, because each persona's decision consumer starts at the bus's head rather than replaying every decision you ever took; and a persona that was down longer than the reach comes back and does **not** answer what was granted while it was away, which is the same rule applied to itself. In both cases nothing is answered and nothing is logged as an error, because neither is one: the remedy is the one you already had, which is to write to the person yourself.
+
 ## The stack with bridges: two steps, and why
 
 ```bash

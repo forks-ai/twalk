@@ -102,6 +102,18 @@ export interface Row {
 	firstSeen: string | null;
 	lastSeen: string | null;
 	/**
+	 * How many of this contact's messages a grant would answer (#364): the ones
+	 * that arrived inside the reach and are still waiting for a decision.
+	 *
+	 * `0` means nothing is waiting, which the screen says out loud — a grant
+	 * that will answer nothing is not the same promise as one that will answer
+	 * two messages, and the owner is entitled to know which they are making.
+	 * `null` means the Gateway could not count, or this row is not in the
+	 * pending list at all, and the screen then says nothing rather than
+	 * guessing.
+	 */
+	waiting: number | null;
+	/**
 	 * Whether this contact's own decision differs from their connection's
 	 * default.
 	 *
@@ -237,6 +249,7 @@ export function toRows(inputs: Inputs): Row[] {
 			labelSource: name === undefined ? 'matrix-id' : 'display-name',
 			firstSeen: sighting?.first_seen ?? null,
 			lastSeen: sighting?.last_seen ?? null,
+			waiting: sighting?.waiting ?? null,
 			overridesNetwork:
 				own !== undefined && networkDefault !== null && own.state !== networkDefault,
 			networkDefault,

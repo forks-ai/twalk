@@ -115,6 +115,9 @@ describe('the catalogues', () => {
 			device: 'the laptop in the kitchen',
 			started: '2026-09-18T07:00:00.000Z',
 			seconds: 20,
+			// How far back a grant reaches, in whole minutes, as the consent
+			// screen names it (#364).
+			minutes: 60,
 			rooms: 3,
 			sensor: '@sensor:example.com',
 			user: '@you:example.com',
