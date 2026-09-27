@@ -355,6 +355,22 @@ export function workingDayForm(state: WorkingDayState | null): WorkingDayForm {
 	};
 }
 
+/**
+ * A day whose own hours were removed in this editing session, and what they
+ * were (#393).
+ *
+ * Kept rather than forgotten, for two reasons that are the whole ticket. The
+ * screen can then say the removal is **pending** — a row that simply vanishes
+ * is the strongest possible signal that something took effect, and this one
+ * does not until the form is saved. And it can be undone without retyping the
+ * hours, which is what "I clicked the wrong day" needs.
+ *
+ * It is deliberately *not* part of what gets sent: [`workingDayBody`] reads
+ * `exceptions` alone, so a pending removal is an absence in the body, which is
+ * exactly what it means.
+ */
+export type PendingRemovals = Record<number, DayHours>;
+
 /** The exceptions a form holds, by weekday, in the order a week runs. */
 export function exceptionDays(form: WorkingDayForm): number[] {
 	return Object.keys(form.exceptions)
@@ -366,11 +382,34 @@ export function exceptionDays(form: WorkingDayForm): number[] {
 /**
  * The ticked days that have no hours of their own, in week order — what the
  * "give a day its own hours" control offers.
+ *
+ * A day whose removal is pending is not offered: it already has a row on the
+ * screen saying what will happen to it, and offering to give it hours again
+ * from a second control would be two answers to one question.
  */
-export function daysOnTheDefault(form: WorkingDayForm): number[] {
+export function daysOnTheDefault(form: WorkingDayForm, pending: PendingRemovals = {}): number[] {
 	return [...form.days]
-		.filter((day) => form.exceptions[day] === undefined)
+		.filter((day) => form.exceptions[day] === undefined && pending[day] === undefined)
 		.sort((left, right) => left - right);
+}
+
+/**
+ * The days whose own hours are waiting to be removed, in week order (#393).
+ *
+ * Two shapes, because the screen says two different sentences: a day still
+ * ticked goes back to the default amplitude when the form is saved, and one
+ * that was unticked loses its hours because it is no longer a day the owner
+ * accepts at all — the second being the case nothing on the screen used to
+ * mention.
+ */
+export function pendingRemovalDays(
+	form: WorkingDayForm,
+	pending: PendingRemovals
+): { day: number; unticked: boolean }[] {
+	return Object.keys(pending)
+		.map(Number)
+		.sort((left, right) => left - right)
+		.map((day) => ({ day, unticked: !form.days.includes(day) }));
 }
 
 /** The body of a decision, from the form: `exceptions` only when there are any. */

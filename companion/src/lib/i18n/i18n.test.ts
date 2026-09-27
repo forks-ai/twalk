@@ -191,9 +191,11 @@ describe('the catalogues', () => {
 			intervals: 4,
 			outcome: 'window_too_wide',
 			asked: 'de quel projet il s\'agit',
-			// The amplitude the days without hours of their own follow (#386).
+			// The amplitude the days without hours of their own follow (#386),
+			// and the day a pending removal names (#393).
 			startsAt: '09:00',
-			endsAt: '18:30'
+			endsAt: '18:30',
+			day: 'jeudi'
 		};
 		for (const locale of LOCALES) {
 			for (const key of Object.keys(en) as (keyof typeof en)[]) {

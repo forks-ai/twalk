@@ -20,6 +20,7 @@ import {
 	requestOf,
 	daysOnTheDefault,
 	exceptionDays,
+	pendingRemovalDays,
 	workingDayBody,
 	workingDayForm,
 	workingDayRecord,
@@ -411,6 +412,41 @@ describe("the owner's working day (#381)", () => {
 			days: [1, 2, 3, 4, 5],
 			starts_at: '09:00',
 			ends_at: '18:30'
+		});
+	});
+
+	it('lists a removal that is waiting for the save, and says which kind it is', () => {
+		// #393: a row that vanishes reads as "done". The owner of the reference
+		// deployment clicked "as usual", saw the row go, and the journal had no
+		// such decision — because the card has one button that decides and this
+		// was not it.
+		const form = {
+			days: [1, 3, 4],
+			startsAt: '09:00',
+			endsAt: '18:30',
+			exceptions: { 4: { startsAt: '09:00', endsAt: '16:00' } }
+		};
+		const pending = { 3: { startsAt: '09:00', endsAt: '12:30' } };
+
+		expect(pendingRemovalDays(form, pending)).toEqual([{ day: 3, unticked: false }]);
+		// A day no longer ticked is the other sentence: it loses its hours
+		// because it is not a day at all any more, which nothing on the screen
+		// used to mention.
+		expect(pendingRemovalDays({ ...form, days: [1, 4] }, pending)).toEqual([
+			{ day: 3, unticked: true }
+		]);
+		expect(pendingRemovalDays(form, {})).toEqual([]);
+
+		// A day whose removal is pending is not offered by the "give a day its
+		// own hours" control: it already has a row saying what will happen.
+		expect(daysOnTheDefault(form, pending)).toEqual([1]);
+		expect(daysOnTheDefault(form)).toEqual([1, 3]);
+
+		// And what would reach the journal is the removal: `exceptions` holds
+		// only day 4, so day 3 is an absence in the body, which is what it
+		// means.
+		expect(workingDayBody(form).exceptions).toEqual({
+			'4': { starts_at: '09:00', ends_at: '16:00' }
 		});
 	});
 

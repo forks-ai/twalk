@@ -702,3 +702,72 @@ async fn a_disclosure_the_contract_does_not_hold_is_refused_at_approval_and_list
     assert_eq!(refusal["error"], json!("suggestion_unreadable"));
     Ok(())
 }
+
+/// #393, at the seam the screen writes through: removing a day's own hours is
+/// a **decision**, and the journal is where it becomes one.
+///
+/// The Companion's card had a control that removed the row and saved nothing,
+/// beside one that saved at once — and the owner of the reference deployment
+/// read the vanished row as "done" while the journal held nothing. The screen's
+/// half of that is a draft the user can see; this is the half that says what
+/// reaching the journal looks like, so a future change to the form has
+/// something to be wrong against.
+///
+/// Here rather than in `tests/settings.rs`, whose Gateway has no consent store
+/// and answers `503` on every journalled decision — the working day is one of
+/// those, like the disclosure this file is about.
+#[tokio::test]
+async fn removing_a_days_own_hours_is_a_decision_and_the_answer_loses_the_member() -> Result<()> {
+    let running = Running::start("working-day-exceptions").await?;
+
+    let (status, state) = running.get("/api/settings/working-day").await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{state}");
+    assert_eq!(state["day"], json!(null), "nothing said yet: {state}");
+
+    // A week with one short day.
+    let (status, state) = running
+        .put(
+            "/api/settings/working-day",
+            &json!({
+                "days": [1, 2, 3, 4, 5],
+                "starts_at": "09:00",
+                "ends_at": "18:30",
+                "exceptions": { "4": { "starts_at": "09:00", "ends_at": "16:00" } }
+            }),
+        )
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{state}");
+    assert_eq!(
+        state["day"]["exceptions"],
+        json!({ "4": { "starts_at": "09:00", "ends_at": "16:00" } }),
+        "{state}"
+    );
+    let set_at = state["since"].as_str().unwrap_or_default().to_owned();
+
+    // The same week with the exception removed — which is what the form sends
+    // when a day goes back to the default: the member is simply absent.
+    let (status, state) = running
+        .put(
+            "/api/settings/working-day",
+            &json!({ "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:30" }),
+        )
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{state}");
+    assert_eq!(
+        state["day"],
+        json!({ "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:30" }),
+        "the answer still carries the exception, or carries an empty one where there should be \
+         no member at all: {state}"
+    );
+    assert!(
+        state["since"].as_str().unwrap_or_default() > set_at.as_str(),
+        "the removal was not recorded as a decision of its own: {state}"
+    );
+
+    // And it is the journal that says so: a fresh read answers the last
+    // decision, and the first one is still in the store beside it.
+    let (_, reread) = running.get("/api/settings/working-day").await?;
+    assert_eq!(reread["day"], state["day"], "{reread}");
+    assert!(reread["day"]["exceptions"].is_null(), "{reread}");
+    Ok(())
+}
