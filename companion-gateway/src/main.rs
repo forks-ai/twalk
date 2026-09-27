@@ -356,6 +356,7 @@ async fn main() -> Result<()> {
                     outbox.clone(),
                     metrics.clone(),
                     std::time::SystemTime::now,
+                    std::time::Duration::from_secs(config.bridge_status_grace_seconds),
                 )
                 .context("failed to build the bridge status half")?,
             );
@@ -611,6 +612,21 @@ async fn main() -> Result<()> {
             .as_ref()
             .map(|sign_in| sign_in.owner.clone())
             .unwrap_or_default();
+        // What the grace is waiting for, published when it runs out (#324).
+        // Before the reconciliation's spawn, so a deployment that starts with a
+        // bridge already degraded holds it and says so rather than holding it
+        // for ever.
+        let grace = std::time::Duration::from_secs(config.bridge_status_grace_seconds);
+        if !grace.is_zero() {
+            tokio::spawn(twalk_companion_gateway::bridge_status::sweep(
+                statuses.clone(),
+            ));
+        } else {
+            info!(
+                "GATEWAY_BRIDGE_STATUS_GRACE_SECONDS is 0: every bridge state a bridge reports is \
+                 published at once, blinks included (#324)"
+            );
+        }
         tokio::spawn(reconcile(statuses, bridges, owner));
     }
     // The portal register's background read (ticket #105), after the bind

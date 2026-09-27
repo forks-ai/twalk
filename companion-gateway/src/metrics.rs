@@ -769,7 +769,7 @@ impl Metrics {
             .lock()
             .expect("the metrics mutex is never poisoned");
         if let Some(bridge_pending) = bridge_pending {
-            out.push_str("# HELP twalk_companion_gateway_bridge_statuses_total Bridge states observed, by the channel they arrived on and the state they reported.\n");
+            out.push_str("# HELP twalk_companion_gateway_bridge_statuses_total Bridge states observed, by the channel they arrived on and the state they reported — plus two words that are not states a bridge reports but what this Gateway did with one (#324): `held`, a state worse than connected waiting out its grace, and `settled`, a bridge back inside that grace, whose blink produced no row and no event. `held` climbing without `settled` following is a bridge that really goes down.\n");
             out.push_str("# TYPE twalk_companion_gateway_bridge_statuses_total counter\n");
             for ((channel, state), count) in self
                 .bridge_statuses
