@@ -106,6 +106,29 @@ pub struct Metrics {
     /// What has changed is that nothing can act as it, which is this gauge's to
     /// say.
     owner_device_credential_gone: AtomicBool,
+    /// Credentials the owner's browser handed over, and the ones this Sensor
+    /// refused (#228, ADR 0034).
+    ///
+    /// `held` climbing is onboarding working: each increment is one credential
+    /// this process persisted, brought up and acknowledged in the handover room.
+    /// It climbs again on a re-onboarding, which is the remedy for a revoked
+    /// device, and that is why it is a counter and not a gauge —
+    /// `twalk_sensor_owner_device_credential_gone` beside it is the gauge that
+    /// says whether the one held now can act.
+    ///
+    /// `refused`, by `why`, is the channel's security property made observable.
+    /// Anybody on any homeserver can send this Sensor a to-device event, so a
+    /// climbing `not_encrypted` or `unexpected_sender` with no onboarding in
+    /// progress is somebody trying, and the counters are the only place that
+    /// would ever show it. `another_type` has no counter on purpose: the
+    /// ordinary to-device traffic — key requests, verification starts — is
+    /// every other event on the channel, and a counter climbing with it would
+    /// say nothing about handovers.
+    handovers_held: AtomicU64,
+    handovers_refused_not_encrypted: AtomicU64,
+    handovers_refused_unexpected_sender: AtomicU64,
+    handovers_refused_unreadable: AtomicU64,
+    handovers_refused_not_the_owners: AtomicU64,
     owner_device_rooms: AtomicU64,
     owner_device_invites_joined: AtomicU64,
     owner_device_invites_refused: AtomicU64,
@@ -223,6 +246,11 @@ impl Metrics {
             consent_refused_malformed: AtomicU64::new(0),
             owner_device_present: AtomicBool::new(false),
             owner_device_credential_gone: AtomicBool::new(false),
+            handovers_held: AtomicU64::new(0),
+            handovers_refused_not_encrypted: AtomicU64::new(0),
+            handovers_refused_unexpected_sender: AtomicU64::new(0),
+            handovers_refused_unreadable: AtomicU64::new(0),
+            handovers_refused_not_the_owners: AtomicU64::new(0),
             owner_device_rooms: AtomicU64::new(0),
             owner_device_invites_joined: AtomicU64::new(0),
             owner_device_invites_refused: AtomicU64::new(0),
@@ -323,10 +351,40 @@ impl Metrics {
     }
 
     /// The homeserver no longer knows the acting credential: recorded when a
-    /// sync says so, and never unset in this process (#229).
+    /// sync says so (#229), and unset by nothing but a handover that replaces it
+    /// (#228) — a token this process cannot use does not become usable on its
+    /// own.
     pub fn record_owner_device_credential_gone(&self) {
         self.owner_device_credential_gone
             .store(true, Ordering::Relaxed);
+    }
+
+    /// A credential the owner's browser handed over is held: persisted, brought
+    /// up, and about to be acknowledged in the handover room (#228).
+    ///
+    /// This is the one thing that clears `credential_gone`, and it clears it for
+    /// the reason #229 could not: a revoked device is replaced by *another*
+    /// device, and until #228 replacing it meant a restart.
+    pub fn record_handover_held(&self) {
+        self.owner_device_present.store(true, Ordering::Relaxed);
+        self.owner_device_credential_gone
+            .store(false, Ordering::Relaxed);
+        self.handovers_held.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A to-device event that claimed to be a handover and was refused (#228).
+    ///
+    /// [`NotAHandover::AnotherType`] is not counted: see the field's own note.
+    pub fn record_handover_refused(&self, why: crate::owner_device::NotAHandover) {
+        use crate::owner_device::NotAHandover;
+        let counter = match why {
+            NotAHandover::AnotherType => return,
+            NotAHandover::NotEncrypted => &self.handovers_refused_not_encrypted,
+            NotAHandover::UnexpectedSender => &self.handovers_refused_unexpected_sender,
+            NotAHandover::Unreadable => &self.handovers_refused_unreadable,
+            NotAHandover::NotTheOwners => &self.handovers_refused_not_the_owners,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Whether this deployment still holds a usable device of the owner's
@@ -497,6 +555,38 @@ impl Metrics {
                 count.load(Ordering::Relaxed)
             ));
         }
+        out.push_str("# HELP twalk_sensor_handovers_held_total Device credentials the owner's browser handed over that this Sensor persisted, brought up and acknowledged (ADR 0034).\n");
+        out.push_str("# TYPE twalk_sensor_handovers_held_total counter\n");
+        out.push_str(&format!(
+            "twalk_sensor_handovers_held_total {}\n",
+            self.handovers_held.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP twalk_sensor_handovers_refused_total To-device events claiming to hand over a credential that were refused, by why. Anybody can send one, so this climbing with no onboarding in progress is somebody trying.\n");
+        out.push_str("# TYPE twalk_sensor_handovers_refused_total counter\n");
+        for (why, count) in [
+            (
+                crate::owner_device::NotAHandover::NotEncrypted,
+                &self.handovers_refused_not_encrypted,
+            ),
+            (
+                crate::owner_device::NotAHandover::UnexpectedSender,
+                &self.handovers_refused_unexpected_sender,
+            ),
+            (
+                crate::owner_device::NotAHandover::Unreadable,
+                &self.handovers_refused_unreadable,
+            ),
+            (
+                crate::owner_device::NotAHandover::NotTheOwners,
+                &self.handovers_refused_not_the_owners,
+            ),
+        ] {
+            out.push_str(&format!(
+                "twalk_sensor_handovers_refused_total{{why=\"{}\"}} {}\n",
+                why.as_str(),
+                count.load(Ordering::Relaxed)
+            ));
+        }
         out.push_str("# HELP twalk_sensor_outbound_replies_total Approved replies posted, by what they reached: the contact, or nobody.\n");
         out.push_str("# TYPE twalk_sensor_outbound_replies_total counter\n");
         for (reach, count) in [
@@ -561,6 +651,67 @@ impl Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The handover's counters, and the one thing that puts a revoked
+    /// deployment back on its feet without a restart (#228).
+    #[test]
+    fn a_handover_is_counted_and_is_what_ends_a_revocation() {
+        let metrics = Metrics::new();
+        // Nothing has happened: every refusal renders at zero, so a dashboard
+        // has a line to draw before the first attempt rather than after it.
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_sensor_handovers_held_total 0\n"),
+            "{body}"
+        );
+        for why in [
+            "not_encrypted",
+            "unexpected_sender",
+            "unreadable",
+            "not_the_owners",
+        ] {
+            assert!(
+                body.contains(&format!(
+                    "twalk_sensor_handovers_refused_total{{why=\"{why}\"}} 0\n"
+                )),
+                "{why} has a line of its own: {body}"
+            );
+        }
+        // The ordinary to-device traffic is not a handover and is not counted as
+        // a refusal: a counter that climbed with every key request would say
+        // nothing about this channel.
+        metrics.record_handover_refused(crate::owner_device::NotAHandover::AnotherType);
+        metrics.record_handover_refused(crate::owner_device::NotAHandover::NotEncrypted);
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_sensor_handovers_refused_total{why=\"not_encrypted\"} 1\n"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("another_type"),
+            "the ordinary traffic has no label here: {body}"
+        );
+
+        // A deployment whose device was revoked (#229) cannot act, and the
+        // handover is what lets it act again in the same process.
+        metrics.record_owner_device_present();
+        metrics.record_owner_device_credential_gone();
+        assert!(!metrics.owner_device_can_act());
+        metrics.record_handover_held();
+        assert!(
+            metrics.owner_device_can_act(),
+            "the credential that replaced the revoked one is usable"
+        );
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_sensor_handovers_held_total 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_sensor_owner_device_credential_gone 0\n"),
+            "and the gauge says the deployment holds one: {body}"
+        );
+    }
 
     #[test]
     fn a_revoked_acting_credential_is_a_gauge_of_its_own() {

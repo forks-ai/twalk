@@ -77,11 +77,84 @@ pub const HANDOVER_EVENT_TYPE: &str = "fr.linagora.twalk.owner_device.handover";
 /// is not the owner's, at startup today and here too: a device of somebody
 /// else's account would join portal rooms as a stranger and write into other
 /// people's conversations under a Matrix ID nobody chose.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Handover {
     pub user_id: String,
     pub device_id: String,
     pub access_token: String,
+}
+
+/// Prints the credential without printing the credential.
+///
+/// Written by hand rather than derived because everything else in this file is
+/// derived and one `{handover:?}` in a log line, a test failure or an
+/// `anyhow` context would put a long-lived token of the user's account into a
+/// log — which is precisely the exposure ADR 0034 keeps out of the Gateway.
+impl std::fmt::Debug for Handover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handover")
+            .field("user_id", &self.user_id)
+            .field("device_id", &self.device_id)
+            .field("access_token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The file in `SENSOR_STATE_DIR` that holds a handed-over credential, beside
+/// the [`STORE_SUBDIR`] whose crypto store belongs to that same device.
+///
+/// # Why a credential is written down at all
+///
+/// `bring_up_owner_device` says the acting device needs no session file, because
+/// the credential "arrives from configuration every start and names its device,
+/// so there is nothing to remember". A handed-over one arrives **once**, from a
+/// browser the user has since closed: not remembering it would mean a deployment
+/// that acts as the owner until its next restart and silently stops afterwards,
+/// which is the class of degradation this product has shipped repeatedly. So it
+/// is written, `0600`, atomically, beside the session file that has held a token
+/// of the Sensor's own account since the first ticket — the exposure ADR 0034
+/// accepted and stated: this volume is not encrypted, and what grows is that the
+/// token on it is now the user's as well as the Sensor's.
+///
+/// It is also the answer to *whose crypto store is this*: a crypto store belongs
+/// to one device, so a handover naming a different device is one whose store has
+/// to go, and this file is what says which device the store on disk was built
+/// for.
+pub const CREDENTIAL_FILE: &str = "owner-device.json";
+
+/// What is written to [`CREDENTIAL_FILE`].
+///
+/// The same three fields the to-device event carries, read back by the same
+/// [`credential_in`]: the file format and the wire format are one shape stated
+/// once, so a handover that can be read cannot be a credential that cannot be
+/// reloaded.
+pub fn credential_document(handover: &Handover) -> serde_json::Value {
+    serde_json::json!({
+        "user_id": handover.user_id,
+        "device_id": handover.device_id,
+        "access_token": handover.access_token,
+    })
+}
+
+/// The credential a document carries, or why it is not one.
+///
+/// Only [`NotAHandover::Unreadable`] ever comes back: whose account it is, and
+/// whether the device is the expected one, are questions about a *delivery*, and
+/// [`handover_in`] asks them.
+pub fn credential_in(document: &serde_json::Value) -> Result<Handover, NotAHandover> {
+    let string = |name: &str| -> Result<String, NotAHandover> {
+        document
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .filter(|value| !value.is_empty())
+            .ok_or(NotAHandover::Unreadable)
+    };
+    Ok(Handover {
+        user_id: string("user_id")?,
+        device_id: string("device_id")?,
+        access_token: string("access_token")?,
+    })
 }
 
 /// Why a to-device event is not a handover this Sensor will act on.
@@ -127,17 +200,87 @@ pub struct Delivered<'a> {
     /// one question here, because an event this Sensor could not decrypt is one
     /// it knows nothing about.
     pub decrypted: bool,
+    /// The account that sent it, as the homeserver addressed it.
+    pub sender: &'a str,
     /// The sender's device, as the decryption itself reported it — never as the
     /// event's own content claims it. A field inside a payload is the sender's
     /// word; `EncryptionInfo` is the crypto machine's.
+    ///
+    /// A device id is only ever unique **within one account**: two accounts can
+    /// each have a device called `ABCDEF`, so this is meaningless without
+    /// [`Delivered::sender`] beside it, and [`handover_in`] reads the two
+    /// together.
     pub sender_device: Option<&'a str>,
+}
+
+/// The state event in the handover room that says which device the credential
+/// will come from, and the one the Sensor answers with.
+///
+/// # Why the expected device is a fact in the room and not a configured value
+///
+/// [`handover_in`] refuses a credential from a device this deployment does not
+/// expect, and something has to say which device that is. It cannot be
+/// configuration: the browser's device is minted by the login the user has just
+/// performed, so nobody could write it into an environment file beforehand — and
+/// an onboarding that asked them to would be the manual step ADR 0034 removed.
+///
+/// So the owner states it **in the handover room**, as a state event whose
+/// `state_key` is empty and whose `device_id` is the browser's own. That room is
+/// [#226](https://github.com/linagora/twalk/issues/226)'s: the owner created it
+/// and holds power level 100 in it, the Sensor sits at 0, and `state_default` is
+/// 50 — so this is a sentence only the owner's account can write, authenticated
+/// by the homeserver rather than by anything Twalk checks. An attacker who could
+/// write it would already hold the account whose credential is being handed
+/// over.
+///
+/// The Sensor answers in the same room with [`HANDOVER_HELD_TYPE`], which is the
+/// **acknowledgement** ADR 0034 requires: the Companion reports success when the
+/// Sensor says it holds the credential, never when its own send resolves, because
+/// a to-device send to an untracked user resolves successfully having sent
+/// nothing. Sending it is what the room's one power-level exception is for — the
+/// Sensor may write that single state type and nothing else — and the ordinary
+/// case for the Companion is to read it back within a second or two.
+///
+/// Both travel in the clear, unlike the credential: a device id is not a secret,
+/// and a state event the Companion can read with one request beats a second
+/// encrypted channel whose failure would be indistinguishable from the first's.
+pub const HANDOVER_OFFER_TYPE: &str = "fr.linagora.twalk.owner_device.handover.from";
+
+/// The Sensor's acknowledgement. See [`HANDOVER_OFFER_TYPE`].
+pub const HANDOVER_HELD_TYPE: &str = "fr.linagora.twalk.owner_device.handover.held";
+
+/// The device the owner's own state event offers the credential from.
+///
+/// `None` when there is no such event, or its content does not name a device:
+/// [`handover_in`] then refuses every handover, which is the right answer for a
+/// room in which the owner has offered nothing.
+pub fn offered_from(content: Option<&serde_json::Value>) -> Option<&str> {
+    content?
+        .get("device_id")?
+        .as_str()
+        .filter(|device| !device.is_empty())
+}
+
+/// What the Sensor writes in the handover room once it holds the credential.
+///
+/// It names the device it now acts through and the device it came from, so that
+/// a Companion reading it can tell **its own** handover from an earlier one: a
+/// deployment onboarded twice has two acknowledgements in this room's history,
+/// and the browser waiting for the second must not be satisfied by the first.
+pub fn held(handover: &Handover, offered_by: &str) -> serde_json::Value {
+    serde_json::json!({
+        "user_id": handover.user_id,
+        "device_id": handover.device_id,
+        "offered_by": offered_by,
+    })
 }
 
 /// Reads a to-device event for the credential, or says why it is not one.
 ///
 /// `expected_device` is the device the handover is expected from — the browser
-/// that shares the handover room with this Sensor. `owner` is the account the
-/// credential must belong to.
+/// that offered it in the handover room ([`HANDOVER_OFFER_TYPE`], read with
+/// [`offered_from`]). `owner` is the account the credential must belong to, and
+/// the only account this Sensor accepts a handover from at all.
 pub fn handover_in(
     delivered: &Delivered<'_>,
     content: &serde_json::Value,
@@ -150,26 +293,21 @@ pub fn handover_in(
     if !delivered.decrypted {
         return Err(NotAHandover::NotEncrypted);
     }
-    // An expected device that is not configured refuses everything: a Sensor
+    // The account first: any account on any homeserver can send a to-device
+    // event to the Sensor, and a device id is unique only within an account, so
+    // an expected device matched without its owner would match a stranger's
+    // device of the same name.
+    if delivered.sender != owner {
+        return Err(NotAHandover::UnexpectedSender);
+    }
+    // And an expected device that is not configured refuses everything: a Sensor
     // that accepted a credential from any device of the owner's would accept one
-    // from a browser session somebody else opened on their account.
+    // from a browser session somebody else left open on their account.
     match (expected_device, delivered.sender_device) {
         (Some(expected), Some(sender)) if expected == sender => {}
         _ => return Err(NotAHandover::UnexpectedSender),
     }
-    let string = |name: &str| -> Result<String, NotAHandover> {
-        content
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .filter(|value| !value.is_empty())
-            .ok_or(NotAHandover::Unreadable)
-    };
-    let handover = Handover {
-        user_id: string("user_id")?,
-        device_id: string("device_id")?,
-        access_token: string("access_token")?,
-    };
+    let handover = credential_in(content)?;
     if handover.user_id != owner {
         return Err(NotAHandover::NotTheOwners);
     }
@@ -651,6 +789,103 @@ mod tests {
             reach(false, true).as_str() == "nobody" && !reach(false, true).reaches_the_contact()
         );
     }
+    /// The credential is written down in exactly the shape it arrived in, and
+    /// nothing that logs it can print it (#228).
+    #[test]
+    fn a_held_credential_reloads_as_itself_and_never_prints_itself() {
+        let handover = Handover {
+            user_id: OWNER.to_owned(),
+            device_id: "TWALKDEVICE".to_owned(),
+            access_token: "syt_the-owners-own-device".to_owned(),
+        };
+        // The file and the wire are one shape: what the browser sent reloads as
+        // what the browser sent, through the same reader.
+        let document = credential_document(&handover);
+        assert_eq!(credential_in(&document), Ok(handover.clone()));
+        assert_eq!(
+            credential_in(&serde_json::json!({
+                "user_id": OWNER,
+                "device_id": "TWALKDEVICE",
+                "access_token": "syt_the-owners-own-device",
+                "written_by_a_later_version": "something",
+            })),
+            Ok(handover.clone()),
+            "a field this version does not know is not a credential it cannot read"
+        );
+        // And a file that is half a credential is no credential: acting on a
+        // token whose device is unknown would open somebody else's crypto store.
+        for broken in [
+            serde_json::json!({}),
+            serde_json::json!({ "user_id": OWNER, "device_id": "TWALKDEVICE" }),
+            serde_json::json!({ "user_id": OWNER, "access_token": "syt_x" }),
+            serde_json::json!({ "user_id": "", "device_id": "D", "access_token": "t" }),
+        ] {
+            assert_eq!(
+                credential_in(&broken),
+                Err(NotAHandover::Unreadable),
+                "{broken}"
+            );
+        }
+
+        // The token is in the document and in nothing that renders the struct:
+        // one `{handover:?}` in a log line or an `anyhow` context would put a
+        // long-lived token of the user's account on disk in plain text.
+        assert!(document.to_string().contains("syt_the-owners-own-device"));
+        assert!(
+            !format!("{handover:?}").contains("syt_"),
+            "{handover:?} prints the token"
+        );
+        assert!(format!("{handover:?}").contains("TWALKDEVICE"));
+    }
+
+    /// The two state events the handover room carries (#228): the owner's offer,
+    /// which is where the expected device comes from, and the Sensor's
+    /// acknowledgement, which is the only thing the Companion may read as
+    /// success.
+    #[test]
+    fn the_offer_names_the_device_and_the_acknowledgement_names_both() {
+        // No event at all is a room in which nothing was offered, and that
+        // refuses every handover rather than accepting any.
+        assert_eq!(offered_from(None), None);
+        assert_eq!(offered_from(Some(&serde_json::json!({}))), None);
+        assert_eq!(
+            offered_from(Some(&serde_json::json!({ "device_id": "" }))),
+            None
+        );
+        assert_eq!(
+            offered_from(Some(&serde_json::json!({ "device_id": 7 }))),
+            None
+        );
+        assert_eq!(
+            offered_from(Some(&serde_json::json!({ "device_id": "BROWSERDEV" }))),
+            Some("BROWSERDEV")
+        );
+
+        // The acknowledgement names the device the Sensor now acts through and
+        // the device that offered it, so a browser waiting for its own handover
+        // is not satisfied by an earlier onboarding's.
+        let handover = Handover {
+            user_id: OWNER.to_owned(),
+            device_id: "TWALKDEVICE".to_owned(),
+            access_token: "syt_never-in-a-state-event".to_owned(),
+        };
+        let acknowledgement = held(&handover, "BROWSERDEV");
+        assert_eq!(
+            acknowledgement,
+            serde_json::json!({
+                "user_id": OWNER,
+                "device_id": "TWALKDEVICE",
+                "offered_by": "BROWSERDEV",
+            })
+        );
+        // And it does not carry the credential: this event is unencrypted state
+        // in a room, readable by every member and by the homeserver's admin.
+        assert!(
+            !acknowledgement.to_string().contains("syt_"),
+            "the acknowledgement must not carry the token: {acknowledgement}"
+        );
+    }
+
     /// The handover's three refusals and its one acceptance (#228).
     #[test]
     fn a_handover_is_accepted_only_decrypted_and_from_the_device_expected() {
@@ -664,6 +899,7 @@ mod tests {
             |event_type: &'static str, decrypted: bool, sender: Option<&'static str>| Delivered {
                 event_type,
                 decrypted,
+                sender: OWNER,
                 sender_device: sender,
             };
         let read = |d: Delivered<'_>, content: &serde_json::Value, expected: Option<&str>| {
@@ -733,6 +969,24 @@ mod tests {
                 delivered(HANDOVER_EVENT_TYPE, true, None),
                 &content,
                 Some(BROWSER)
+            ),
+            Err(NotAHandover::UnexpectedSender)
+        );
+
+        // A stranger's account, with a device of the very name the owner
+        // offered: a device id is unique within an account and nowhere else, so
+        // this is the handover a check on the device alone would have accepted.
+        assert_eq!(
+            handover_in(
+                &Delivered {
+                    event_type: HANDOVER_EVENT_TYPE,
+                    decrypted: true,
+                    sender: STRANGER,
+                    sender_device: Some(BROWSER),
+                },
+                &content,
+                Some(BROWSER),
+                OWNER,
             ),
             Err(NotAHandover::UnexpectedSender)
         );
