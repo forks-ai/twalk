@@ -67,6 +67,7 @@
 		calendarLocationRecord,
 		daysOnTheDefault,
 		exceptionDays,
+		pendingRemovalDays,
 		workingDayBody,
 		workingDayForm,
 		workingDayRecord,
@@ -154,6 +155,17 @@
 	let workingDayDraft = $state(workingDayForm(null));
 	/** The day the "hours of its own" control is about to add, or `null`. */
 	let dayToAdd = $state<number | null>(null);
+	/**
+	 * The days whose own hours were removed since this form was loaded, and
+	 * what they were (#393).
+	 *
+	 * The removal is a change to the draft like every other on this card, and
+	 * the card has one button that decides. Before this, the row simply
+	 * vanished — which reads as "done" — and the owner of the reference
+	 * deployment believed it, correctly and wrongly at once: the screen said
+	 * so and the journal disagreed.
+	 */
+	let pendingRemovals = $state<Record<number, { startsAt: string; endsAt: string }>>({});
 
 	const credential = $derived<CredentialState | null>(
 		configuration === null ? null : credentialState(configuration)
@@ -167,7 +179,8 @@
 	const dayTrouble = $derived(workingDayTrouble(workingDayDraft));
 	/** The days that run other hours, and the ticked days that do not (#386). */
 	const ownHours = $derived(exceptionDays(workingDayDraft));
-	const onTheDefault = $derived(daysOnTheDefault(workingDayDraft));
+	const onTheDefault = $derived(daysOnTheDefault(workingDayDraft, pendingRemovals));
+	const pendingDays = $derived(pendingRemovalDays(workingDayDraft, pendingRemovals));
 	/** One weekday's name, through the same typed keys the tick boxes use. */
 	const dayName = $derived((day: number) => {
 		const named = WEEK.find(([weekday]) => weekday === day);
@@ -242,6 +255,7 @@
 		if (answer.ok) {
 			workingDay = answer.state;
 			workingDayDraft = workingDayForm(answer.state);
+			pendingRemovals = {};
 			workingDayReason = '';
 			workingDayOutcome = 'saved';
 		} else {
@@ -257,6 +271,8 @@
 		const answer = await saveWorkingDay(null, workingDayReason);
 		if (answer.ok) {
 			workingDay = answer.state;
+			workingDayDraft = workingDayForm(answer.state);
+			pendingRemovals = {};
 			workingDayReason = '';
 			workingDayOutcome = 'cleared';
 		} else {
@@ -273,8 +289,18 @@
 			// Its own hours go with it. An exception for a day the user does not
 			// accept meetings on is two statements that contradict each other,
 			// and the Gateway refuses it by name (#386) — so the form does not
-			// hold one either.
+			// hold one either. Remembered rather than dropped, so the row can
+			// say it is going and a mis-click can be undone (#393).
+			if (exceptions[day] !== undefined) {
+				pendingRemovals = { ...pendingRemovals, [day]: exceptions[day] };
+			}
 			delete exceptions[day];
+		} else if (pendingRemovals[day] !== undefined) {
+			// Ticked again: the hours it had come back, since nothing was
+			// decided in between.
+			exceptions[day] = pendingRemovals[day];
+			const { [day]: _restored, ...rest } = pendingRemovals;
+			pendingRemovals = rest;
 		}
 		workingDayDraft = {
 			...workingDayDraft,
@@ -303,11 +329,38 @@
 		dayToAdd = null;
 	}
 
-	/** And back to the default: "as usual again", not a day removed. */
+	/**
+	 * And back to the default — **when the form is saved** (#393).
+	 *
+	 * The hours are kept in `pendingRemovals` so the row stays on the screen
+	 * saying what will happen, rather than disappearing as if it had happened.
+	 */
 	function backToDefault(day: number) {
+		const hours = workingDayDraft.exceptions[day];
+		if (hours === undefined) {
+			return;
+		}
 		const exceptions = { ...workingDayDraft.exceptions };
 		delete exceptions[day];
+		pendingRemovals = { ...pendingRemovals, [day]: hours };
 		workingDayDraft = { ...workingDayDraft, exceptions };
+	}
+
+	/** Undo that, while it is still only a draft. */
+	function keepOwnHours(day: number) {
+		const hours = pendingRemovals[day];
+		if (hours === undefined) {
+			return;
+		}
+		const { [day]: _restored, ...rest } = pendingRemovals;
+		pendingRemovals = rest;
+		workingDayDraft = {
+			...workingDayDraft,
+			days: workingDayDraft.days.includes(day)
+				? workingDayDraft.days
+				: [...workingDayDraft.days, day],
+			exceptions: { ...workingDayDraft.exceptions, [day]: hours }
+		};
 	}
 
 	/** One exception's own hours, as its two time inputs give them. */
@@ -995,6 +1048,37 @@
 					</div>
 				{/each}
 
+				<!-- What is waiting to be saved (#393). A row that vanishes reads
+				     as "done"; this one says what will happen and offers the way
+				     back, because on this card only the button at the bottom
+				     decides anything. -->
+				{#each pendingDays as pending (pending.day)}
+					<p
+						class="small muted pending"
+						data-testid="working-day-pending-{pending.day}"
+						data-unticked={pending.unticked}
+					>
+						{pending.unticked
+							? $t('settings.workingDay.exceptions.pendingUnticked', {
+									day: dayName(pending.day)
+								})
+							: $t('settings.workingDay.exceptions.pending', {
+									day: dayName(pending.day),
+									startsAt: workingDayDraft.startsAt,
+									endsAt: workingDayDraft.endsAt
+								})}
+						<button
+							class="button button--quiet small"
+							type="button"
+							disabled={busy !== null}
+							onclick={() => keepOwnHours(pending.day)}
+							data-testid="working-day-pending-{pending.day}-keep"
+						>
+							{$t('settings.workingDay.exceptions.keep')}
+						</button>
+					</p>
+				{/each}
+
 				{#if ownHours.length > 0}
 					<p class="small muted" data-testid="working-day-exceptions-rest">
 						{$t('settings.workingDay.exceptions.theRest', {
@@ -1166,6 +1250,17 @@
 
 	.own-day .day-name {
 		min-width: 6rem;
+	}
+
+	/* A removal waiting for the save: a sentence and the way back, on one
+	   line, quiet — it is not a row of the form, it is what the form will do
+	   (#393). */
+	.pending {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-2);
+		margin: 0;
 	}
 
 	/* Two times side by side, because they are one amplitude, and stacked
