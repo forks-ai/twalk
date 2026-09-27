@@ -26,9 +26,10 @@
 		"sensor/README.md",
 		"tests/README.md",
 		"tools/README.md",
+		"tools/twalk-test-stacks.sh",
 		"ui/README.md"
 	],
-	"ignored_note": "Prose and stubs. `AGENTS.md`, `CONTRIBUTING.md` and `docs/` are read by people and agents and by no test, so a change to one of them selects nothing but the routing check; `examples/`, `tools/` and `ui/` hold stub READMEs only and get a routing rule on the day they hold code — which `test_selection.py` will demand, because a directory cannot be both ignored and the home of a suite's component. The component READMEs are listed one by one rather than as a `*/README.md` pattern, because the directories they sit in are otherwise routed and an inherited wildcard would be a second kind of rule to reason about.",
+	"ignored_note": "Prose and stubs. `AGENTS.md`, `CONTRIBUTING.md` and `docs/` are read by people and agents and by no test, so a change to one of them selects nothing but the routing check; `examples/`, `tools/` and `ui/` hold stub READMEs only and get a routing rule on the day they hold code — which `test_selection.py` will demand, because a directory cannot be both ignored and the home of a suite's component. `tools/` held the first of that code on 2026-09-27: `twalk-test-stacks.sh` (#128), an operator's tool that says what test stacks this host is holding and which of them is provably dead. It is ignored **by name** and not as a directory, so the next thing added there has to decide for itself — and ignored rather than triggered because no suite depends on it: nothing under test reads it, and a change to a diagnostic script that selected every suite would be an hour of CI for nothing. The component READMEs are listed one by one rather than as a `*/README.md` pattern, because the directories they sit in are otherwise routed and an inherited wildcard would be a second kind of rule to reason about.",
 
 	"suites": {
 		"routing": {
