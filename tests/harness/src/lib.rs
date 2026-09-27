@@ -32,8 +32,8 @@ pub use contract::{
 };
 pub use sso::FakeSso;
 pub use stack::{
-    ensure_stack, nats_url, synapse_url, PORTALS_APPSERVICE_AS_TOKEN, PORTALS_APPSERVICE_SENDER,
-    SERVER_NAME,
+    ensure_stack, hold_deploy_stack, nats_url, synapse_url, StackHeld, PORTALS_APPSERVICE_AS_TOKEN,
+    PORTALS_APPSERVICE_SENDER, SERVER_NAME,
 };
 pub use stub_llm::{StubAnswer, StubLlm, StubRequest, DEFAULT_LANGUAGE_ANSWER, LANGUAGE_ASK_MARK};
 pub use wait::poll_until;
