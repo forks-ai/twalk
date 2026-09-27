@@ -451,6 +451,14 @@ services:
       # the same default (an hour) — a suggestion that came through Hermes
       # must not age differently from one a persona drafted itself (#22).
       GATEWAY_SUGGESTION_TTL_SECONDS: ${GATEWAY_SUGGESTION_TTL_SECONDS:-${HERMES_SUGGESTION_TTL_SECONDS:-}}
+      # How far back a grant reaches (#364, ADR 0040): the messages a newly
+      # granted contact sent within it are answered, the older ones never
+      # are. The Gateway does not act on it — the personas do — it tells the
+      # owner how many messages a grant will answer *before* they grant, so
+      # it reads the same value HERMES_GRANT_REACH_SECONDS gives them, the
+      # way the window above does. Two numbers that disagree make that
+      # sentence a lie. Empty: an hour; 0 turns the whole of it off.
+      GATEWAY_GRANT_REACH_SECONDS: ${GATEWAY_GRANT_REACH_SECONDS:-${HERMES_GRANT_REACH_SECONDS:-}}
       # The collector's internal endpoint a free/busy read is relayed to
       # (#281): the one governed pull, on the same secret as the answers,
       # with the service token as the bearer. Empty when the collector
@@ -659,6 +667,17 @@ services:
       # How long a suggestion stays approvable (#22). Empty leaves the SDK's
       # own default of an hour; the Gateway refuses an expired one.
       HERMES_SUGGESTION_TTL_SECONDS: ${HERMES_SUGGESTION_TTL_SECONDS:-}
+      # How far back a grant reaches (#364, ADR 0040), injected into each
+      # persona as TWALK_GRANT_REACH_SECONDS: granting a contact answers the
+      # messages they sent within it and were still waiting for a decision
+      # about. Empty leaves the SDK's own default of an hour — the same hour a
+      # suggestion stays approvable for, and the same judgement. `0` turns it
+      # off: a grant then means nothing in the past tense, which is what this
+      # deployment did before #364. Above a day the persona refuses to start,
+      # because past the bus's own duplicate window (ADR 0037) the same
+      # message could be answered twice. This is the value the Gateway reads
+      # to tell the owner what a grant will do before they make it.
+      HERMES_GRANT_REACH_SECONDS: ${HERMES_GRANT_REACH_SECONDS:-}
       # The user's own language, injected into each persona as
       # TWALK_USER_LANGUAGE (#164): what a persona falls back to when it
       # cannot tell what language the message it is answering was written in,

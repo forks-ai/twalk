@@ -50,6 +50,17 @@ pub const LLM_API_KEY: &str = "TWALK_LLM_API_KEY";
 pub const LLM_PARAMS: &str = "TWALK_LLM_PARAMS";
 pub const LLM_TIMEOUT_SECONDS: &str = "TWALK_LLM_TIMEOUT_SECONDS";
 pub const SUGGESTION_TTL_SECONDS: &str = "TWALK_SUGGESTION_TTL_SECONDS";
+/// How far back a grant reaches (issue #364): the messages a newly granted
+/// contact sent within it are answered, the older ones never are. Operator
+/// configuration like the window above, and it travels the same way — set on
+/// the runtime, injected into the persona, never fetched by it.
+///
+/// A deployment that sets it must set the Companion Gateway's
+/// `GATEWAY_GRANT_REACH_SECONDS` to the same number: the Gateway is what tells
+/// the owner how many messages a grant will answer *before* they grant, and two
+/// numbers that disagree make that sentence a lie. The compose file wires both
+/// from one value for exactly that reason.
+pub const GRANT_REACH_SECONDS: &str = "TWALK_GRANT_REACH_SECONDS";
 /// The user's own language, for the one thing it governs in a persona: the
 /// fallback when the language of the message being answered cannot be told
 /// (ADR 0016, ticket #164). It travels this channel and not the persona's own
@@ -122,6 +133,10 @@ pub fn persona_environment(
     if let Some(ttl) = &config.suggestion_ttl_seconds {
         environment.push((SUGGESTION_TTL_SECONDS.to_owned(), ttl.clone()));
     }
+    // How far back a grant reaches (issue #364). Same channel, same reason.
+    if let Some(reach) = &config.grant_reach_seconds {
+        environment.push((GRANT_REACH_SECONDS.to_owned(), reach.clone()));
+    }
     // The user's own language (ADR 0016). Unset is left out entirely rather
     // than passed as an empty string, like the optional ones above: a persona
     // handed no preference writes in each message's own language and says so,
@@ -178,6 +193,7 @@ mod tests {
             log_level: "info".to_owned(),
             persona_log_level: "debug".to_owned(),
             suggestion_ttl_seconds: Some("900".to_owned()),
+            grant_reach_seconds: Some("900".to_owned()),
             user_language: None,
             hermes_webhook_url: None,
             hermes_webhook_secret: None,
@@ -301,6 +317,7 @@ mod tests {
             LLM_PARAMS,
             LLM_TIMEOUT_SECONDS,
             SUGGESTION_TTL_SECONDS,
+            GRANT_REACH_SECONDS,
             USER_LANGUAGE,
             LOG_LEVEL,
         ];
@@ -322,6 +339,7 @@ mod tests {
     fn an_endpoint_that_needs_no_credential_shows_none() {
         let mut config = config();
         config.suggestion_ttl_seconds = None;
+        config.grant_reach_seconds = None;
         let mut settings = settings();
         settings.llm.api_key = None;
         settings.llm.params = None;
@@ -333,6 +351,7 @@ mod tests {
             LLM_PARAMS,
             LLM_TIMEOUT_SECONDS,
             SUGGESTION_TTL_SECONDS,
+            GRANT_REACH_SECONDS,
             USER_LANGUAGE,
         ] {
             assert_eq!(

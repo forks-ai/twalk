@@ -183,13 +183,16 @@ async fn main() -> Result<()> {
                 connections.clone(),
                 consent.nats_url.clone(),
                 config.inbound_consumer.clone(),
+                std::time::Duration::from_secs(config.grant_reach_seconds),
             ));
             info!(
                 consumer = %projection.consumer_name(),
                 owner = %consent.owner,
+                grant_reach_seconds = config.grant_reach_seconds,
                 "the pending-contact projection is on: this Gateway keeps a contact's Matrix ID, \
                  its network and its first and last sighting — no body, no display name, no \
-                 network identifier"
+                 network identifier. The reach is what it tells the owner a grant will answer; \
+                 the persona has to have been given the same number"
             );
             tokio::spawn(project_until_shutdown(projection.clone()));
             // What each connection says about itself (#275): a collector's
@@ -274,17 +277,19 @@ async fn main() -> Result<()> {
                          granted at that moment and refused if the answer names no language",
                         twalk_companion_gateway::hermes_answer::ANSWER_PATH
                     );
-                    Some(Arc::new(Answers::new(
-                        approvals.clone(),
-                        metrics.clone(),
-                        seam.secret.clone(),
-                        seam.domain.clone(),
-                        seam.suggestion_ttl_seconds,
-                        std::time::SystemTime::now,
-                    )
-                    // The same reads that serve Hermes are what verify the
-                    // times its drafts offer (#383).
-                    .with_reads(reads.clone())))
+                    Some(Arc::new(
+                        Answers::new(
+                            approvals.clone(),
+                            metrics.clone(),
+                            seam.secret.clone(),
+                            seam.domain.clone(),
+                            seam.suggestion_ttl_seconds,
+                            std::time::SystemTime::now,
+                        )
+                        // The same reads that serve Hermes are what verify the
+                        // times its drafts offer (#383).
+                        .with_reads(reads.clone()),
+                    ))
                 }
                 None => None,
             };

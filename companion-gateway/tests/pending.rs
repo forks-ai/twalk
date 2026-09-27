@@ -186,6 +186,20 @@ impl Running {
             .with_context(|| format!("failed to call GET {path}"))
     }
 
+    /// The list, counting what a grant would answer (#364). A second reader
+    /// rather than a parameter on the first, because every other test in this
+    /// file is about the list and must go on reading it the way the dashboard
+    /// does — without asking the Gateway to walk the bus.
+    async fn pending_counting_what_a_grant_would_answer(&self) -> Result<Value> {
+        let response = self.get("/api/contacts/pending?waiting=true").await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "the pending list was refused: {}",
+            response.status()
+        );
+        Ok(response.json().await?)
+    }
+
     async fn pending(&self) -> Result<Value> {
         let response = self.get("/api/contacts/pending").await?;
         anyhow::ensure!(
@@ -372,7 +386,9 @@ async fn a_gateway_started_against_a_stream_with_history_builds_its_list_from_it
         Some("2026-09-01T08:00:00.000Z"),
         "the first sighting is the event's own time, not the Gateway's clock: {entry}"
     );
-    // Four values and no fifth, at the API as in the store.
+    // These values and no others, at the API as in the store. `waiting` is the
+    // one that is not a column: what a grant would answer, counted from the bus
+    // per request and held nowhere (#364).
     let mut members: Vec<&String> = entry.as_object().context("an object")?.keys().collect();
     members.sort();
     assert_eq!(
@@ -382,9 +398,11 @@ async fn a_gateway_started_against_a_stream_with_history_builds_its_list_from_it
             "contact",
             "first_seen",
             "last_seen",
-            "network"
+            "network",
+            "waiting"
         ],
-        "a pending contact is an ID, a perimeter and its kind, and two instants: {entry}"
+        "a pending contact is an ID, a perimeter and its kind, two instants, and \
+         what a grant would answer: {entry}"
     );
 
     gateway.wait_until_pending(&quiet, "signal").await?;
@@ -1032,6 +1050,92 @@ async fn a_bus_that_cannot_be_reached_refuses_the_names_and_serves_the_list() ->
     assert_eq!(response.status().as_u16(), 502);
     let body: Value = response.json().await?;
     assert_eq!(body["error"].as_str(), Some("bus_unreachable"), "{body}");
+
+    gateway.stop().await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// What a grant would answer (#364)
+// ---------------------------------------------------------------------------
+
+/// An instant `seconds` ago, as the contract's `date-time`.
+fn moments_ago(seconds: i64) -> String {
+    (time::OffsetDateTime::now_utc() - time::Duration::seconds(seconds))
+        .replace_nanosecond(0)
+        .expect("zero is a nanosecond")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("UTC formats as RFC 3339")
+}
+
+#[tokio::test]
+async fn what_a_grant_would_answer_is_counted_over_the_reach_and_nothing_older() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let contact = ghost("whatsapp", "reach");
+
+    // Three messages from one contact: two inside the default hour, one two
+    // hours old. The old one is the whole point — a grant does not answer it,
+    // so the screen must not promise that it will.
+    for (ago, body) in [
+        (60i64, "on se voit demain ?"),
+        (300, "ou plutôt jeudi ?"),
+        (7_200, "il y a longtemps"),
+    ] {
+        publish(
+            &bus,
+            &inbound_event(
+                &contact,
+                "whatsapp",
+                &moments_ago(ago),
+                body,
+                "Aïcha Benali",
+            ),
+        )
+        .await?;
+    }
+
+    let static_dir = companion_build("pending-reach")?;
+    let gateway = Running::start_on(static_dir, &nats_url()).await?;
+    gateway.wait_until_pending(&contact, "whatsapp").await?;
+
+    // Counted only when asked: the plain read is what the dashboard polls, and
+    // it must not pay for a number it does not draw.
+    let unasked = gateway.wait_until_pending(&contact, "whatsapp").await?;
+    assert_eq!(
+        unasked["waiting"],
+        Value::Null,
+        "without ?waiting=true there is no count, and null is not zero: {unasked}"
+    );
+
+    let document = gateway.pending_counting_what_a_grant_would_answer().await?;
+    let row = document["contacts"]
+        .as_array()
+        .context("the document lists contacts")?
+        .iter()
+        .find(|entry| entry["contact"].as_str() == Some(contact.as_str()))
+        .cloned()
+        .context("this run's contact is in the list")?;
+    assert_eq!(
+        row["waiting"],
+        json!(2),
+        "two of this contact's three messages are inside the reach: {row}"
+    );
+
+    // And the window itself, so that the screen can name it rather than make
+    // the owner infer it from a number.
+    assert_eq!(
+        document["reach_seconds"],
+        json!(3_600),
+        "the operator named no reach, so it is the default hour: {document}"
+    );
+
+    // A value that is not the one value is refused rather than read as "no":
+    // a caller must never get `null` because of a spelling.
+    let refused = gateway.get("/api/contacts/pending?waiting=yes").await?;
+    assert_eq!(refused.status().as_u16(), 400);
+    let body: Value = refused.json().await?;
+    assert_eq!(body["error"].as_str(), Some("unknown_value"), "{body}");
 
     gateway.stop().await;
     Ok(())

@@ -935,7 +935,9 @@
 	"consent.legend.pending": "The message still arrives on your server, in full, and your assistant is expected to leave it alone. This answer hides nothing from your own server.",
 	"consent.legend.revoked": "The message still arrives, as a record that it did, but without what was written: no text, no quoted message, no attachment. This is the only answer that withholds content.",
 	"consent.legend.neverDecided": "A contact you have never decided about is its own thing, and not the same as one you answered “not yet” about. It is where everybody starts, and it will be most of this list.",
-	"consent.legend.notRetroactive": "None of this reaches the past. The answer is stamped on each message as it arrives, so a decision you take now applies to what comes next and changes nothing already on your server. If you grant somebody and nothing seems to happen, wait for their next message: that is how it is meant to work.",
+	"consent.legend.notRetroactive": "The answer is stamped on each message as it arrives, so a decision applies from now on and takes nothing back off your server. A grant does go back over recent messages that were still waiting; this page could not read how far back, or how many are waiting.",
+	"consent.legend.noReach": "The answer is stamped on each message as it arrives, so a decision applies from now on and changes nothing that is already on your server. On this installation a grant does not go back over messages already received: if you grant someone, wait for their next message.",
+	"consent.legend.grantReaches": "The answer is stamped on each message as it arrives, so a decision applies from now on. Granting is the one exception, and it is the one you are owed: this contact's messages from the last {minutes} minutes that were still waiting for an answer will be handled. Older ones never will be. Setting someone back to undecided, or refusing them, applies from now on only, and nothing takes back what is already on your server.",
 
 	"consent.state.granted": "Granted",
 	"consent.state.pending": "Not yet",
@@ -972,6 +974,8 @@
 	"consent.row.fromNetwork": "This comes from your answer for {network} as a whole, which is “{state}”. Answering for this person below overrides it.",
 	"consent.row.overrides": "Your answer for {network} as a whole is “{state}”, and this person’s own answer wins over it.",
 	"consent.row.lastWrote": "Last wrote {when}",
+	"consent.row.nothingWaiting": "Nothing is waiting from this contact: a grant will apply to their next messages.",
+	"consent.row.willAnswer": "{count, plural, one {# recent message is waiting on this decision: it will be handled if you grant.} other {# recent messages are waiting on this decision: they will be handled if you grant.}}",
 	"consent.row.isOwner": "This is you, and you are not one of your own contacts. There is nothing to decide here — see the note above.",
 
 	"consent.action.grant": "Grant",
@@ -982,6 +986,7 @@
 	"consent.decided.recorded": "Recorded: {state}.",
 	"consent.decided.replayed": "Already recorded: {state}. Nothing changed.",
 	"consent.decided.notRetroactive": "It applies to their next message, not to the ones already on your server.",
+	"consent.decided.grantReached": "This applies to their next messages, and to the ones from the last {minutes} minutes that were still waiting.",
 
 	"consent.waiting.missing": "Everything you have already decided is below and is up to date. What is missing is the people who have written to you and whom you have never decided about: that list comes from a different read, and it is the one that failed.",
 	"consent.names.unreadable": "Your server could not read back what these contacts are called, so they are shown by the identity their network gave them. The list itself is complete: names are looked up separately and never stored.",

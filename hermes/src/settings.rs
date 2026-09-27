@@ -444,6 +444,7 @@ mod tests {
             log_level: "info".to_owned(),
             persona_log_level: "info".to_owned(),
             suggestion_ttl_seconds: None,
+            grant_reach_seconds: None,
             user_language: None,
             hermes_webhook_url: None,
             hermes_webhook_secret: None,

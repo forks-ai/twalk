@@ -260,6 +260,11 @@ pub struct Config {
     /// #22). Operator configuration like the model, so it is held here and
     /// injected; unset leaves the SDK's own default.
     pub suggestion_ttl_seconds: Option<String>,
+    /// How far back a grant reaches, in whole seconds (issue #364): the
+    /// messages a newly granted contact sent within it are answered, the
+    /// older ones never are. Held and injected like the window above; unset
+    /// leaves the SDK's own default, which is that window's own hour.
+    pub grant_reach_seconds: Option<String>,
     /// The **user's own** language, one of [`USER_LANGUAGES`]: what a persona
     /// falls back to when it cannot tell what language the message it is
     /// answering was written in, and nothing else (ADR 0016, ticket #164).
@@ -332,6 +337,7 @@ impl Config {
             persona_log_level: optional("HERMES_PERSONA_LOG_LEVEL")
                 .unwrap_or_else(|| "info".to_owned()),
             suggestion_ttl_seconds: optional("HERMES_SUGGESTION_TTL_SECONDS"),
+            grant_reach_seconds: optional("HERMES_GRANT_REACH_SECONDS"),
             user_language: optional("HERMES_USER_LANGUAGE"),
             hermes_webhook_url: optional("HERMES_WEBHOOK_URL"),
             hermes_webhook_secret: optional("HERMES_WEBHOOK_SECRET"),
@@ -638,6 +644,7 @@ mod tests {
             log_level: "info".to_owned(),
             persona_log_level: "info".to_owned(),
             suggestion_ttl_seconds: None,
+            grant_reach_seconds: None,
             user_language: None,
             hermes_webhook_url: None,
             hermes_webhook_secret: None,

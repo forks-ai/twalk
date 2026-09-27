@@ -189,6 +189,20 @@
 	/** What a bulk press would actually write, over what is on screen. */
 	const grantable = $derived(bulkDecisions(shown, 'granted'));
 	const revocable = $derived(bulkDecisions(shown, 'revoked'));
+	/**
+	 * How far back a grant reaches here, in whole minutes: the number the two
+	 * sentences about the past name (#364). `null` when the pending read was
+	 * refused — the screen then says nothing about a window it could not read —
+	 * and never `0` for a reach that is merely short, because `0` is the
+	 * deployment that turned the whole of it off and says a different sentence.
+	 */
+	const reachMinutes = $derived(
+		waiting === null
+			? null
+			: waiting.reachSeconds === 0
+				? 0
+				: Math.max(1, Math.round(waiting.reachSeconds / 60))
+	);
 
 	function networkLabel(network: string): string {
 		const key = networkNameKey(network);
@@ -343,8 +357,20 @@
 			{$t('consent.legend.neverDecided')}
 		</p>
 		<!-- Said here and again against a decision just taken. It is the thing a
-		     user is most likely to read as a broken product. -->
-		<p class="small warn" data-testid="not-retroactive">{$t('consent.legend.notRetroactive')}</p>
+		     user is most likely to read as a broken product — and until #364 it
+		     was one: the copy told them to wait for the next message, because
+		     that was all a grant could do. Now a grant reaches the messages
+		     still inside the window, and the window is named rather than
+		     implied, which is where the owner can find it. -->
+		<p class="small warn" data-testid="about-the-past">
+			{#if reachMinutes === null}
+				{$t('consent.legend.notRetroactive')}
+			{:else if reachMinutes === 0}
+				{$t('consent.legend.noReach')}
+			{:else}
+				{$t('consent.legend.grantReaches', { minutes: reachMinutes })}
+			{/if}
+		</p>
 	</div>
 
 	{#if problem !== null}
@@ -569,7 +595,11 @@
 							count: bulkOutcome.written,
 							state: stateName(bulkOutcome.state)
 						})}
-						{$t('consent.decided.notRetroactive')}
+						{#if bulkOutcome.state === 'granted' && reachMinutes !== null && reachMinutes > 0}
+							{$t('consent.decided.grantReached', { minutes: reachMinutes })}
+						{:else}
+							{$t('consent.decided.notRetroactive')}
+						{/if}
 					</p>
 				{:else if bulkOutcome !== null && bulkOutcome.kind === 'refused'}
 					<div
@@ -656,6 +686,28 @@
 						</p>
 					{/if}
 
+					{#if row.waiting !== null && row.state !== 'granted' && !row.isOwner}
+						<!-- What a grant on this row would do, said before it is made
+						     (#364). For every row a grant is still a decision the owner
+						     might take — including one they answered "not yet" about,
+						     whose messages are labelled `pending` and would be reached;
+						     and including a revoked one, whose messages are not, and
+						     whose count is therefore zero and says so. Not for a row
+						     already granted: there the question does not arise, and a
+						     count would read as work outstanding. -->
+						<p
+							class="small"
+							class:warn={row.waiting > 0}
+							class:muted={row.waiting === 0}
+							data-testid="row-will-answer"
+							data-waiting={row.waiting}
+						>
+							{row.waiting > 0
+								? $t('consent.row.willAnswer', { count: row.waiting })
+								: $t('consent.row.nothingWaiting')}
+						</p>
+					{/if}
+
 					{#if row.isOwner}
 						<p class="small warn" data-testid="row-is-owner">{$t('consent.row.isOwner')}</p>
 					{:else}
@@ -703,7 +755,11 @@
 							{outcome.replayed
 								? $t('consent.decided.replayed', { state: stateName(outcome.state) })
 								: $t('consent.decided.recorded', { state: stateName(outcome.state) })}
-							{$t('consent.decided.notRetroactive')}
+							{#if outcome.state === 'granted' && reachMinutes !== null && reachMinutes > 0}
+								{$t('consent.decided.grantReached', { minutes: reachMinutes })}
+							{:else}
+								{$t('consent.decided.notRetroactive')}
+							{/if}
 						</p>
 					{:else if outcome !== undefined && outcome.kind === 'refused'}
 						<div

@@ -101,6 +101,38 @@ const DRAIN_IDLE: Duration = Duration::from_secs(2);
 /// on disk, which is the thing this ticket exists to not build.
 const DISPLAY_NAME_WINDOW: u64 = 1_000;
 
+/// The most messages one *waiting* count reads back (#364). A count is a read
+/// of the reach's own window — an hour by default — and an hour of one
+/// household's inbound traffic is a few dozen events; this bound exists so
+/// that a deployment whose bus carries far more never turns the consent
+/// screen into a long read. A count that hits it is served and says so in the
+/// log, because a screen that silently under-counts what a grant will answer
+/// is the kind of silence this ticket is about.
+const WAITING_READ_BACK_LIMIT: usize = 5_000;
+
+/// The label a message carries when nobody has decided about its sender: the
+/// only one a grant reaches back to, because a `revoked` sender's message was
+/// published without content (ADR 0012) and a `granted` one was answered live.
+/// The same rule, and the same reason, as `twalk_sdk.consent.PENDING` — which
+/// is the reader that acts on it, while this one only counts.
+const PENDING_CONSENT: &str = "pending";
+
+/// How far back a grant reaches by default: one hour, the same number the
+/// persona SDK defaults to (`twalk_sdk.consent.DEFAULT_GRANT_REACH_SECONDS`)
+/// and the same judgement — long enough that the owner gets to the screen
+/// after a meeting, short enough that granting a contact today does not answer
+/// what they wrote yesterday. Stated in two places because two components have
+/// to agree about it and neither can read the other's configuration; the
+/// compose file is what makes them agree on a deployment.
+pub const DEFAULT_GRANT_REACH_SECONDS: u64 = 3_600;
+
+/// The widest reach this deployment may be configured with: the bus's own
+/// duplicate window (a day, ADR 0037). Past it a replayed message's suggestion
+/// id lands a second time instead of being absorbed, so the personas refuse to
+/// start above it (`twalk_sdk.consent.GrantReach`) — and so does this Gateway,
+/// because a number only one side refuses is a number the other side states.
+pub const MOST_GRANT_REACH_SECONDS: u64 = 86_400;
+
 /// How many contacts one display-name request may ask about. The list on
 /// screen is the pending list, so this is sized for a screenful many times
 /// over, and it is a bound rather than a page size: an oversized request is
@@ -273,6 +305,12 @@ pub struct Contacts {
     unplaced_said: std::sync::Mutex<std::collections::BTreeSet<String>>,
     nats_url: String,
     consumer_name: String,
+    /// How far back a grant reaches (#364): the window a waiting count is
+    /// counted over. The operator's (`GATEWAY_GRANT_REACH_SECONDS`), held here
+    /// because this is the reader that uses it — the way `Portals` holds the
+    /// crowd threshold — and it has to be the number the persona was given, or
+    /// the screen states one thing and the persona honours another.
+    grant_reach: Duration,
     /// The bus connection, made on first need and shared by the projection
     /// task and the display-name read. NATS reconnects underneath it, so
     /// this is created once and never rebuilt.
@@ -287,6 +325,7 @@ impl Contacts {
         connections: Arc<crate::connections::Registry>,
         nats_url: String,
         consumer_name: String,
+        grant_reach: Duration,
     ) -> Self {
         Self {
             store,
@@ -296,12 +335,20 @@ impl Contacts {
             unplaced_said: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             nats_url,
             consumer_name,
+            grant_reach,
             bus: tokio::sync::OnceCell::new(),
         }
     }
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// How far back a grant reaches on this deployment: the window
+    /// [`Self::waiting`] counts over, and the one the consent screen names so
+    /// that the owner reads the number rather than inferring it.
+    pub fn grant_reach(&self) -> Duration {
+        self.grant_reach
     }
 
     pub fn consumer_name(&self) -> &str {
@@ -336,6 +383,134 @@ impl Contacts {
                 Ok(async_nats::jetstream::new(client))
             })
             .await
+    }
+
+    /// How many messages each of these contacts sent inside the reach and is
+    /// still waiting for a decision about: what a grant will answer if the
+    /// owner makes one now (#364).
+    ///
+    /// Read from the bus and written nowhere, like
+    /// [`display_names`](Self::display_names) and for the same reason: a
+    /// per-message history of who wrote and when is the surveillance log this
+    /// module refuses to become, and the consent screen needs a number and not
+    /// a history. This read is narrower still — it deserialises four envelope
+    /// attributes and **no `data` member at all**, so there is no expression
+    /// downstream of it that could reach a body.
+    ///
+    /// The window is [`Self::grant_reach`], so the number on the screen is the
+    /// number the persona will honour — with one edge the screen cannot close:
+    /// this count is taken from *now*, and the persona measures the reach from
+    /// the *decision*, so a message at the very edge of the window can fall out
+    /// of it while the owner reads the page. The number is therefore what a
+    /// grant taken now would answer, which is what the sentence beside it
+    /// claims, and the only way to be exact would be to recount at the moment
+    /// of the click and tell the owner afterwards — which is the silence this
+    /// whole ticket is about, the other way round.
+    ///
+    /// A contact with nothing inside it is absent from the answer, which is how
+    /// the screen says "nothing is waiting".
+    pub async fn waiting(&self) -> Result<std::collections::HashMap<(String, String), u64>> {
+        let reach = self.grant_reach;
+        let mut counted: std::collections::HashMap<(String, String), u64> =
+            std::collections::HashMap::new();
+        if reach.is_zero() {
+            // An operator who set the reach to zero has said a grant reaches
+            // nothing. The screen must say the same, and reading the bus to
+            // learn it would be a read for an answer already known.
+            return Ok(counted);
+        }
+        let jetstream = self.jetstream().await?;
+        let mut stream = jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .context("failed to reach the bus stream")?;
+        if stream
+            .info()
+            .await
+            .context("failed to read the bus stream's state")?
+            .state
+            .last_sequence
+            == 0
+        {
+            return Ok(counted);
+        }
+        // Two bounds, because they are two different things. The stream's own
+        // timestamp bounds the *read*: JetStream can start a consumer at an
+        // instant, and that is what keeps this from walking ninety days.
+        // Whether a message is inside the reach is then decided on the event's
+        // **own `time`**, which is the rule the persona applies
+        // (`twalk_sdk.consent.GrantReach.reaches`) — and the two differ
+        // whenever a Sensor republishes history, where a message stamped last
+        // week reaches the bus today.
+        let cutoff = time::OffsetDateTime::now_utc() - reach;
+        let since =
+            async_nats::jetstream::consumer::DeliverPolicy::ByStartTime { start_time: cutoff };
+        let name = format!(
+            "gateway-waiting-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        );
+        let consumer = stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                name: Some(name.clone()),
+                filter_subject: crate::consent::bus_subject(INBOUND_MESSAGE_TYPE),
+                deliver_policy: since,
+                // Nothing is acked and nothing resumes: this consumer exists
+                // for the length of one request and is deleted below.
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::None,
+                inactive_threshold: Duration::from_secs(30),
+                ..Default::default()
+            })
+            .await
+            .context("failed to open a read of the bus")?;
+        let mut batch = consumer
+            .fetch()
+            .max_messages(WAITING_READ_BACK_LIMIT)
+            .messages()
+            .await
+            .context("failed to read from the bus")?;
+        let mut read_back = 0usize;
+        use futures::StreamExt;
+        while let Some(message) = batch.next().await {
+            let Ok(message) = message else { break };
+            read_back += 1;
+            let Ok(probe) = serde_json::from_slice::<WaitingProbe>(&message.payload) else {
+                continue;
+            };
+            if probe.consent.as_deref() != Some(PENDING_CONSENT) {
+                continue;
+            }
+            let Ok(arrived_at) = time::OffsetDateTime::parse(
+                &probe.header.time,
+                &time::format_description::well_known::Rfc3339,
+            ) else {
+                continue;
+            };
+            if arrived_at < cutoff {
+                continue;
+            }
+            // Refused for any of the reasons a sighting is refused — the
+            // owner's own message, a network this build does not know, a
+            // connection the registry cannot place — all of which the
+            // projection has already logged about this same event.
+            let Ok(seen) = Correspondent::read(&probe.header, &self.owner, &self.connections)
+            else {
+                continue;
+            };
+            *counted.entry((seen.contact, seen.connection)).or_default() += 1;
+        }
+        let _ = stream.delete_consumer(&name).await;
+        if read_back >= WAITING_READ_BACK_LIMIT {
+            warn!(
+                read_back,
+                "the waiting count read its limit: a contact may have more \
+                 messages inside the reach than the consent screen shows"
+            );
+        }
+        Ok(counted)
     }
 
     /// The display names of the given contacts, read from the bus and not
@@ -455,6 +630,25 @@ impl Contacts {
 struct DisplayNameProbe {
     subject: String,
     data: DisplayNameProbeData,
+}
+
+/// What a waiting count reads of an event: the same header the projection
+/// reads, and the label. **No `data` member**, by construction and for
+/// [`InboundHeader`]'s reason — there is no expression downstream of this type
+/// that could reach a body.
+///
+/// The header rather than a subject of its own, so that a count is keyed the
+/// way a stored row is keyed: through [`Correspondent::read`], which excludes
+/// the owner's own identities and places the sighting on a connection through
+/// the registry. A count keyed on the contact alone would tell the owner that
+/// granting them on Matrix will answer the mail they sent as well.
+#[derive(Debug, Deserialize)]
+struct WaitingProbe {
+    #[serde(flatten)]
+    header: InboundHeader,
+    /// The envelope's consent extension: the label frozen at arrival, which is
+    /// the one thing that says a message is still waiting for a decision.
+    consent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -640,16 +834,57 @@ async fn drain(
     Ok(projected)
 }
 
+/// What a screen is told about the past: the window a grant reaches back over,
+/// and how many messages it would answer per contact-and-connection (#364).
+///
+/// One value rather than two arguments, because they are one fact — a count
+/// without its window is a number nobody can weigh, and a window without a
+/// count is a promise with no size. `counted` is `None` when the caller did not
+/// ask for it (`?waiting=true`) or when the bus read failed; the window is
+/// served either way, because the sentence that names it is true whether or not
+/// this request counted.
+pub struct Reach<'a> {
+    pub seconds: u64,
+    pub counted: Option<&'a std::collections::HashMap<(String, String), u64>>,
+}
+
+impl Reach<'_> {
+    /// The reach with nothing counted: what every read but the consent screen's
+    /// gets, and what a failed count leaves.
+    pub fn uncounted(seconds: u64) -> Self {
+        Self {
+            seconds,
+            counted: None,
+        }
+    }
+}
+
 /// One pending contact as the API renders it. Kept here, next to the store
 /// that produced it, so that what leaves the Gateway is written beside what
-/// it holds — the two are the same four values.
-pub fn pending_json(seen: &SeenContact) -> Value {
+/// it holds — the first five are the same five values.
+///
+/// `waiting` is the sixth and is not one of them: it is counted from the bus
+/// per request ([`Contacts::waiting`]) and stored nowhere, and it is
+/// how the consent screen can say what a grant will do before the owner makes
+/// it (#364). `0` means nothing is waiting, which is a real answer; `null`
+/// means the Gateway could not count, which is a different one and must not
+/// be shown as the first.
+pub fn pending_json(seen: &SeenContact, reach: &Reach<'_>) -> Value {
     serde_json::json!({
         "contact": seen.contact,
         "connection": seen.connection,
         "network": seen.network.as_str(),
         "first_seen": seen.first_seen,
         "last_seen": seen.last_seen,
+        // Keyed on the perimeter as well as the contact: a grant is scoped to a
+        // connection (ADR 0033), so what it will answer is this row's
+        // connection and never the same person's messages on another.
+        "waiting": reach.counted.map(|counted| {
+            counted
+                .get(&(seen.contact.clone(), seen.connection.clone()))
+                .copied()
+                .unwrap_or(0)
+        }),
     })
 }
 
@@ -870,21 +1105,66 @@ mod tests {
 
     #[test]
     fn a_pending_contact_renders_as_the_values_it_is_and_no_more() {
+        let seen = SeenContact {
+            contact: "@whatsapp_33612345678:example.com".to_owned(),
+            connection: "whatsapp".to_owned(),
+            network: Network::Whatsapp,
+            first_seen: "2026-09-17T10:00:00.000Z".to_owned(),
+            last_seen: "2026-09-17T18:30:00.000Z".to_owned(),
+        };
         assert_eq!(
-            pending_json(&SeenContact {
-                contact: "@whatsapp_33612345678:example.com".to_owned(),
-                connection: "whatsapp".to_owned(),
-                network: Network::Whatsapp,
-                first_seen: "2026-09-17T10:00:00.000Z".to_owned(),
-                last_seen: "2026-09-17T18:30:00.000Z".to_owned(),
-            }),
+            pending_json(&seen, &Reach::uncounted(DEFAULT_GRANT_REACH_SECONDS)),
             json!({
                 "contact": "@whatsapp_33612345678:example.com",
                 "connection": "whatsapp",
                 "network": "whatsapp",
                 "first_seen": "2026-09-17T10:00:00.000Z",
-                "last_seen": "2026-09-17T18:30:00.000Z"
+                "last_seen": "2026-09-17T18:30:00.000Z",
+                // The Gateway could not count what a grant would answer. Not
+                // zero: "nothing is waiting" is an answer the owner would act
+                // on, and a failed read must not look like it (#364).
+                "waiting": null
             })
+        );
+    }
+
+    #[test]
+    fn what_a_grant_would_answer_is_the_contacts_own_count_and_zero_is_an_answer() {
+        let seen = SeenContact {
+            contact: "@whatsapp_33612345678:example.com".to_owned(),
+            connection: "whatsapp".to_owned(),
+            network: Network::Whatsapp,
+            first_seen: "2026-09-17T10:00:00.000Z".to_owned(),
+            last_seen: "2026-09-17T18:30:00.000Z".to_owned(),
+        };
+        let counted = std::collections::HashMap::from([
+            ((seen.contact.clone(), seen.connection.clone()), 2u64),
+            // The same person on another connection, and somebody else: a row
+            // must read its own perimeter's number and not either of these.
+            ((seen.contact.clone(), "mail-work".to_owned()), 5u64),
+            (
+                (
+                    "@whatsapp_33600000000:example.com".to_owned(),
+                    "whatsapp".to_owned(),
+                ),
+                7u64,
+            ),
+        ]);
+        let reach = Reach {
+            seconds: DEFAULT_GRANT_REACH_SECONDS,
+            counted: Some(&counted),
+        };
+        assert_eq!(pending_json(&seen, &reach)["waiting"], json!(2));
+        let nothing = std::collections::HashMap::new();
+        let counted_nothing = Reach {
+            seconds: DEFAULT_GRANT_REACH_SECONDS,
+            counted: Some(&nothing),
+        };
+        assert_eq!(
+            pending_json(&seen, &counted_nothing)["waiting"],
+            json!(0),
+            "a contact the count did not mention has nothing inside the reach, \
+             which is a number and not an absence"
         );
     }
 

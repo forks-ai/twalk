@@ -36,14 +36,16 @@ const OWNER = '@owner:test.twalk';
 function sighting(
 	contact: string,
 	network: PendingContact['network'] = 'whatsapp',
-	connection: string = network
+	connection: string = network,
+	waiting: number | null = null
 ): PendingContact {
 	return {
 		contact,
 		connection,
 		network,
 		first_seen: '2026-09-18T07:00:00.000Z',
-		last_seen: '2026-09-18T09:00:00.000Z'
+		last_seen: '2026-09-18T09:00:00.000Z',
+		waiting
 	};
 }
 
@@ -86,6 +88,25 @@ function rows(
 ): Row[] {
 	return toRows({ pending, entries, names, owner: OWNER, connections });
 }
+
+describe('what a grant would answer', () => {
+	it('is carried through from the sighting, and null is not zero', () => {
+		const list = rows(
+			[
+				sighting('@whatsapp_1:test.twalk', 'whatsapp', 'whatsapp', 2),
+				sighting('@whatsapp_2:test.twalk', 'whatsapp', 'whatsapp', 0),
+				sighting('@whatsapp_3:test.twalk')
+			],
+			[]
+		);
+		const waiting = new Map(list.map((row) => [row.contact, row.waiting]));
+		expect(waiting.get('@whatsapp_1:test.twalk')).toBe(2);
+		// Nothing is waiting: a real answer, and the screen says so out loud.
+		expect(waiting.get('@whatsapp_2:test.twalk')).toBe(0);
+		// The Gateway could not count: a different fact, and not zero.
+		expect(waiting.get('@whatsapp_3:test.twalk')).toBeNull();
+	});
+});
 
 describe('the three states', () => {
 	it('keeps never-decided apart from a decision whose answer was pending', () => {

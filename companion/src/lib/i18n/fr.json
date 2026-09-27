@@ -934,7 +934,9 @@
 	"consent.legend.pending": "Le message arrive quand même sur votre serveur, en entier, et votre assistant est censé ne pas y toucher. Cette réponse ne cache rien à votre propre serveur.",
 	"consent.legend.revoked": "Le message arrive quand même, comme trace de son arrivée, mais sans ce qui a été écrit : ni texte, ni message cité, ni pièce jointe. C’est la seule réponse qui retient le contenu.",
 	"consent.legend.neverDecided": "Un contact sur lequel vous n’avez jamais décidé est un état à part entière, différent d’un contact auquel vous avez répondu « pas encore ». C’est le point de départ de tout le monde, et ce sera la plus grande partie de cette liste.",
-	"consent.legend.notRetroactive": "Rien de tout cela ne touche au passé. La réponse est apposée sur chaque message à son arrivée : une décision prise maintenant vaut pour la suite et ne change rien de ce qui est déjà sur votre serveur. Si vous autorisez quelqu’un et que rien ne semble se produire, attendez son prochain message : c’est le fonctionnement prévu.",
+	"consent.legend.notRetroactive": "La réponse est apposée sur chaque message à son arrivée : une décision vaut pour la suite et ne retire rien de ce qui est déjà sur votre serveur. Une autorisation revient, elle, sur les messages récents qui attendaient encore ; cette page n’a pas pu lire jusqu’où, ni combien attendent.",
+	"consent.legend.noReach": "La réponse est apposée sur chaque message à son arrivée : une décision vaut pour la suite et ne change rien de ce qui est déjà sur votre serveur. Sur cette installation, une autorisation ne revient pas sur les messages déjà reçus : si vous autorisez quelqu’un, attendez son prochain message.",
+	"consent.legend.grantReaches": "La réponse est apposée sur chaque message à son arrivée : une décision vaut pour la suite. Une autorisation fait la seule exception, et c’est celle qu’on vous doit : les messages de ce contact arrivés dans les {minutes} dernières minutes et qui attendaient encore une réponse seront traités. Plus anciens, ils ne le seront jamais. Remettre quelqu’un en attente ou le refuser ne vaut que pour la suite, et rien ne retire ce qui est déjà sur votre serveur.",
 
 	"consent.state.granted": "Autorisé",
 	"consent.state.pending": "Pas encore",
@@ -971,6 +973,8 @@
 	"consent.row.fromNetwork": "Cela vient de votre réponse pour {network} dans son ensemble, qui est « {state} ». Répondre pour cette personne ci-dessous l’emportera.",
 	"consent.row.overrides": "Votre réponse pour {network} dans son ensemble est « {state} », et la réponse propre à cette personne l’emporte.",
 	"consent.row.lastWrote": "Dernier message {when}",
+	"consent.row.nothingWaiting": "Rien n’attend de ce contact : une autorisation vaudra pour ses prochains messages.",
+	"consent.row.willAnswer": "{count, plural, one {# message reçu récemment attend cette décision : il sera traité si vous autorisez.} other {# messages reçus récemment attendent cette décision : ils seront traités si vous autorisez.}}",
 	"consent.row.isOwner": "C’est vous, et vous n’êtes pas l’un de vos propres contacts. Il n’y a rien à décider ici — voyez la note ci-dessus.",
 
 	"consent.action.grant": "Autoriser",
@@ -981,6 +985,7 @@
 	"consent.decided.recorded": "Enregistré : {state}.",
 	"consent.decided.replayed": "Déjà enregistré : {state}. Rien n’a changé.",
 	"consent.decided.notRetroactive": "Cela vaut pour leur prochain message, pas pour ceux qui sont déjà sur votre serveur.",
+	"consent.decided.grantReached": "Cela vaut pour leurs prochains messages, et pour ceux des {minutes} dernières minutes qui attendaient encore.",
 
 	"consent.waiting.missing": "Tout ce sur quoi vous avez déjà décidé est ci-dessous et à jour. Ce qui manque, ce sont les personnes qui vous ont écrit et sur lesquelles vous n’avez jamais décidé : cette liste vient d’une autre lecture, et c’est celle qui a échoué.",
 	"consent.names.unreadable": "Votre serveur n’a pas pu relire comment ces contacts s’appellent : ils sont affichés avec l’identité que leur réseau leur a donnée. La liste, elle, est complète : les noms sont cherchés à part et ne sont jamais stockés.",

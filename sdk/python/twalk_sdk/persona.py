@@ -5,7 +5,8 @@ the part that is theirs — what to suggest — and gets the rest by
 construction:
 
 1. a **durable** pull consumer on ``inbound.message.received``, so a
-   restart resumes where it stopped instead of losing events;
+   restart resumes where it stopped instead of losing events, and a second
+   one on ``consent.state.changed`` for the grants that reach backwards;
 2. the **trigger-type gate** (:func:`twalk_sdk.trigger.triggers_a_persona`),
    which refuses to wake a persona on anything but an inbound message — the
    user's own messages (``outbound.message.sent``, ADR 0018) are on the bus
@@ -28,6 +29,18 @@ construction:
    ``network``, ``consent`` and trace carried through, and the expiry the
    operator's suggestion policy gives it (:mod:`twalk_sdk.policy`) — so no
    persona can publish a draft that stays approvable for ever.
+
+Beside that loop runs a second one, on the owner's own decisions, for a
+single purpose (issue #364): **a grant reaches the messages that were still
+waiting for it**. The gate above is right at the instant a message arrives
+and wrong a minute later — a contact becomes interesting precisely because
+they just wrote — so a grant taken within
+:attr:`twalk_sdk.config.Config.reach` of a message's arrival wakes the
+persona on that message, read off the stream where it already is. Nothing is
+re-published and nothing is re-labelled: the trigger keeps its own arrival
+time and its own id, it goes through the same door a live message goes
+through, and every event that comes out has the same deterministic id it
+would have had — so a replay that runs twice publishes nothing twice.
 
 Three things the loop refuses to do, the first two learned from a real
 model on a real deployment (issues #162 and #164):
@@ -81,8 +94,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import signal
+import time
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 import nats
@@ -93,7 +109,14 @@ from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from .config import Config
-from .consent import GRANTED, consent_of, is_granted
+from .consent import (
+    CONSENT_CHANGED_TYPE,
+    GRANTED,
+    Grant,
+    consent_of,
+    grant_in,
+    is_granted,
+)
 from .completion import LlmError
 from .disclosure import DisclosureError, LanguageAskFailed, sentence_for
 from .envelope import (
@@ -129,6 +152,24 @@ FETCH_TIMEOUT_SECONDS = 2.0
 RETRY_DELAY_SECONDS = 5
 MAX_DELIVER = 3
 
+#: How long the bus waits for a decision's replay before offering the decision
+#: again. A replay is as long as the messages a grant reaches: one completion
+#: each, sequentially, and a contact who wrote a dozen times in the hour before
+#: the grant is a dozen completions. So the deadline is generous, and the loop
+#: also tells the bus it is still working after each message
+#: (``Msg.in_progress``) — the two together, because the first alone would be a
+#: number somebody has to keep in step with the model's latency.
+DECISION_ACK_WAIT_SECONDS = 300
+
+#: How many messages one replay reads off the stream before it stops looking.
+#: Not a limit on how many are *answered* — that is the reach, and the consent
+#: screen states the count before the owner grants, so the number of drafts is
+#: something they were told and agreed to. This bounds the *reading*: the
+#: window is an hour of the whole deployment's inbound traffic, of which a
+#: replay wants one contact's, and a loop with no bound is a loop that a busy
+#: hour turns into a stall.
+MOST_MESSAGES_READ_BACK = 5_000
+
 #: How long a persona waits for the bus and its stream to exist before
 #: giving up. A persona starts beside NATS in a compose deployment, so it
 #: may well come up first.
@@ -157,6 +198,32 @@ class Context:
 #: nothing to say.
 Outcome = Union[Suggestion, HandedToHermes, None]
 Handler = Callable[[InboundMessage, Context], Awaitable[Outcome]]
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What waking a persona on one trigger decided about its delivery.
+
+    Three answers, and the caller — not the waking — turns them into the
+    bus's verbs, because there are two callers and they hold different
+    deliveries. The live loop holds the trigger's own: done is an ack,
+    hopeless a term, and a retry a nak with the delay. A replay holds the
+    *decision* that reached back (:meth:`Persona._replay_for`): done and
+    hopeless are both "carry on with the next message", and a retry is the
+    decision's own nak, which runs the whole replay again — safely, because
+    every event a replay publishes has a deterministic id and the bus absorbs
+    the second copy.
+    """
+
+    hopeless: bool = False
+    retry_in: Optional[float] = None
+
+
+#: Nothing more to do with this trigger: it produced what it was going to.
+DONE = Verdict()
+
+#: An answer that will not change however often it is tried (issue #162).
+HOPELESS = Verdict(hopeless=True)
 
 
 class Persona:
@@ -231,11 +298,21 @@ class Persona:
         jetstream = connection.jetstream()
         await self._await_stream(jetstream)
         subscription = await self._subscribe(jetstream)
+        decisions = await self._subscribe_to_decisions(jetstream)
         logger.info(
-            "persona ready subject=%s", self.config.subject(MESSAGE_RECEIVED_TYPE)
+            "persona ready subject=%s decisions=%s reach=%ss",
+            self.config.subject(MESSAGE_RECEIVED_TYPE),
+            self.config.subject(CONSENT_CHANGED_TYPE),
+            self.config.reach.seconds,
         )
         try:
-            await self._consume(jetstream, subscription)
+            # A task group, so that either loop failing takes the process down
+            # rather than leaving a persona that reads messages and no longer
+            # hears the owner's decisions, or the reverse. Both watch the same
+            # stop event, so SIGTERM ends both.
+            async with asyncio.TaskGroup() as running:
+                running.create_task(self._consume(jetstream, subscription))
+                running.create_task(self._consume_decisions(jetstream, decisions))
         finally:
             await self.llm.aclose()
             if self.hermes is not None:
@@ -365,6 +442,242 @@ class Persona:
             ),
         )
 
+    async def _subscribe_to_decisions(
+        self, jetstream: JetStreamContext
+    ) -> JetStreamContext.PullSubscription:
+        """The owner's consent decisions, for the one thing a persona does with
+        them: a grant reaches the messages that were still waiting for it
+        (issue #364).
+
+        Durable, because a grant made while this persona was restarting is
+        still a grant it has to act on. Created at the stream's **head** and
+        not at its beginning, which is the opposite of the inbound consumer
+        above and for a reason of the same kind: an inbound message that
+        arrived before a persona existed is still the user's message, while a
+        decision taken before it existed has already had its effect — the
+        Sensor labelled everything that arrived afterwards. A persona
+        installed today that replayed the whole decision history would draft
+        answers to every conversation the owner ever granted.
+        """
+        subject = self.config.subject(CONSENT_CHANGED_TYPE)
+        name = self.config.decisions_durable_name
+        return await jetstream.pull_subscribe(
+            subject,
+            durable=name,
+            stream=self.config.stream,
+            config=ConsumerConfig(
+                durable_name=name,
+                filter_subject=subject,
+                ack_policy=AckPolicy.EXPLICIT,
+                deliver_policy=DeliverPolicy.NEW,
+                # A replay is one completion per message it reaches, so the
+                # deadline is the replay's and not a message's.
+                ack_wait=DECISION_ACK_WAIT_SECONDS,
+                max_deliver=MAX_DELIVER,
+            ),
+        )
+
+    async def _consume_decisions(
+        self,
+        jetstream: JetStreamContext,
+        subscription: JetStreamContext.PullSubscription,
+    ) -> None:
+        """The decision loop, beside the message loop and at its own pace."""
+        while not self._stop.is_set():
+            try:
+                messages = await subscription.fetch(1, timeout=FETCH_TIMEOUT_SECONDS)
+            except (nats.errors.TimeoutError, asyncio.TimeoutError):
+                continue
+            except nats.errors.Error as error:
+                logger.warning("pull of a decision failed, retrying: %s", error)
+                await asyncio.sleep(STARTUP_DELAY_SECONDS)
+                continue
+            for message in messages:
+                await self._decided(jetstream, message)
+
+    async def _decided(self, jetstream: JetStreamContext, message: Msg) -> None:
+        """One consent decision: a grant this persona has to reach back with,
+        or a decision it has no business interpreting."""
+        try:
+            event = json.loads(message.data)
+        except (ValueError, UnicodeDecodeError):
+            logger.error(
+                "dropped a decision that is not JSON, sequence=%s", _sequence(message)
+            )
+            await message.term()
+            return
+        if not isinstance(event, dict):
+            logger.error("dropped a decision that is not a CloudEvents envelope")
+            await message.term()
+            return
+        grant = grant_in(event)
+        if grant is None:
+            # A revocation, a decision about a network or a persona, an
+            # unreadable one: the stream carries every consent decision and
+            # this loop is interested in exactly one kind. Debug, not info: a
+            # deployment's decisions are mostly not grants about contacts, and
+            # a line each would drown the ones that matter.
+            logger.debug(
+                "a decision this persona does nothing with event_id=%s",
+                event.get("id"),
+            )
+            await message.ack()
+            return
+        if not self.config.reach.is_fresh(grant, utc_now()):
+            logger.info(
+                "a grant older than the reach answers nothing contact=%s "
+                "granted_at=%s reach=%ss",
+                grant.contact,
+                rfc3339(grant.occurred_at),
+                self.config.reach.seconds,
+            )
+            await message.ack()
+            return
+        await _settle(
+            message,
+            await self._replay_for(
+                jetstream,
+                grant,
+                deliveries=_deliveries(message),
+                still_working=message.in_progress,
+            ),
+        )
+
+    async def _replay_for(
+        self,
+        jetstream: JetStreamContext,
+        grant: Grant,
+        deliveries: Optional[int],
+        still_working: Callable[[], Awaitable[None]],
+    ) -> Verdict:
+        """Wakes the persona on the messages this grant reaches.
+
+        The messages are read off the stream where they already are — nothing
+        is re-published and nothing is re-labelled, so each keeps its own
+        arrival time and its own id, and the journal shows one message answered
+        late rather than a contact who wrote twice. They then go through
+        :meth:`_process`, which is the same door a live message goes through.
+
+        The read is a consumer over the window the reach describes, named for
+        this replay — nats-py binds a pull subscription by name, so even a
+        consumer meant to live for one call has one — and deleted when the call
+        is done. It acks nothing and resumes nothing: the decision's own
+        delivery is what makes the work durable. If any message asks to be retried the whole decision is
+        naked and the replay runs again — which is safe rather than wasteful,
+        since a message already answered recomputes the same thinking id and
+        the same suggestion id, and the bus absorbs both.
+        """
+        reach = self.config.reach
+        if reach.seconds == 0:
+            # An operator who set zero has said a grant reaches nothing. Said
+            # out loud, because a silent no-op here is the defect this ticket
+            # is about.
+            logger.info(
+                "a grant reaches nothing: the reach is zero contact=%s",
+                grant.contact,
+            )
+            return DONE
+        subject = self.config.subject(MESSAGE_RECEIVED_TYPE)
+        name = (
+            f"{self.config.durable_name}-reach-{os.getpid()}-"
+            f"{time.monotonic_ns()}"
+        )
+        since = rfc3339(grant.occurred_at - timedelta(seconds=reach.seconds))
+        read = await jetstream.pull_subscribe(
+            subject,
+            durable=name,
+            stream=self.config.stream,
+            config=ConsumerConfig(
+                durable_name=name,
+                filter_subject=subject,
+                deliver_policy=DeliverPolicy.BY_START_TIME,
+                opt_start_time=since,
+                ack_policy=AckPolicy.NONE,
+                # A consumer this loop forgot to delete goes on its own.
+                inactive_threshold=DECISION_ACK_WAIT_SECONDS,
+            ),
+        )
+        reached = 0
+        read_back = 0
+        unanswered = 0
+        retry_in: Optional[float] = None
+        try:
+            while read_back < MOST_MESSAGES_READ_BACK:
+                try:
+                    batch = await read.fetch(10, timeout=FETCH_TIMEOUT_SECONDS)
+                except (nats.errors.TimeoutError, asyncio.TimeoutError):
+                    break
+                for message in batch:
+                    read_back += 1
+                    try:
+                        event = json.loads(message.data)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if not triggers_a_persona(event):
+                        continue
+                    if not reach.reaches(event, grant):
+                        continue
+                    reached += 1
+                    logger.info(
+                        "a grant reaches a message that was waiting for it "
+                        "event_id=%s contact=%s arrived=%s granted_at=%s",
+                        event.get("id"),
+                        grant.contact,
+                        event.get("time"),
+                        rfc3339(grant.occurred_at),
+                    )
+                    verdict = await self._process(
+                        jetstream, event, deliveries=deliveries
+                    )
+                    if verdict.retry_in is not None:
+                        retry_in = max(retry_in or 0.0, verdict.retry_in)
+                    if verdict.hopeless:
+                        # Already an ERROR line of its own, naming the event.
+                        # Counted here as well, so that the line below can name
+                        # the *grant*: an operator reading about a model that
+                        # refused an answer should not have to join an event id
+                        # to a decision to find out which contact went
+                        # unanswered.
+                        unanswered += 1
+                    # A message that could not be answered must not stop the
+                    # ones behind it.
+                    await still_working()
+            if read_back >= MOST_MESSAGES_READ_BACK:
+                logger.error(
+                    "a grant's replay stopped after reading %s messages, which "
+                    "is its limit: contact=%s may have messages inside the "
+                    "reach that were not answered",
+                    read_back,
+                    grant.contact,
+                )
+        finally:
+            try:
+                await jetstream.delete_consumer(self.config.stream, name)
+            except Exception as error:  # noqa: BLE001 - tidiness, not correctness
+                logger.warning("a replay's consumer outlived it: %s", error)
+        logger.info(
+            "a grant reached %s of the %s messages read back contact=%s reach=%ss",
+            reached,
+            read_back,
+            grant.contact,
+            reach.seconds,
+        )
+        if unanswered:
+            # The grant did reach these and they produced nothing, for a reason
+            # each has already logged. Said again as one line about the
+            # decision, because this is the shape of the silence #364 is about:
+            # the owner granted somebody and expects an answer.
+            logger.error(
+                "a grant reached %s messages that produced no suggestion "
+                "contact=%s granted_at=%s: the owner will see nothing for them",
+                unanswered,
+                grant.contact,
+                rfc3339(grant.occurred_at),
+            )
+        return DONE if retry_in is None else Verdict(retry_in=retry_in)
+
     async def _consume(
         self,
         jetstream: JetStreamContext,
@@ -427,6 +740,36 @@ class Persona:
             await message.ack()
             return
 
+        await _settle(
+            message,
+            await self._process(jetstream, event, deliveries=_deliveries(message)),
+        )
+
+    async def _process(
+        self,
+        jetstream: JetStreamContext,
+        event: Dict[str, Any],
+        deliveries: Optional[int],
+    ) -> "Verdict":
+        """Wakes the persona on one trigger and says what its delivery should
+        now do.
+
+        Everything from the thinking event to the published suggestion, for a
+        trigger that has passed both gates — or that a grant reached, which is
+        the same trigger arriving late (:meth:`_replay_for`). It returns a
+        verdict instead of acking, because the two callers hold different
+        things: the live loop holds a JetStream delivery with a retry count,
+        and a replay holds a decision whose own delivery is the retry.
+
+        ``deliveries`` is how many times the bus has offered the delivery this
+        work arrived on, which bounds how often a failure that might pass is
+        retried. For a live trigger that is the trigger's own count. For a
+        replay it is the **decision's**, because a replay is read off the stream
+        rather than delivered from it and the decision's delivery is what will
+        bring it back: so every message of one replay shares one budget, and a
+        model that is down takes the whole replay's three attempts rather than
+        three each.
+        """
         trigger = InboundMessage(event)
         handler = self._handler
         if handler is None:  # serve() refuses to start without one
@@ -515,13 +858,11 @@ class Persona:
                     trigger.network,
                     error,
                 )
-                await message.term()
-                return
+                return HOPELESS
             # Otherwise the event is not acked: JetStream redelivers it after
             # a delay, because the usual cause is an endpoint that was briefly
             # away. The redeliveries are bounded by the consumer's limit, and
             # the last one says so rather than letting the trigger disappear.
-            deliveries = _deliveries(message)
             if deliveries is not None and deliveries >= MAX_DELIVER:
                 logger.error(
                     "no suggestion for event_id=%s network=%s after %s "
@@ -532,8 +873,7 @@ class Persona:
                     deliveries,
                     error,
                 )
-                await message.term()
-                return
+                return HOPELESS
             # The delay is the failure's own when it has one. A rate-limited
             # route says "not this minute" and retrying it in five seconds
             # spends a delivery on an answer that cannot have changed yet
@@ -546,9 +886,8 @@ class Persona:
                 delay,
                 error,
             )
-            await message.nak(delay=delay)
-            return
-        await message.ack()
+            return Verdict(retry_in=delay)
+        return DONE
 
     async def _disclosed(self, suggestion: Suggestion, trigger: InboundMessage) -> Suggestion:
         """The suggestion with the sentence its language selects (ADR 0031).
@@ -612,6 +951,21 @@ class Persona:
             "published %s id=%s subject=%s", event["type"], event["id"], subject
         )
         return acknowledgement
+
+
+async def _settle(message: Msg, verdict: Verdict) -> None:
+    """Turns a verdict into what the bus is told about this delivery.
+
+    One function because there are two deliveries — a trigger's and a
+    decision's — and they are settled identically: the difference between them
+    is what produced the verdict, not what is done with it.
+    """
+    if verdict.hopeless:
+        await message.term()
+    elif verdict.retry_in is not None:
+        await message.nak(delay=verdict.retry_in)
+    else:
+        await message.ack()
 
 
 def _will_not_change(error: BaseException) -> bool:
