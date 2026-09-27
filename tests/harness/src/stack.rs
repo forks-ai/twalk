@@ -212,3 +212,188 @@ async fn appservice_whoami() -> std::result::Result<String, String> {
         })
         .ok_or_else(|| format!("{status} {body}, which names no user_id"))
 }
+
+// ---------------------------------------------------------------------------
+// Holding a deploy stack, across processes (#212)
+// ---------------------------------------------------------------------------
+
+/// An exclusive hold on one compose project, released when this is dropped.
+///
+/// The lock is `flock(2)` on a file in the temp directory, and the kernel
+/// releases it when the holding process dies — a test interrupted with ^C, a
+/// `cargo test` killed on a full disk, a panic that unwinds past the guard —
+/// which is why it is `flock` and not a lock file with a pid inside. There is no
+/// stale lock to recognise and no lock to steal, and those are the two things a
+/// hand-rolled one gets wrong.
+///
+/// Advisory, so it binds only the runs that ask. Every reader of a deploy stack
+/// in this repository asks; nothing stops an operator's own `docker compose up`
+/// on the same project, which is theirs to do.
+pub struct StackHeld {
+    /// Held for its file descriptor: dropping it closes the descriptor, which is
+    /// what releases the lock. Never read.
+    _file: std::fs::File,
+    project: String,
+}
+
+impl Drop for StackHeld {
+    fn drop(&mut self) {
+        // Said, because a wait nobody can see is the kind of slowness that gets
+        // blamed on the code under test.
+        eprintln!("released the deploy stack {}", self.project);
+    }
+}
+
+/// Waits until this process is the only one using the deploy stack `project`,
+/// and holds it until the answer is dropped (#212).
+///
+/// Two deployment suites in two binaries share one compose project and one pair
+/// of host ports, and that is deliberate: a second Synapse and a second NATS on
+/// a host that is already memory-bound is a cost nobody asked for, and run one
+/// after the other the two suites reuse one warm stack, which is what makes them
+/// bearable. What they cannot do is run *at once* — each generates its own
+/// environment file and `docker compose up -d` on a changed configuration
+/// **recreates** the containers, so the second run pulls the stack out from under
+/// the first, and the failure that reaches the developer is a timeout or a
+/// `Connection reset by peer` in whatever change they happened to be testing.
+///
+/// `companion-gateway/tests/deployment.rs` already said in prose that the two
+/// "can never be running at once". This is that sentence made true: they wait
+/// for each other instead of assuming they never meet.
+pub async fn hold_deploy_stack(project: &str) -> Result<StackHeld> {
+    let path = std::env::temp_dir().join(format!("{project}.deploy-lock"));
+    let project = project.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("failed to open the deploy stack's lock {path:?}"))?;
+        // Non-blocking first, so that a wait is *announced* rather than looking
+        // like a hung test: the second run of two prints one line and then waits
+        // for as long as the first one needs.
+        use std::os::fd::AsRawFd;
+        let fd = file.as_raw_fd();
+        // SAFETY: `fd` is open for the lifetime of `file`, and `flock` touches
+        // nothing but the kernel's lock table for it.
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            eprintln!(
+                "another run holds the deploy stack {project}; waiting for it \
+                 (the two deployment suites share one stack on purpose — #212)"
+            );
+            // SAFETY: as above.
+            if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+                bail!(
+                    "failed to take the deploy stack {project}: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+        Ok(StackHeld {
+            _file: file,
+            project,
+        })
+    })
+    .await
+    .context("the task holding the deploy stack was cancelled")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lock across a **process** boundary, which is the one it exists for.
+    ///
+    /// `flock(1)` from util-linux takes the same kernel lock, so another process
+    /// holding it is one command — and the assertion is the one that matters:
+    /// this side waits for it and then gets the stack. (Linux-only, like every
+    /// suite in this repository, which needs Docker and a Synapse.)
+    #[tokio::test]
+    async fn another_process_holding_the_stack_is_waited_for() {
+        let project = format!("twalk-harness-lock-other-{}", std::process::id());
+        let path = std::env::temp_dir().join(format!("{project}.deploy-lock"));
+        std::fs::write(&path, b"").expect("the lock file");
+
+        let mut other = tokio::process::Command::new("flock")
+            .arg("-x")
+            .arg(&path)
+            .args(["-c", "echo held; sleep 3"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("flock(1) is available: this suite is Linux-only");
+        // Wait until it really holds it, rather than racing its startup.
+        {
+            use tokio::io::AsyncBufReadExt;
+            let stdout = other.stdout.take().expect("piped");
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let held = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("flock started")
+                .expect("its output is readable");
+            assert_eq!(held.as_deref(), Some("held"));
+        }
+
+        let taken = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            hold_deploy_stack(&project),
+        )
+        .await;
+        assert!(
+            taken.is_err(),
+            "another process holds this stack: this run has to wait for it"
+        );
+
+        let held = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            hold_deploy_stack(&project),
+        )
+        .await
+        .expect("the other process lets go")
+        .expect("and this run then takes the stack");
+        drop(held);
+        let _ = other.wait().await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn one_run_waits_for_another_and_then_gets_the_stack() {
+        let project = format!(
+            "twalk-harness-lock-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock is after the epoch")
+                .as_nanos()
+        );
+
+        let held = hold_deploy_stack(&project)
+            .await
+            .expect("the first hold succeeds");
+
+        // A second hold cannot be granted while the first one lives. `flock` is
+        // per open file description, so two holds in one process contend exactly
+        // as two processes do — which is what makes this testable at all.
+        let waiting = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            hold_deploy_stack(&project),
+        )
+        .await;
+        assert!(
+            waiting.is_err(),
+            "a second run must wait for the first, not be handed the same stack"
+        );
+
+        drop(held);
+        let after = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            hold_deploy_stack(&project),
+        )
+        .await
+        .expect("the stack is free once the first hold is dropped")
+        .expect("and taking it succeeds");
+        drop(after);
+
+        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("{project}.deploy-lock")));
+    }
+}

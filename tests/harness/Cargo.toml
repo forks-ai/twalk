@@ -13,6 +13,11 @@ anyhow = "1"
 async-nats = "0.50"
 futures = "0.3"
 jsonschema = "0.56"
+# `flock(2)`, for the one thing two deployment suites cannot do at once (#212).
+# Already in the tree through the async and HTTP stacks, so it costs no build:
+# what it buys is a lock the kernel releases when the holder dies, which a lock
+# file with a pid inside does not.
+libc = "0.2"
 # Moved out of dev-dependencies by #171: `stack.rs` itself now asks the test
 # Synapse whether it has loaded the appservice registration, so the harness
 # fails with a diagnosis instead of letting a suite discover an unregistered

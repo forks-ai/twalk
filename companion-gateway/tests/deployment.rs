@@ -90,9 +90,19 @@
 //! `sensor/tests/deployment.rs` has always done. It used to remove only the
 //! `companion-gateway` and `sensor` services and leave the homeserver and the
 //! bus to the Sensor's deployment test "which owns them"; those two suites
-//! default to the *same* compose project (TWALK_DEPLOY_TEST_STACK) and can
-//! never be running at once, so what that reasoning actually left behind was a
-//! network, two volumes and a Synapse, which is what issue #128 is about.
+//! default to the *same* compose project (TWALK_DEPLOY_TEST_STACK) and the
+//! *same* host ports — on purpose, so that two suites cost one warm Synapse
+//! and one NATS rather than two on a memory-bound host — so what that
+//! reasoning actually left behind was a network, two volumes and a Synapse,
+//! which is what issue #128 is about.
+//!
+//! They can never be running at once, and since #212 that is taken rather than
+//! assumed: both suites hold `harness::hold_deploy_stack` for the length of
+//! their run and wait for each other, saying so when they wait. Assumed, it was
+//! false — each generates its own environment file, and `docker compose up -d`
+//! on a changed configuration recreates the containers, so the second run
+//! pulled the stack out from under the first and the failure that reached the
+//! developer was a timeout in whatever they happened to be changing.
 //!
 //! A failing scenario still leaves the stack up, deliberately: a container and
 //! its logs are what a failure is diagnosed from.
@@ -1222,6 +1232,13 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
 /// tier.
 #[tokio::test]
 async fn the_deploy_stack_serves_every_scenario_and_is_torn_down_once() -> Result<()> {
+    // The exclusion this suite used to assume rather than take (#212):
+    // `sensor/tests/deployment.rs` is a different binary sharing this compose
+    // project and these host ports, deliberately, and it generates its own
+    // environment file — so an `up` of its own while this run is in flight
+    // would *recreate* these containers underneath it. Held until this test
+    // returns, which is what makes the paragraph above true.
+    let _stack = harness::hold_deploy_stack(&deploy_stack()).await?;
     let env_file = write_env_file()?;
     let started = std::time::Instant::now();
 

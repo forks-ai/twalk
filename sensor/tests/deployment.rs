@@ -11,7 +11,12 @@
 //! event lands on the deploy stack's bus.
 //!
 //! The deploy stack runs under its own compose project and host ports, next
-//! to the harness's own stack: TWALK_DEPLOY_TEST_STACK (default
+//! to the harness's own stack — one project and one pair of ports shared with
+//! `companion-gateway/tests/deployment.rs`, so that two suites cost one warm
+//! Synapse and one NATS rather than two on a host that is memory-bound. What
+//! they cannot do is run at once, and since #212 they no longer assume it:
+//! each takes `harness::hold_deploy_stack` and waits for the other, saying so
+//! when it does. The variables: TWALK_DEPLOY_TEST_STACK (default
 //! twalk-deploy-test), TWALK_DEPLOY_TEST_SYNAPSE_PORT (default 18218),
 //! TWALK_DEPLOY_TEST_NATS_PORT (default 14418),
 //! TWALK_DEPLOY_TEST_GATEWAY_PORT (default 18328 — deliberately distinct
@@ -300,6 +305,12 @@ async fn a_fresh_compose_up_produces_events_without_manual_steps() -> Result<()>
     // Not a host SensorProc, but the same mutual exclusion applies: this test
     // runs a full Sensor, just containerized.
     let _guard = harness::SENSOR_LOCK.lock().await;
+    // And the exclusion the mutex above cannot reach: the Companion Gateway's
+    // deployment suite is a different binary sharing this compose project and
+    // these host ports, deliberately (#212). It generates its own environment
+    // file, so an `up` of its own while this run is in flight would *recreate*
+    // these containers underneath it. Held until this test returns.
+    let _stack = harness::hold_deploy_stack(&deploy_stack()).await?;
     let env_file = write_env_file()?;
 
     // Build first so a build failure is attributed to the build; warm, this
