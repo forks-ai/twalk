@@ -169,6 +169,32 @@ impl Bot {
         }
     }
 
+    /// Logs this session out, which is how the owner revokes a device (#229):
+    /// the homeserver forgets the token *and* the device, so every later request
+    /// with it answers `M_UNKNOWN_TOKEN` — exactly what a deletion from the
+    /// owner's phone produces.
+    ///
+    /// `POST /logout` with the device's own token and not
+    /// `DELETE /devices/{id}`, which Synapse guards with user-interactive auth: a
+    /// test that had to answer a password challenge would be testing Synapse's
+    /// UIA flow, and what is under test here is what Twalk does afterwards.
+    pub async fn revoke_this_device(&self) -> Result<()> {
+        let response = self
+            .http
+            .post(format!("{}/_matrix/client/v3/logout", self.base_url))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("failed to log the device out")?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "logging the device out answered {}",
+            response.status()
+        );
+        Ok(())
+    }
+
     /// Creates a portal-shaped room. With `encrypted = true` the room enables
     /// Megolm from creation, like a real bridge portal room.
     pub async fn create_room(&self, name: &str, encrypted: bool) -> Result<String> {
@@ -521,6 +547,34 @@ impl Bot {
             &format!("waiting for membership {expected} of {user_id} in {room_id}"),
         )
         .await
+    }
+}
+
+/// Polls `attempt` every half-second until it yields, for at most `within`.
+///
+/// `twalk_test_harness::poll_until` gives up after twenty seconds, which is the
+/// right bound for a process starting or an event reaching the bus. It is the
+/// wrong one for anything that waits on the **owner's device**: that device holds
+/// a sync long poll open for thirty seconds (`OWNER_DEVICE_SYNC_TIMEOUT`), so
+/// what it notices, it notices when the poll comes back — and a test bounded at
+/// twenty seconds fails on the arithmetic rather than on the behaviour, which is
+/// how the first version of #229's test failed.
+pub async fn wait_up_to<T, Fut>(
+    within: std::time::Duration,
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T>
+where
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if let Some(value) = attempt().await {
+            return Ok(value);
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out after {}s", within.as_secs());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 

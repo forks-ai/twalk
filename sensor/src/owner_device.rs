@@ -240,6 +240,85 @@ pub fn reach(by_the_owners_device: bool, the_room_is_a_portal: bool) -> Reach {
     }
 }
 
+/// What a homeserver's refusal says about the owner device's **credential**
+/// (issue #229).
+///
+/// Asked of a failed sync and of a failed send, which is why it is named after
+/// the refusal and not after the sync: the sync notices a revocation when its
+/// long poll comes back, up to thirty seconds later, and an approval that
+/// arrives inside that window is sent under a token the homeserver has already
+/// forgotten.
+///
+/// ADR 0025 accepted a long-lived access token for the owner's own account at
+/// rest, and the mitigation it named was neither encryption nor scope: it was
+/// that the token is *a device among their devices*, revocable from any Matrix
+/// client without Twalk's involvement. That mitigation is only real if revoking
+/// it produces a visible result — and until this ticket it produced none. The
+/// owner revoked the device from their phone, the sync loop warned and retried
+/// for ever, approvals went on being accepted, and nothing arrived.
+///
+/// So a sync failure is read for which of two situations it is, because they are
+/// two and must not share one signal: a homeserver that is merely away, and a
+/// credential that is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterRefusal {
+    /// The homeserver did not answer, or answered something a later attempt may
+    /// not: it is restarting, the network is down, a proxy is in the way. Retry,
+    /// which is what both paths have always done.
+    Retry,
+    /// The credential is gone. The homeserver says it does not know this token,
+    /// which is what it says about a device the owner revoked — and Twalk holds
+    /// no password for the owner's account (ADR 0025: it is given a device, never
+    /// the account), so there is nothing to log back in with. Retrying is not
+    /// wrong so much as pointless, and being quiet about it is the defect.
+    CredentialGone,
+}
+
+/// Reads a homeserver's refusal for whether the acting credential is gone.
+///
+/// One argument, the Matrix error code, because one code decides it —
+/// [`JoinAnswer`] carries a status as well because a join is refused by status
+/// alone often enough to matter, and nothing here is. `main.rs` does the asking
+/// of `matrix_sdk`; this decides, and gets tested without a homeserver.
+///
+/// `M_UNKNOWN_TOKEN` and nothing else. It is what Synapse answers for a token it
+/// has no record of — a device the owner deleted, a token an admin invalidated —
+/// and the `soft_logout` flag beside it makes no difference here: it tells a
+/// client whether it may re-authenticate the same device with a password, and
+/// Twalk has no password to offer. `M_MISSING_TOKEN` is deliberately *not* read
+/// as gone: it means no token was sent at all, which is a bug in this process
+/// rather than a decision of the owner's, and reporting a revocation for it would
+/// send an operator to the wrong place.
+///
+/// A refusal with no readable code is a retry, not a revocation: a proxy that
+/// answers `401` with an HTML page is a deployment problem, and naming the
+/// owner's own credential for it would be a lie that costs them a device.
+///
+/// Asked of a failed **sync** and of a failed **send**, which is what closes the
+/// window between the two: the sync notices a revocation when its long poll
+/// comes back, up to thirty seconds later, and an approval that arrives inside
+/// that window is sent under a token the homeserver has already forgotten.
+pub fn after_refusal(errcode: Option<&str>) -> AfterRefusal {
+    match errcode {
+        Some("M_UNKNOWN_TOKEN") => AfterRefusal::CredentialGone,
+        _ => AfterRefusal::Retry,
+    }
+}
+
+/// The one sentence an operator needs when the acting credential is gone: which
+/// credential, and what puts it back.
+///
+/// Here rather than inline at the log site so that the log and the reply's
+/// dead-letter reason say the same thing — the owner reads one on the approval
+/// screen and the operator reads the other in `docker logs`, and two different
+/// accounts of one situation is how a deployment gets debugged twice.
+pub const REVOKED_REMEDY: &str = concat!(
+    "SENSOR_OWNER_DEVICE_ACCESS_TOKEN names a device the homeserver no longer knows: the owner ",
+    "revoked it, or an admin did. Replies cannot be sent as the owner until a new device is ",
+    "provisioned: run docker-compose/provision-owner-device.sh, then restart the Sensor. This ",
+    "is not a homeserver that is unreachable — that answers differently and is retried."
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +445,41 @@ mod tests {
         );
         // Attempt 0 is not a retry; treated as the first.
         assert_eq!(retry_delay(0), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn only_an_unknown_token_is_a_revoked_credential() {
+        // What Synapse answers for a device the owner deleted.
+        assert_eq!(
+            after_refusal(Some("M_UNKNOWN_TOKEN")),
+            AfterRefusal::CredentialGone
+        );
+
+        // A homeserver that is away, in the shapes it goes away in: nothing
+        // readable at all, a rate limit, an internal error.
+        for errcode in [None, Some("M_LIMIT_EXCEEDED"), Some("M_UNKNOWN")] {
+            assert_eq!(
+                after_refusal(errcode),
+                AfterRefusal::Retry,
+                "errcode {errcode:?}"
+            );
+        }
+
+        // A token this process failed to send is a bug here, not a decision of
+        // the owner's: naming their credential for it sends an operator to the
+        // wrong place. Same for a refusal nobody can read — a proxy answering
+        // `401` with an HTML page — which is the `None` above.
+        assert_eq!(after_refusal(Some("M_MISSING_TOKEN")), AfterRefusal::Retry);
+    }
+
+    #[test]
+    fn the_remedy_names_the_credential_and_the_distinction() {
+        assert!(REVOKED_REMEDY.contains("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"));
+        assert!(
+            REVOKED_REMEDY.contains("unreachable"),
+            "a revoked device and a homeserver that is away must not share one \
+             signal, so the message that names one says it is not the other"
+        );
     }
 
     #[test]
