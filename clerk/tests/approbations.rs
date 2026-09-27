@@ -30,6 +30,8 @@
 
 mod harness;
 
+use std::time::Duration;
+
 use anyhow::Result;
 use harness::{inbound_message, suggestion, Run, CONTACT_MATRIX_ID};
 use serde_json::json;
@@ -236,6 +238,104 @@ async fn an_expired_suggestion_is_not_posted_and_is_counted() -> Result<()> {
     run.assert_metric("twalk_clerk_skipped_total{why=\"expired\"} 1")
         .await?;
     run.assert_metric("twalk_clerk_posts_total{channel=\"approbations\"} 1")
+        .await?;
+
+    run.shutdown().await
+}
+
+#[tokio::test]
+async fn a_post_a_relay_refused_while_its_database_was_down_lands_when_it_is_back() -> Result<()> {
+    let mut run = Run::start("approbations-outage").await?;
+
+    // First, that this run is healthy: one suggestion, one post. Without it a
+    // failure below could be the stack rather than the outage under test.
+    let warm = suggestion(&run.id, 1, 3600)?;
+    run.publish("persona.suggest.produced", &warm).await?;
+    run.wait_for_post(warm["id"].as_str().unwrap()).await?;
+
+    // The relay's storage goes, and the relay stays up and answering: the shape
+    // this stack took in an earlier run, and the shape that cost #308 a post —
+    // a relay that is *down* is unreachable, which was always retried, and a
+    // relay that answers a client error for its own outage was not.
+    //
+    // What it actually answers, measured here: `404 relay: no community is
+    // configured for this host`. Its tenant lookup fails closed and names the
+    // tenant rather than the lookup, so the refusal that reads most like "wrong
+    // relay" is what a relay says when its database is gone. The clerk's rule
+    // is written against that (`relay::SERVER_FAULT_REASONS`), and this test is
+    // where the spelling came from — which is why it asserts the *property*,
+    // that the post lands once, and not the status.
+    let stopped = run.stack.stop_database().await?;
+    let during = suggestion(&run.id, 2, 3600)?;
+    let during_id = during["id"].as_str().unwrap().to_owned();
+    let body = during["data"]["suggestion"]["body"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    run.publish("persona.suggest.produced", &during).await?;
+
+    // The clerk tried, could not, and said so by counting it. The number is not
+    // asserted exactly: it is the backoff's arithmetic against however long
+    // Postgres takes to come back.
+    let failures = run
+        .wait_until_counter("twalk_clerk_relay_failures_total", 1)
+        .await?;
+    assert!(failures >= 1);
+
+    // And it was a **refusal** that was retried, which is the rule under test
+    // (#308) and not something the older behaviour would have passed: a relay
+    // answering nothing would take the `Unreachable` path, transient long
+    // before this ticket. So the clerk's own log is read for the refusal it
+    // retried, with the relay's reason in it.
+    run.clerk
+        .wait_for_log("the relay could not be written to")
+        .await?;
+    let logs = run.clerk.logs().await;
+    assert!(
+        logs.contains("no community is configured for this host")
+            || logs.contains("database error"),
+        "the retried failure must be the relay's own refusal, with its reason; the log was:\n{logs}"
+    );
+    // Nothing given up on, either: a post acked as though the relay had judged
+    // the request is the suggestion the owner never learns existed, and it
+    // would show here.
+    run.assert_metric_now("twalk_clerk_skipped_total{why=\"refused\"} 0")
+        .await?;
+
+    // Nothing was posted. Read from the clerk's own counter and not from the
+    // relay: a relay with no storage cannot answer a query either, so a test
+    // that asked it here would fail on the outage it had just created — which
+    // is how this assertion was written the first time.
+    run.assert_metric_now("twalk_clerk_posts_total{channel=\"approbations\"} 1")
+        .await?;
+
+    stopped.start().await?;
+
+    // It lands, once, with the suggestion's own words in it — on a delivery the
+    // bus made because the clerk refused to treat the outage as a verdict.
+    let post = run
+        .wait_for_post_within(&during_id, Duration::from_secs(90))
+        .await?;
+    assert!(
+        post.content.contains(&body),
+        "the post that landed carries the suggestion's body:\n{}",
+        post.content
+    );
+    let posts = run.posts_about(&during_id).await?;
+    assert_eq!(
+        posts.len(),
+        1,
+        "the retries produce one post and not one per attempt: {posts:?}"
+    );
+
+    // Two posts in all, and nothing skipped: a post acked as though the relay
+    // had judged the request is a suggestion the owner never learns existed,
+    // and it would show up here as a count that stayed at one.
+    run.assert_metric("twalk_clerk_posts_total{channel=\"approbations\"} 2")
+        .await?;
+    run.assert_metric_now("twalk_clerk_skipped_total{why=\"refused\"} 0")
+        .await?;
+    run.assert_metric_now("twalk_clerk_skipped_total{why=\"duplicate\"} 0")
         .await?;
 
     run.shutdown().await

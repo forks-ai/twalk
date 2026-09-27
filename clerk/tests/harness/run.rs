@@ -586,6 +586,58 @@ impl Run {
         }
     }
 
+    /// Polls `approbations` for the post about the suggestion `id`, for at most
+    /// `within` — the wait a test about the clerk's **retry** needs, where
+    /// [`wait_for_post`](Self::wait_for_post)'s twenty seconds are a wait for a
+    /// process to get going.
+    ///
+    /// The clerk's backoff doubles (`consumers::nak_delay`), so how long a post
+    /// takes to land after whatever stopped it has stopped is a schedule and not
+    /// a constant: a bound chosen for the one is the wrong bound for the other.
+    pub async fn wait_for_post_within(&self, id: &str, within: Duration) -> Result<Event> {
+        let posted = wait_on_relay_for(
+            || async { self.posts_about(id).await.ok()?.into_iter().next() },
+            &format!("the post about suggestion {id} in approbations"),
+            within,
+        )
+        .await;
+        match posted {
+            Ok(post) => Ok(post),
+            Err(error) => {
+                let metrics = self.clerk.metrics().await.unwrap_or_default();
+                anyhow::bail!("{error}; /metrics was:\n{metrics}")
+            }
+        }
+    }
+
+    /// Polls until the counter `name` reads at least `least`, and answers with
+    /// what it read.
+    ///
+    /// A counter and not a line, because how many times a retry was tried
+    /// before the thing it was waiting for came back is the backoff's
+    /// arithmetic and the outage's length — asserting an exact number would be
+    /// asserting those.
+    pub async fn wait_until_counter(&self, name: &str, least: u64) -> Result<u64> {
+        let read = poll_until(
+            || async {
+                let metrics = self.clerk.metrics().await.ok()?;
+                metrics
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name)?.trim().parse::<u64>().ok())
+                    .filter(|value| *value >= least)
+            },
+            &format!("the counter {name} to reach {least}"),
+        )
+        .await;
+        match read {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let metrics = self.clerk.metrics().await?;
+                anyhow::bail!("{error}; /metrics was:\n{metrics}")
+            }
+        }
+    }
+
     /// The owner reacts `emoji` to the post `post_id` — a kind 7 signed by
     /// the harness owner's key, the one `CLERK_OWNER_PUBKEY` names. Returns
     /// the event as it went up, for its id (the gesture the clerk's thread

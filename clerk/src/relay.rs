@@ -171,16 +171,90 @@ pub enum RelayError {
     Malformed(String),
 }
 
+/// The prefix this relay puts on its own failure. NIP-01 gives a rejection a
+/// machine-readable prefix, and `error:` is its catch-all — *"for any other
+/// reason"* — which `buzz-relay` uses for exactly one thing:
+/// `IngestError::Internal`, a fault of the relay's own. So the prefix is read
+/// here as that relay's word for "mine, not yours", which is what it means on
+/// the relay this clerk talks to and not something NIP-01 promises.
+const SERVER_FAULT_PREFIX: &str = "error:";
+
+/// What a relay's own outage looks like inside a reason it sent with a
+/// **client**-error status (#308).
+///
+/// Measured twice. The first: the test relay's Postgres was OOM-killed for a
+/// second and the next `POST /events` came back `400 invalid: database error …
+/// EOF`. Under the rule above that is a verdict on the request, so the post was
+/// acked and lost — the owner never saw the suggestion, and nothing retried.
+/// Two of these are the spellings a storage fault reaches the wire under:
+/// `buzz_db::DbError`'s own `Display` for a driver error and for a migration,
+/// which `buzz-search`, `buzz-audit` and `buzz-workflow` all inherit through
+/// `thiserror`.
+///
+/// The third was measured while writing this ticket's own test, and it is worse
+/// than the one the ticket describes: with Postgres stopped, a relay that is
+/// otherwise up answers a post **`404 relay: no community is configured for
+/// this host`**. Its tenant lookup fails closed and reports the *tenant* as
+/// missing rather than the lookup as broken — so the one refusal that reads
+/// most like "you are talking to the wrong relay" is what a relay says when its
+/// storage is gone. (That is a defect on the relay's side, where the lookup
+/// should fail `503`, and it is worth reporting there; this clerk has to
+/// survive the relay it is pointed at, not the one it wishes for.)
+///
+/// That reason is genuinely ambiguous — a clerk pointed at a host the relay
+/// does not serve gets the same words — and it is in the set anyway, because
+/// the two readings do not cost the same. Read as an outage, a real
+/// misconfiguration retries with the backoff and gives up after
+/// [`MAX_DELIVER`](crate::consumers::MAX_DELIVER) deliveries, saying so on
+/// every one: about an hour of loud, repeated `warn` lines naming the host,
+/// ending in an `error`. Read as a refusal, a real outage loses the post in
+/// silence. The first is how an operator finds a wrong URL; the second is the
+/// failure this whole project keeps shipping.
+///
+/// A named set and not a guess about prose in general, because that asymmetry
+/// does not license reading everything as transient. The set is deliberately
+/// short: `EOF` alone, say, would also match *"invalid: unexpected EOF while
+/// parsing the event"*, which is a client mistake and must stay one.
+const SERVER_FAULT_REASONS: [&str; 3] = [
+    "database error",
+    "migration error",
+    "no community is configured for this host",
+];
+
+/// Whether a refusal's reason is the relay describing **its own** failure
+/// rather than the request's.
+///
+/// Matched on a lowercased copy, and by containment rather than by prefix for
+/// the named reasons: the observed text carried the relay's client-error prefix
+/// in front of its own error (`invalid: database error …`), which is the whole
+/// case. A reason cut to [`REASON_CHARS`] can in principle lose the marker —
+/// 120 characters is far past where either of these appears in the texts that
+/// produced them, and a refusal read as a refusal is the behaviour that was
+/// already there.
+fn names_a_server_fault(reason: &str) -> bool {
+    let reason = reason.trim().to_ascii_lowercase();
+    if reason.starts_with(SERVER_FAULT_PREFIX) {
+        return true;
+    }
+    SERVER_FAULT_REASONS
+        .iter()
+        .any(|marker| reason.contains(marker))
+}
+
 impl RelayError {
     /// Whether the same request, made again later, could succeed: the relay
-    /// could not be reached, or it answered `429` or `5xx`. A `4xx` other than
-    /// `429` is the relay's verdict on the request itself — a bad signature, a
-    /// replayed nonce, a channel the clerk is not a member of — and asking
-    /// again would only be refused again.
+    /// could not be reached, it answered `429` or `5xx`, **or** it answered a
+    /// client error whose reason is about the relay and not about the request
+    /// ([`names_a_server_fault`], #308). A `4xx` is otherwise the relay's
+    /// verdict on the request itself — a bad signature, a replayed nonce, a
+    /// channel the clerk is not a member of — and asking again would only be
+    /// refused again.
     pub fn is_transient(&self) -> bool {
         match self {
             RelayError::Unreachable(_) => true,
-            RelayError::Refused { status, .. } => *status == 429 || *status >= 500,
+            RelayError::Refused { status, reason } => {
+                *status == 429 || *status >= 500 || names_a_server_fault(reason)
+            }
             RelayError::Malformed(_) => false,
         }
     }
@@ -1503,6 +1577,50 @@ mod tests {
         assert!(!refused(401).is_transient());
         assert!(!refused(403).is_transient());
         assert!(!RelayError::Malformed("not JSON".into()).is_transient());
+    }
+
+    #[test]
+    fn a_client_error_whose_reason_is_the_relays_own_outage_is_transient() {
+        let refused = |reason: &str| RelayError::Refused {
+            status: 400,
+            reason: reason.to_owned(),
+        };
+
+        // The measured one, verbatim in shape: the relay's client-error prefix
+        // in front of its own storage failure (#308). Acked as a refusal, this
+        // is a suggestion the owner never learns existed.
+        assert!(refused("invalid: database error: connection closed: EOF").is_transient());
+        // Each named reason on its own, so that removing one from the set is a
+        // test that fails rather than a behaviour that quietly changes.
+        assert!(refused("database error: pool timed out").is_transient());
+        assert!(refused("invalid: migration error: dirty").is_transient());
+        // Case and surrounding space are the relay's to choose, not ours.
+        assert!(refused("  INVALID: Database Error: EOF  ").is_transient());
+        // And the prefix NIP-01 reserves for the relay's own fault, whatever
+        // status it arrives with.
+        assert!(refused("error: internal error looking up reaction target").is_transient());
+        // The one measured while writing this ticket's own process-boundary
+        // test: a relay whose Postgres is stopped answers a post `404 relay: no
+        // community is configured for this host`. Ambiguous with a clerk
+        // pointed at the wrong host, and retried anyway — an hour of loud
+        // warnings ending in a named give-up is how an operator finds a wrong
+        // URL, where a silent ack is how an owner loses a suggestion.
+        let tenant_gone = RelayError::Refused {
+            status: 404,
+            reason: "relay: no community is configured for this host".to_owned(),
+        };
+        assert!(tenant_gone.is_transient());
+
+        // Everything the relay is actually refusing stays refused, acked once
+        // and counted as skipped: a key it was not told to accept, a channel
+        // the clerk is not in, a replayed nonce, a signature that does not
+        // check out. None of these would pass on a second attempt.
+        assert!(!refused("invalid: bad signature").is_transient());
+        assert!(!refused("restricted: not a member of this channel").is_transient());
+        assert!(!refused("invalid: unexpected EOF while parsing the event").is_transient());
+        assert!(!refused("invalid: kind 22242 is only accepted via WebSocket").is_transient());
+        assert!(!refused("duplicate: event already stored").is_transient());
+        assert!(!refused(String::new().as_str()).is_transient());
     }
 
     #[test]
