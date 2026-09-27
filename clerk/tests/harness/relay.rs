@@ -191,7 +191,8 @@ async fn do_ensure_relay() -> Result<()> {
     // container in a restart loop — would be inherited here and surface
     // as an assertion in whichever test happens to be seeding when the
     // backend goes into recovery (the relay answers that second with
-    // `400 invalid: database error`, which nothing rightly retries). So a
+    // `400 invalid: database error` — which the *clerk* now retries, since
+    // #308, but this harness's own seeding does not). So a
     // wounded container is recreated once, saying why, and if it is still
     // wounded afterwards this fails naming it — never a test.
     if let Some(wound) = wounded_container().await? {
@@ -240,8 +241,14 @@ async fn do_ensure_relay() -> Result<()> {
 /// One `docker compose` command on the relay stack, with its project,
 /// file and the variables the file reads.
 async fn compose(args: &[&str]) -> Result<()> {
-    let status = Command::new("docker")
-        .args(["compose", "-p", &stack_id(), "-f", &compose_file()])
+    let mut command = Command::new("docker");
+    for (name, value) in compose_invocation() {
+        command.arg(name);
+        if let Some(value) = value {
+            command.arg(value);
+        }
+    }
+    let status = command
         .args(args)
         .env("TWALK_CLERK_TEST_STACK", stack_id())
         .env("TWALK_CLERK_TEST_RELAY_PORT", relay_port().to_string())
@@ -253,6 +260,78 @@ async fn compose(args: &[&str]) -> Result<()> {
         bail!("docker compose {} failed with {status}", args.join(" "));
     }
     Ok(())
+}
+
+/// A stopped Postgres, and the promise that it comes back.
+///
+/// Restart it with [`start`](Self::start) to wait for it, which is what a test
+/// about the clerk's retry wants: the assertion that follows is then about the
+/// clerk and not about how long Postgres takes to accept connections.
+///
+/// Dropped without that — a test that failed, or panicked, between the stop and
+/// the start — it is started anyway, synchronously and **waiting**. A few
+/// seconds in a failing test's teardown is the cheap half of that trade: the
+/// expensive half is the next test in the binary failing for a reason that has
+/// nothing to do with it, and nothing else would wait for Postgres on its
+/// behalf — `ensure_relay` is a `OnceCell` and has already run.
+#[must_use = "a stopped database has to come back; hold this until it should"]
+pub struct DatabaseStopped {
+    restored: bool,
+}
+
+impl DatabaseStopped {
+    /// Brings Postgres back and waits for it to be healthy.
+    pub async fn start(mut self) -> Result<()> {
+        compose(&["up", "-d", "--wait", "postgres"]).await?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for DatabaseStopped {
+    fn drop(&mut self) {
+        if self.restored {
+            return;
+        }
+        // Synchronous on purpose: a `Drop` has no runtime to await on, and this
+        // is the path a panicking or short-circuiting test takes.
+        let mut command = std::process::Command::new("docker");
+        for (name, value) in compose_invocation() {
+            command.arg(name);
+            if let Some(value) = value {
+                command.arg(value);
+            }
+        }
+        let status = command
+            .args(["up", "-d", "--wait", "postgres"])
+            .env("TWALK_CLERK_TEST_STACK", stack_id())
+            .env("TWALK_CLERK_TEST_RELAY_PORT", relay_port().to_string())
+            .stdout(Stdio::null())
+            .status();
+        match status {
+            Ok(status) if status.success() => {}
+            other => eprintln!(
+                "the relay's database was left stopped ({other:?}); the tests after this one \
+                 will fail on a relay with no storage. `docker compose -p {} -f {} up -d \
+                 postgres` puts it back.",
+                stack_id(),
+                compose_file()
+            ),
+        }
+    }
+}
+
+/// The `docker` arguments that name this stack, and nothing about what is being
+/// asked of it. One place, because [`compose`] and [`DatabaseStopped`]'s `Drop`
+/// both invoke it — one through tokio's `Command` and one through the standard
+/// library's — and a project or a port that drifted between them would leave a
+/// stopped container behind under a name nobody looks at.
+fn compose_invocation() -> Vec<(String, Option<String>)> {
+    vec![
+        ("compose".to_owned(), None),
+        ("-p".to_owned(), Some(stack_id())),
+        ("-f".to_owned(), Some(compose_file())),
+    ]
 }
 
 /// The services whose health a run depends on and whose wounds persist:
@@ -396,6 +475,27 @@ impl RelayStack {
     /// name it in a failure.
     pub fn project(&self) -> &str {
         &self.project
+    }
+
+    /// Stops the relay's Postgres, leaving the relay itself up and answering
+    /// (#308): the shape of the outage this stack took in an earlier run and
+    /// the reason [`wounded_container`] exists — a relay whose storage is gone
+    /// answers a post with a failure of its own, and a clerk that read that as
+    /// a verdict on the request would ack the post and lose it.
+    ///
+    /// The database and not the relay, deliberately: a relay that is down is
+    /// unreachable, which was always retried. What had to be proven is the case
+    /// where something *answers*.
+    ///
+    /// The answer is a [`DatabaseStopped`], which puts it back when it is
+    /// dropped. This stack is shared by every test in the binary, and the first
+    /// version of this helper returned `()`: the test stopped Postgres, failed
+    /// an assertion two lines later, and every test after it failed too, on a
+    /// relay with no storage. A test may take the stack away from itself and
+    /// must not take it away from its neighbours.
+    pub async fn stop_database(&self) -> Result<DatabaseStopped> {
+        compose(&["stop", "postgres"]).await?;
+        Ok(DatabaseStopped { restored: false })
     }
 
     /// The relay's NIP-11 document.

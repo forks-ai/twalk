@@ -565,7 +565,12 @@ async fn settle(
             }
         }
         Err(error) => {
-            clerk.metrics.record_relay_failure();
+            // Counted as a **skip** and not as a relay failure (#308): since a
+            // relay's own outage is transient however it is dressed, the
+            // failures counter is now "attempts that are coming back" and this
+            // is "posts the clerk gave up on". One counter for both would say
+            // nothing about which happened.
+            let total = clerk.metrics.record_skipped(Skipped::Refused);
             // Logged once, with the relay's own reason (`RelayError`'s
             // Display carries it, cut short, and never a body's text), and
             // acked: the same request would be refused the same way, and a
@@ -574,7 +579,8 @@ async fn settle(
             warn!(
                 %error,
                 subject,
-                "the relay refused a {} post; it is not retried",
+                total,
+                "the relay refused a {} post; it is not retried and the owner will not see it",
                 which.name()
             );
             if let Err(error) = message.ack().await {
@@ -1084,6 +1090,11 @@ fn skip(clerk: &Clerk, why: Skipped, what: &str, detail: &str) {
             "skipped a {what} that was {}",
             why.as_str()
         ),
+        // Not reached: the one place that records a refusal (`settle`) logs it
+        // itself, with the relay's own reason, which no caller of this function
+        // has (#308). An arm of its own rather than a catch-all, so that a
+        // reason added later cannot silently inherit this one's silence.
+        Skipped::Refused => {}
     }
 }
 

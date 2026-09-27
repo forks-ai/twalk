@@ -83,6 +83,18 @@ pub enum Skipped {
     /// `pubkey` field is the relay's word and only the signature is the
     /// key holder's. A number here that is not zero is a relay to look at.
     Unverified,
+    /// The relay refused a **post off the bus** and the refusal is its verdict
+    /// on the request — a signature it would refuse again, a channel the clerk
+    /// is not in, a host it does not serve. Acked once and counted here (#308).
+    ///
+    /// Here rather than under `twalk_clerk_relay_failures_total` because that
+    /// counter is every failed write and read, retried or not — the sweep's
+    /// reads and deletes are in it too — and since #308 a relay's own outage is
+    /// retried however it is dressed. So on the post path the two now separate
+    /// cleanly: the failures counter climbs while a post is coming back, and
+    /// this climbs once for a post that is not. A number here that is not zero
+    /// is a suggestion the owner never saw.
+    Refused,
     /// The Companion Gateway already records the suggestion as approved
     /// (`standing: approved` on `GET /api/suggestions/{id}`, #300): it was
     /// decided from the approval screen before the clerk read it, so there
@@ -91,11 +103,12 @@ pub enum Skipped {
 }
 
 impl Skipped {
-    pub const ALL: [Skipped; 5] = [
+    pub const ALL: [Skipped; 6] = [
         Skipped::Expired,
         Skipped::Unreadable,
         Skipped::Duplicate,
         Skipped::Unverified,
+        Skipped::Refused,
         Skipped::AlreadyApproved,
     ];
 
@@ -105,6 +118,7 @@ impl Skipped {
             Self::Unreadable => "unreadable",
             Self::Duplicate => "duplicate",
             Self::Unverified => "unverified",
+            Self::Refused => "refused",
             Self::AlreadyApproved => "already_approved",
         }
     }
@@ -233,6 +247,7 @@ pub struct Metrics {
     skipped_unreadable: AtomicU64,
     skipped_duplicate: AtomicU64,
     skipped_unverified: AtomicU64,
+    skipped_refused: AtomicU64,
     skipped_already_approved: AtomicU64,
     delivery_reads_found: AtomicU64,
     delivery_reads_already_approved: AtomicU64,
@@ -275,6 +290,7 @@ impl Metrics {
             skipped_unreadable: AtomicU64::new(0),
             skipped_duplicate: AtomicU64::new(0),
             skipped_unverified: AtomicU64::new(0),
+            skipped_refused: AtomicU64::new(0),
             skipped_already_approved: AtomicU64::new(0),
             delivery_reads_found: AtomicU64::new(0),
             delivery_reads_already_approved: AtomicU64::new(0),
@@ -308,6 +324,7 @@ impl Metrics {
             Skipped::Unreadable => &self.skipped_unreadable,
             Skipped::Duplicate => &self.skipped_duplicate,
             Skipped::Unverified => &self.skipped_unverified,
+            Skipped::Refused => &self.skipped_refused,
             Skipped::AlreadyApproved => &self.skipped_already_approved,
         }
     }
@@ -508,6 +525,7 @@ mod tests {
             "unreadable",
             "duplicate",
             "unverified",
+            "refused",
             "already_approved",
         ] {
             assert!(
@@ -654,6 +672,7 @@ mod tests {
         assert_eq!(metrics.record_deleted(Deleted::Undatable), 1);
         assert_eq!(metrics.record_deleted(Deleted::Undatable), 2);
         assert_eq!(metrics.record_skipped(Skipped::Unreadable), 1);
+        assert_eq!(metrics.record_skipped(Skipped::Refused), 1);
         assert_eq!(metrics.record_relay_failure(), 1);
         metrics.record_sweep();
         metrics.record_sweep();
@@ -679,6 +698,10 @@ mod tests {
         assert!(
             body.contains("twalk_clerk_deleted_total{why=\"undatable\"} 2\n"),
             "{body}"
+        );
+        assert!(
+            body.contains("twalk_clerk_skipped_total{why=\"refused\"} 1\n"),
+            "a post the relay refused is counted under its own reason (#308): {body}"
         );
         assert!(
             body.contains("twalk_clerk_skipped_total{why=\"unreadable\"} 1\n"),
