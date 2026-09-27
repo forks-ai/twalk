@@ -39,12 +39,19 @@
 	} from '$lib/onboarding/account';
 	import { createAccount, RegistrationError } from '$lib/onboarding/register';
 	import type { BootstrapStep } from '$lib/crypto/bootstrap';
+	// The value, not just the type: the name in the sentence the user reads must be
+	// the name the login writes, and two copies of a string is how those drift. The
+	// module it comes from imports no SDK — the heavy dynamic imports below are the
+	// crypto stack, not this.
+	import { ACTING_DEVICE_NAME, type CredentialOutcome } from '$lib/matrix/credential';
 	import type { HandoverOutcome } from '$lib/matrix/handover';
 
 	type Stage = 'account' | 'working' | 'key' | 'done';
 
 	let stage = $state<Stage>('account');
-	let step = $state<BootstrapStep | 'creating' | 'signing-in' | 'handover'>('creating');
+	let step = $state<BootstrapStep | 'creating' | 'signing-in' | 'handover' | 'credential'>(
+		'creating'
+	);
 
 	/**
 	 * How the handover room ended (#226): the one encrypted room this account
@@ -57,6 +64,22 @@
 	 * defect this step exists to close.
 	 */
 	let handover = $state<HandoverOutcome | null>(null);
+	/**
+	 * What became of the device Twalk acts through (#228, ADR 0034): created in
+	 * this browser, handed to the Sensor Olm-encrypted, and **held** only when the
+	 * Sensor said so. `null` until the handover room is ready, because there is
+	 * nothing to hand a credential over in before that.
+	 *
+	 * Kept beside `handover` rather than folded into it: the room existing and the
+	 * credential arriving are two facts with two remedies, and a screen that
+	 * merged them would tell a user whose Sensor never joined the same thing as
+	 * one whose Sensor joined and never acknowledged.
+	 */
+	let credential = $state<CredentialOutcome | null>(null);
+	/** The device the handover minted, when there is one to name. */
+	const actingDevice = $derived(
+		credential !== null && 'deviceId' in credential ? (credential.deviceId ?? '') : ''
+	);
 
 	let username = $state('');
 	let password = $state('');
@@ -156,6 +179,27 @@
 							roomName: $t('handover.roomName'),
 							crypto
 						});
+
+			// The device Twalk acts through, and the credential that makes it usable
+			// (#228). Only when the room is `ready`: that outcome is precisely the
+			// one that says this browser's crypto machine can enumerate the Sensor's
+			// devices, which is what stops the send below from going out empty.
+			// `signedIn.sensor` is read again rather than asserted: a `ready` room
+			// implies the deployment named a Sensor — that is the outcome
+			// `no-sensor` exists for — and narrowing says so without a cast.
+			if (handover.kind === 'ready' && crypto !== null && signedIn.sensor !== null) {
+				step = 'credential';
+				const { handOverTheDevice } = await import('$lib/matrix/credential');
+				credential = await handOverTheDevice({
+					baseUrl,
+					userId: session.userId,
+					password,
+					accessToken: session.accessToken,
+					sensorUserId: signedIn.sensor,
+					roomId: handover.roomId,
+					crypto
+				});
+			}
 
 			stage = 'key';
 		} catch (cause) {
@@ -268,6 +312,43 @@
 						{/if}
 					</p>
 					<p class="small muted">{$t('handover.problem.after')}</p>
+				</div>
+			{/if}
+		{/if}
+		<!--
+			And what became of the credential (#228, ADR 0034). `held` is the Sensor's
+			own word for it; everything else is said as a failure, because a device
+			this deployment cannot act through is one the user has in their device
+			list for nothing — and the name is what they revoke.
+		-->
+		{#if credential !== null}
+			<p
+				class="small muted"
+				data-testid="credential"
+				data-kind={credential.kind}
+				data-device={actingDevice}
+				hidden={credential.kind !== 'held'}
+			>
+				{$t('handover.credential.held', { name: ACTING_DEVICE_NAME })}
+			</p>
+			{#if credential.kind !== 'held'}
+				<div class="card card--warning" role="status" data-testid="credential-problem">
+					<p class="card__title">
+						<Icon name="error" size="dense" />
+						{$t('handover.credential.problem.title')}
+					</p>
+					<p>
+						{#if credential.kind === 'not-acknowledged'}
+							{$t('handover.credential.problem.notAcknowledged', { name: ACTING_DEVICE_NAME })}
+						{:else if credential.kind === 'sensor-untracked'}
+							{$t('handover.credential.problem.untracked')}
+						{:else if credential.kind === 'not-encrypted-to'}
+							{$t('handover.credential.problem.notEncrypted', { name: ACTING_DEVICE_NAME })}
+						{:else}
+							{$t('handover.credential.problem.failed', { detail: credential.detail })}
+						{/if}
+					</p>
+					<p class="small muted">{$t('handover.credential.problem.after')}</p>
 				</div>
 			{/if}
 		{/if}
@@ -413,6 +494,22 @@
 					{$t('screen2.recoveryCard.title')}
 				</p>
 				<p>{$t('screen2.recoveryCard.body')}</p>
+			</div>
+
+			<!--
+				What creating this account also creates, said before it is created
+				(#228's fifth criterion). A device on their own account, in their own
+				device list, revocable from any Matrix client without Twalk: that is
+				ADR 0025's whole mitigation for a long-lived credential at rest, and a
+				mitigation the user learns about afterwards is not one.
+			-->
+			<div class="card card--info" data-testid="acting-device">
+				<p class="card__title">
+					<Icon name="info" size="dense" />
+					{$t('handover.device.title')}
+				</p>
+				<p>{$t('handover.device.body', { name: ACTING_DEVICE_NAME })}</p>
+				<p class="small muted">{$t('handover.device.revoke')}</p>
 			</div>
 
 			{#if genericError !== null}

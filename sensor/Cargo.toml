@@ -33,6 +33,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 anyhow = "1"
+# The handover's acceptance test plays the browser: it Olm-encrypts a custom
+# to-device event to the Sensor's device (ADR 0034, #228), which is
+# `Encryption::encrypt_and_send_raw_to_device` and lives behind this feature.
+# In `[dev-dependencies]` on purpose — a release build of the binary compiles no
+# dev target, so the feature is not enabled for what ships, and the Sensor calls
+# nothing it adds.
+matrix-sdk = { version = "0.19", features = [
+    "e2e-encryption",
+    "experimental-send-custom-to-device",
+] }
 # matrix-sdk's `Room::send_attachment` takes the media type as a `Mime`:
 # the encryption tests send a real encrypted attachment through it.
 mime = "0.3"

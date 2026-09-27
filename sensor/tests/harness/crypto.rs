@@ -141,6 +141,105 @@ impl CryptoBot {
         Ok(room.room_id().to_string())
     }
 
+    /// This login's own device id: what the handover's offer names (#228).
+    pub fn device_id(&self) -> String {
+        self.client
+            .device_id()
+            .map(|device| device.to_string())
+            .unwrap_or_default()
+    }
+
+    /// Creates the **handover room** the way the Companion creates it (#226,
+    /// #228): encrypted, typed as something other than a conversation, nobody
+    /// able to post a message in it, and the Sensor granted the one state event
+    /// it may write — the acknowledgement of a handover.
+    ///
+    /// Created by this bot rather than by the HTTP one because the point of the
+    /// room is cryptographic: sharing an encrypted room is what makes the crypto
+    /// machine track the Sensor, and only a client with a crypto stack and a sync
+    /// loop learns that (`companion/src/lib/matrix/handover.ts` says so at
+    /// length, and it is the reason #226 exists at all).
+    pub async fn create_handover_room(&self, name: &str, sensor_user_id: &str) -> Result<String> {
+        let mut request = create_room::v3::Request::new();
+        request.name = Some(name.to_owned());
+        request.is_direct = false;
+        request.invite = vec![UserId::parse(sensor_user_id)?.to_owned()];
+        request.initial_state = vec![initial_state_event(
+            "m.room.encryption",
+            serde_json::json!({ "algorithm": "m.megolm.v1.aes-sha2" }),
+        )?];
+        request.creation_content = Some(Raw::from_json(serde_json::value::to_raw_value(
+            &serde_json::json!({ "type": "fr.linagora.twalk.handover" }),
+        )?));
+        request.power_level_content_override = Some(Raw::from_json(
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "events_default": 101,
+                "invite": 100,
+                "kick": 100,
+                "redact": 100,
+                "events": { "fr.linagora.twalk.owner_device.handover.held": 0 },
+            }))?,
+        ));
+        let room = self
+            .client
+            .create_room(request)
+            .await
+            .context("createRoom failed for the handover room")?;
+        self.wait_until_encrypted(room.room_id()).await?;
+        Ok(room.room_id().to_string())
+    }
+
+    /// Olm-encrypts `content` to every device of `user_id` and sends it, the way
+    /// the Companion's crypto machine does (ADR 0034).
+    ///
+    /// Answers how many devices it went to, because that is the number the
+    /// Companion compares with the devices it knows: a device the machine does
+    /// not know is skipped, the batch goes out short, and the send resolves
+    /// successfully all the same.
+    pub async fn hand_over_encrypted(
+        &self,
+        user_id: &str,
+        event_type: &str,
+        content: Value,
+    ) -> Result<usize> {
+        let user_id = UserId::parse(user_id)?.to_owned();
+        let devices: Vec<_> = self
+            .client
+            .encryption()
+            .get_user_devices(&user_id)
+            .await?
+            .devices()
+            .collect();
+        anyhow::ensure!(
+            !devices.is_empty(),
+            "this bot's crypto machine knows no device of {user_id}: a send would go out empty"
+        );
+        let raw = Raw::from_json(serde_json::value::to_raw_value(&content)?);
+        let failures = self
+            .client
+            .encryption()
+            .encrypt_and_send_raw_to_device(
+                devices.iter().collect(),
+                event_type,
+                raw,
+                // `CollectStrategy::AllDevices`, which is that type's own
+                // default and is named here as one because matrix-sdk 0.19 does
+                // not re-export it. It is what the Companion's machine does with
+                // its default trust requirement: the Sensor's device is
+                // unverified, and this channel is why ADR 0034 records that
+                // hardening that requirement would turn these into undecryptable
+                // events rather than into an error.
+                Default::default(),
+            )
+            .await?;
+        anyhow::ensure!(
+            failures.is_empty(),
+            "the credential could not be encrypted to {} device(s)",
+            failures.len()
+        );
+        Ok(devices.len())
+    }
+
     /// Sends a state event (e.g. the `m.bridge` portal marker). State events
     /// are never Megolm-encrypted, matching real bridge behaviour.
     pub async fn send_state_event(

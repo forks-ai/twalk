@@ -20,6 +20,7 @@ import {
 	handoverRoomCreation,
 	handoverAliasLocalpart,
 	localpartOf,
+	HANDOVER_HELD_TYPE,
 	HANDOVER_ROOM_TYPE,
 	SEND_LEVEL_NOBODY_HAS,
 	serverNameOf,
@@ -43,12 +44,34 @@ interface Made {
  * `invite` until it joins, and a second `createRoom` with a taken alias is
  * `M_ROOM_IN_USE`.
  */
-function homeserver(options: { sensorJoins?: boolean; existingRoom?: string } = {}) {
+function homeserver(
+	options: {
+		sensorJoins?: boolean;
+		existingRoom?: string;
+		/**
+		 * The power levels an existing room already has. A room created by #226
+		 * grants the Sensor nothing, which is the upgrade case; a room this module
+		 * created carries the exception from its own creation body.
+		 */
+		powerLevels?: Record<string, unknown>;
+	} = {}
+) {
 	const sensorJoins = options.sensorJoins ?? true;
 	const made: Made[] = [];
 	let roomId: string | null = options.existingRoom ?? null;
 	let sensorMembership: string | null = options.existingRoom === undefined ? null : 'join';
 	let membershipReads = 0;
+	// What the room's power levels are, as Synapse would answer them: the
+	// creation override for a room this module made, or whatever an existing room
+	// was given.
+	let powerLevels: Record<string, unknown> = options.powerLevels ?? {
+		events_default: SEND_LEVEL_NOBODY_HAS,
+		state_default: 50,
+		invite: 100,
+		kick: 100,
+		redact: 100,
+		users: { [OWNER]: 100 }
+	};
 
 	const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
 		const path = String(url).replace('https://home.example.com', '');
@@ -71,7 +94,18 @@ function homeserver(options: { sensorJoins?: boolean; existingRoom?: string } = 
 			}
 			roomId = ROOM;
 			sensorMembership = 'invite';
+			// Synapse merges the override into the preset's defaults, so a room
+			// created here answers with the exception already in place.
+			const override = (body?.['power_level_content_override'] ?? {}) as Record<string, unknown>;
+			powerLevels = { ...powerLevels, ...override };
 			return answer(200, { room_id: roomId });
+		}
+		if (path.includes('/state/m.room.power_levels/')) {
+			if (method === 'PUT') {
+				powerLevels = (body ?? {}) as Record<string, unknown>;
+				return answer(200, { event_id: '$levels' });
+			}
+			return answer(200, powerLevels);
 		}
 		if (path.includes('/state/m.room.member/')) {
 			membershipReads += 1;
@@ -166,6 +200,20 @@ describe('the room Twalk creates', () => {
 		// And the Sensor, at power level 0, cannot bring a third account in.
 		expect(levels['invite']).toBe(100);
 		expect(levels['kick']).toBe(100);
+	});
+
+	it('grants the Sensor exactly one state event, and nothing else', () => {
+		const levels = handoverRoomCreation({
+			sensorUserId: SENSOR,
+			ownerLocalpart: 'you',
+			name: 'Twalk'
+		})['power_level_content_override'] as Record<string, unknown>;
+		// The room's one exception (#228): the Sensor sits at power level 0 and may
+		// write the acknowledgement of a handover — the only thing ADR 0034 lets the
+		// Companion read as success — and no other event, because `events_default`
+		// is above everybody and `state_default` stays where the preset put it.
+		expect(levels['events']).toEqual({ [HANDOVER_HELD_TYPE]: 0 });
+		expect(levels['state_default']).toBeUndefined();
 	});
 
 	it('is not a direct message, so no client files it beside the user’s people', () => {
@@ -270,7 +318,8 @@ describe('ensureHandoverRoom', () => {
 		// The claim is about the whole run, so it is asserted over every request
 		// the module made rather than at one call site. Nothing may create an
 		// event in this room: no `/send/`, and no state event of ours beyond
-		// what `createRoom` itself writes.
+		// what `createRoom` itself writes — the power-level amendment below
+		// included, which a room created here never needs.
 		const { fetchImpl, made } = homeserver();
 		await run({ fetchImpl, crypto: tracking(1) });
 		expect(made.length).toBeGreaterThan(2);
@@ -283,6 +332,65 @@ describe('ensureHandoverRoom', () => {
 				).toBe(true);
 			}
 		}
+	});
+
+	it('grants a room created before the exception existed the one state event, once', async () => {
+		// A deployment onboarded under #226 has a handover room in which the Sensor
+		// can say nothing at all, so the acknowledgement #228 waits for would be
+		// refused by the homeserver — and a handover that works and cannot be
+		// confirmed reads exactly like one that never arrived.
+		const asItWasUnder226 = {
+			events_default: SEND_LEVEL_NOBODY_HAS,
+			state_default: 50,
+			invite: 100,
+			kick: 100,
+			redact: 100,
+			users: { [OWNER]: 100 }
+		};
+		const { fetchImpl, made } = homeserver({
+			existingRoom: ROOM,
+			powerLevels: asItWasUnder226
+		});
+
+		expect(await run({ fetchImpl, crypto: tracking(1) })).toEqual({
+			kind: 'ready',
+			roomId: ROOM,
+			sensorDevices: 1,
+			created: false
+		});
+
+		// One write, and it adds one entry: everything the user's own room already
+		// said stays said.
+		const written = made.filter(
+			(request) =>
+				request.method === 'PUT' && request.path.includes('/state/m.room.power_levels/')
+		);
+		expect(written).toHaveLength(1);
+		expect(written[0].body).toEqual({
+			...asItWasUnder226,
+			events: { [HANDOVER_HELD_TYPE]: 0 }
+		});
+	});
+
+	it('writes no power levels when the room already grants it', async () => {
+		// The upgrade is idempotent, which matters because onboarding can be
+		// re-run: a room that already grants the exception is read and left alone.
+		const { fetchImpl, made } = homeserver({
+			existingRoom: ROOM,
+			powerLevels: {
+				events_default: SEND_LEVEL_NOBODY_HAS,
+				users: { [OWNER]: 100 },
+				events: { [HANDOVER_HELD_TYPE]: 0 }
+			}
+		});
+
+		expect((await run({ fetchImpl, crypto: tracking(1) })).kind).toBe('ready');
+		expect(
+			made.filter(
+				(request) =>
+					request.method === 'PUT' && request.path.includes('/state/m.room.power_levels/')
+			)
+		).toEqual([]);
 	});
 
 	it('says so when the deployment names no Sensor, and asks the homeserver nothing', async () => {

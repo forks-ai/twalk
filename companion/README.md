@@ -312,6 +312,55 @@ access token that invited the Sensor as soon as the call returns (ADR 0011), and
 there is no `GET /api/bootstrap/rooms` — so its row is offered unticked with the
 reason on the screen rather than guessed at.
 
+### Onboarding creates the device Twalk acts through, and hands it over encrypted
+
+A mautrix bridge relays to its network only what the logged-in user's own Matrix
+account sends, so a reply posted by `@sensor:` reaches a contact on WhatsApp not
+at all ([ADR 0025](../docs/architecture/adr/0025-twalk-acts-as-the-user-through-a-device-of-their-account.md),
+[#123](https://github.com/linagora/twalk/issues/123)). The device that fixes that
+is created **here**, in the browser, as an ordinary password login on the user's
+own account named `twalk` — which is why onboarding is where this happens: the
+password is in memory at that moment and nowhere else — and its access token
+reaches the Sensor as an **Olm-encrypted to-device message**
+([ADR 0034](../docs/architecture/adr/0034-the-users-device-credential-goes-from-browser-to-sensor-and-is-never-relayed.md),
+[#228](https://github.com/linagora/twalk/issues/228)). The Gateway is not in that
+path, so ADR 0011's sentence about it storing no Matrix access token stays
+literally true rather than being amended, and `credential.test.ts` asserts the
+token appears in no request body and no authorization header over the whole run.
+
+Three things `$lib/matrix/credential.ts` refuses to assume, because each of them
+would otherwise be a deployment reporting a device it does not have.
+
+**That a send means an arrival.** `encryptToDeviceMessages` skips a device the Olm
+machine does not know with a `logger.warn`, and matrix-js-sdk's own comment
+concedes its batch mechanism "removes all possibility to get error feedbacks", so
+the batch's own length is compared with the devices asked for — and success is
+**only** the Sensor's acknowledgement: a state event it writes in the handover
+room naming the device it holds. An acknowledgement naming an earlier
+onboarding's device is not an answer about this one. The send goes through
+`sendToDevice` rather than `queueToDevice`, which is the higher-level API and the
+wrong one here: the queue only drains while a sync loop runs, and this app runs
+none, so a queued batch would sit in the store and never leave.
+
+**That the Sensor knows which device to trust.** It refuses a credential from a
+device the deployment does not expect, and nothing could have configured that
+beforehand. So the **offer** goes up first — a state event in the handover room,
+which `state_default` there lets only the owner's account write — naming this
+browser's own device.
+
+**That the room can carry the answer.** The room #226 built grants the Sensor
+nothing at all, so the acknowledgement would be refused by the homeserver and a
+handover that worked would read exactly like one that never arrived. Creation now
+grants the Sensor level 0 for that one state type and nothing else, and a room
+created before that exception existed is amended in one request that adds one
+entry and leaves every other level as the user's own room had it.
+
+The screen says what is created **before** it is created — a device on their
+account, in their device list, revocable from any Matrix client without Twalk,
+which is ADR 0025's whole mitigation and not one if they learn about it
+afterwards — and states every outcome, because a device that exists and cannot be
+used is something they can revoke, and its name is what they need to do it.
+
 ### The dashboard's feed is operational only, and that is enforced in the model
 
 The wireframe's screen 5 fed "the last 10 events on the bus (received

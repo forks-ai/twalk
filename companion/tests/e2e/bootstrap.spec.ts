@@ -28,6 +28,7 @@ import { expect, test, type BrowserContext, type Page, type Request } from '@pla
 
 import { decodeRecoveryKey } from '../../src/lib/recovery/key';
 import { CRYPTO_STORE_NAME } from '../../src/lib/crypto/store';
+import { ACTING_DEVICE_NAME } from '../../src/lib/matrix/credential';
 import {
 	handoverAlias,
 	HANDOVER_ROOM_TYPE,
@@ -132,6 +133,17 @@ test.describe.serial('the bootstrap journey', () => {
 		await page.getByLabel('Username', { exact: true }).fill(stack.owner);
 		await page.getByLabel('Password', { exact: true }).fill(password);
 		await page.getByLabel('Confirm password').fill(password);
+
+		// Before anything is created: the screen says that creating this account
+		// also creates a device on it, and how to revoke it (#228's fifth
+		// criterion). ADR 0025's mitigation for a long-lived credential at rest is
+		// that the user can revoke the device from any client — and a mitigation
+		// they learn about afterwards is not one.
+		const said = page.getByTestId('acting-device');
+		await expect(said).toBeVisible();
+		await expect(said).toContainText(ACTING_DEVICE_NAME);
+		await expect(said).toContainText(/revoke/i);
+
 		await page.getByTestId('create-account').click();
 
 		await expect(page.getByTestId('screen-recovery-key')).toBeVisible({ timeout: 180_000 });
@@ -299,6 +311,21 @@ test.describe.serial('the bootstrap journey', () => {
 		const reported = page.getByTestId('handover');
 		await expect(reported).toHaveAttribute('data-kind', 'sensor-did-not-join');
 		await expect(page.getByTestId('handover-problem')).toBeVisible();
+
+		// And **no device was created for nothing** (#228). The credential step
+		// runs only on `ready`, because that outcome is the one that says this
+		// browser's machine can enumerate the Sensor's devices — without it the
+		// encrypted send goes out empty and resolves successfully, and the cost of
+		// finding that out later is a `twalk` device in the user's own device list
+		// that never worked and that only they can remove.
+		await expect(page.getByTestId('credential')).toHaveCount(0);
+		const devices = await fetch(`${stack.synapseUrl}/_matrix/client/v3/devices`, {
+			headers: { authorization: `Bearer ${await ownerToken()}` }
+		});
+		const named = ((await devices.json()) as {
+			devices: { display_name?: string }[];
+		}).devices.filter((device) => device.display_name === ACTING_DEVICE_NAME);
+		expect(named, 'no acting device exists on an account whose Sensor never joined').toEqual([]);
 	});
 
 	/**

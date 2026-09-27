@@ -12,12 +12,12 @@ use async_nats::jetstream::AckKind;
 use futures::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
-use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+use matrix_sdk::deserialized_responses::{ProcessedToDeviceEvent, RawAnySyncOrStrippedState};
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::ruma::api::client::filter::{
     Filter as EventTypeFilter, FilterDefinition, RoomEventFilter, RoomFilter,
 };
-use matrix_sdk::ruma::api::client::state::get_state_events;
+use matrix_sdk::ruma::api::client::state::{get_state_event_for_key, get_state_events};
 use matrix_sdk::ruma::api::client::sync::sync_events;
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::presence::PresenceEvent;
@@ -31,7 +31,7 @@ use matrix_sdk::ruma::events::room::message::{
 };
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::{
-    AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+    AnySyncMessageLikeEvent, AnySyncTimelineEvent, AnyToDeviceEvent, SyncMessageLikeEvent,
 };
 use matrix_sdk::ruma::presence::PresenceState;
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, UInt};
@@ -333,11 +333,17 @@ async fn main() -> Result<()> {
     // account writes into other people's conversations under a Matrix ID that
     // is not the one it was told to act as, and nothing downstream can undo
     // that.
-    let owner_device = bring_up_owner_device(&config, owner.as_ref(), &metrics).await?;
-    if let Some(device) = owner_device.clone() {
-        let bridge_bots = bridge_bots.clone();
-        let metrics = metrics.clone();
-        tokio::spawn(async move { run_owner_device(device, bridge_bots, metrics).await });
+    //
+    // Held in a cell rather than a variable because since #228 it is not the
+    // same device for the life of the process: the owner's browser hands one
+    // over while the Sensor runs, and the send path asks the cell per approval
+    // for the same reason it already asks the metrics whether the credential is
+    // still good (#229).
+    let owner_device = Arc::new(OwnerDevice::new());
+    if let Some(device) = bring_up_owner_device(&config, owner.as_ref(), &metrics).await? {
+        owner_device
+            .hold(device, bridge_bots.clone(), metrics.clone())
+            .await;
     }
 
     // Consent labelling (ticket 05): every published event carries the
@@ -1156,9 +1162,23 @@ async fn main() -> Result<()> {
     // One sweep for predecessors still held across a restart (issue #254),
     // after the first sync has told the store what is joined.
     let swept_predecessors = Arc::new(AtomicBool::new(false));
+    // The credential the owner's browser hands over arrives on this loop's
+    // to-device channel (ADR 0034, #228), and only where there is an owner for it
+    // to belong to: a deployment that names none has nothing to act as, so there
+    // is nothing a handover could mean.
+    let handovers = owner.as_ref().map(|owner| {
+        Arc::new(Handovers {
+            owner: owner.matrix_id().to_owned(),
+            homeserver_url: config.homeserver_url.clone(),
+            state_dir: config.state_dir.clone(),
+            bridge_bots: bridge_bots.clone(),
+            held: owner_device.clone(),
+            metrics: metrics.clone(),
+        })
+    });
     let mut sync = Box::pin(client.sync_with_callback(SyncSettings::default(), {
         let client = client.clone();
-        move |_response| {
+        move |response: matrix_sdk::sync::SyncResponse| {
             sync_metrics.record_sync(now_unix_seconds());
             // Observation scope is invitation-driven and starts empty,
             // so how many rooms the Sensor is actually in is a fact
@@ -1172,9 +1192,13 @@ async fn main() -> Result<()> {
             };
             let sync_metrics = sync_metrics.clone();
             let client = client.clone();
+            let handovers = handovers.clone();
             async move {
                 if let Some(client) = sweep {
                     leave_replaced_predecessors(&client).await;
+                }
+                if let Some(handovers) = &handovers {
+                    receive_handovers(&client, &response.to_device, handovers).await;
                 }
                 sync_metrics.record_observed_rooms(client.joined_rooms().len() as u64);
                 LoopCtrl::Continue
@@ -1407,12 +1431,150 @@ async fn whoami(homeserver_url: &str, access_token: &str) -> Result<WhoAmI> {
     })
 }
 
+/// The **owner device** (`CONTEXT.md`) — the device of the owner's own account
+/// that Twalk acts through — which is not the same device for the life of the
+/// process (#228, ADR 0034).
+///
+/// Before this it was an `Option<Client>` built at startup and captured by the
+/// send path, which was true while the only way to get one was configuration.
+/// A credential now arrives from the owner's browser **while the Sensor runs**,
+/// and a deployment that had to be restarted to use it would be one whose
+/// onboarding reported success and changed nothing — so the send path reads this
+/// cell per approval, exactly as it already asks the metrics per approval whether
+/// the credential it holds is still good (#229).
+///
+/// It also owns the device's own sync loop, because the two cannot be separated:
+/// that loop is what joins portal rooms as the owner and what discovers a revoked
+/// token, and a replaced device must not leave the previous one's loop running —
+/// it would go on syncing a credential nothing acts through, and go on reporting
+/// its room counts over the new device's.
+struct OwnerDevice {
+    held: tokio::sync::RwLock<Held>,
+}
+
+/// The client and the task that syncs it; neither outlives the other.
+#[derive(Default)]
+struct Held {
+    client: Option<Client>,
+    syncing: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl OwnerDevice {
+    fn new() -> Self {
+        Self {
+            held: tokio::sync::RwLock::new(Held::default()),
+        }
+    }
+
+    /// The device to act through now, or `None` — which is a deployment that was
+    /// given none and is a supported state, not a fault.
+    async fn current(&self) -> Option<Client> {
+        self.held.read().await.client.clone()
+    }
+
+    /// The device this cell is holding, for the one decision that needs to know
+    /// whether a handover is a *different* device: its crypto store.
+    async fn device_id(&self) -> Option<String> {
+        self.held
+            .read()
+            .await
+            .client
+            .as_ref()
+            .and_then(|client| client.device_id().map(|device| device.to_string()))
+    }
+
+    /// Takes `client` as the device to act through, and starts its sync loop.
+    ///
+    /// A device already held is dropped and its loop aborted first. Aborting is
+    /// what a replacement needs and what a graceful stop cannot give: the loop
+    /// never returns by design (it retries for as long as the Sensor runs), so
+    /// there is nothing to await.
+    async fn hold(&self, client: Client, bridge_bots: BridgeBots, metrics: Arc<Metrics>) {
+        let mut held = self.held.write().await;
+        if let Some(previous) = held.syncing.take() {
+            previous.abort();
+        }
+        let syncing = {
+            let client = client.clone();
+            tokio::spawn(async move { run_owner_device(client, bridge_bots, metrics).await })
+        };
+        *held = Held {
+            client: Some(client),
+            syncing: Some(syncing),
+        };
+    }
+}
+
+/// Where the credential the owner device runs on came from, which is the only
+/// thing two of its refusals need to name: the variable an operator would edit,
+/// or the act a user would repeat. A refusal that named neither would be one
+/// nobody can do anything about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialFrom {
+    /// `SENSOR_OWNER_DEVICE_ACCESS_TOKEN`: provisioned by script, and an
+    /// operator's to fix.
+    Configuration,
+    /// The owner's browser, over the handover room (ADR 0034). Theirs to repeat,
+    /// and arriving while this process runs.
+    AHandover,
+}
+
+impl CredentialFrom {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Configuration => "SENSOR_OWNER_DEVICE_ACCESS_TOKEN",
+            Self::AHandover => "the credential the owner's browser handed over",
+        }
+    }
+}
+
+/// The credential a previous run was handed, as [`owner_device::CREDENTIAL_FILE`]
+/// holds it.
+///
+/// A file that is not there is the ordinary case and says nothing; a file that is
+/// there and unreadable is a `warn` and nothing more, because the deployment can
+/// still run as `@sensor:` and the remedy is to onboard again — refusing to start
+/// over it would take a working Sensor down for a credential it never had.
+fn load_held_credential(path: &Path) -> Option<owner_device::Handover> {
+    if !path.is_file() {
+        return None;
+    }
+    let read = std::fs::read_to_string(path)
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text).map_err(|error| error.to_string())
+        });
+    match read {
+        Ok(document) => match owner_device::credential_in(&document) {
+            Ok(handover) => Some(handover),
+            Err(why) => {
+                warn!(
+                    file = %path.display(),
+                    why = why.as_str(),
+                    "the handed-over credential on the volume is not a credential: ignoring it and \
+                     acting as the Sensor's own account until onboarding hands over another"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            warn!(
+                file = %path.display(),
+                %error,
+                "the handed-over credential on the volume could not be read: ignoring it"
+            );
+            None
+        }
+    }
+}
+
 /// Builds the **second** Matrix client: a device of the owner's own account,
 /// which is what a bridge relays to its network (ADR 0025, ADR 0034, #123).
 ///
-/// `None` — no credential configured — is the behaviour every deployment has
-/// today: approved replies are posted by `@sensor:`, and on a bridged
-/// conversation the contact receives nothing. That is said once, here, at
+/// `None` — no credential configured and none handed over — is the behaviour
+/// every deployment had before ADR 0034: approved replies are posted by
+/// `@sensor:`, and on a bridged conversation the contact receives nothing. That
+/// is said once, here, at
 /// startup, and named after the issue, because a degradation nobody is told
 /// about is the failure this product has shipped repeatedly.
 ///
@@ -1431,95 +1593,633 @@ async fn whoami(homeserver_url: &str, access_token: &str) -> Result<WhoAmI> {
 /// It follows that this device needs no recovery key, which is the step ADR
 /// 0025 called "the hard part" and which no automation may shortcut.
 ///
-/// No **session file**. The Sensor persists its own session because a fresh
-/// password login would mint a new device each start; this credential arrives
-/// from configuration every start and names its device, so there is nothing to
-/// remember — and one fewer copy of the user's token on the volume.
+/// A credential from **either** of two places, and no session of its own. The
+/// Sensor persists its own session because a fresh password login would mint a
+/// new device each start. A *configured* credential needs no remembering for the
+/// opposite reason: it arrives from the environment every start and names its
+/// device. A **handed-over** one (#228, ADR 0034) arrives once, from a browser
+/// the user has since closed, so it is the one thing here that is written down —
+/// `owner_device::CREDENTIAL_FILE`, which is also what says which device the
+/// crypto store beside it belongs to.
 async fn bring_up_owner_device(
     config: &Config,
     owner: Option<&twalk_sensor::owner::Owner>,
     metrics: &Metrics,
 ) -> Result<Option<Client>> {
-    let Some((access_token, device_id)) = config.owner_device() else {
-        info!(
-            "no device of the owner's account configured (SENSOR_OWNER_DEVICE_ACCESS_TOKEN): \
-             approved replies are posted by the Sensor's own account, which a mautrix bridge does \
-             not relay to its network — on a bridged conversation the contact receives nothing, \
-             and the Sensor says so per reply on \
-             twalk.persona.reply.approved.v1.posted (reach=nobody). This is issue #123's defect, \
-             degraded on purpose rather than silently; a deployment that has provisioned the \
-             owner's device sets the variable"
+    let held = config
+        .state_dir
+        .as_ref()
+        .map(|dir| dir.join(owner_device::CREDENTIAL_FILE))
+        .as_deref()
+        .and_then(load_held_credential);
+    // Which credential, when there are two. The handed-over one wins, and the
+    // reason is not a preference: it is the owner's own most recent act, taken in
+    // their browser, and it is the remedy for the device the configured one names
+    // having been revoked (#229). A deployment where configuration won would be
+    // one that could never be re-onboarded — onboarding would report a handover
+    // the Sensor acknowledged and go on acting through the old device.
+    let credential = match (&held, config.owner_device()) {
+        (Some(handover), configured) => {
+            if let Some((_, configured_device)) = configured {
+                if configured_device != handover.device_id {
+                    info!(
+                        handed_over = %handover.device_id,
+                        configured = configured_device,
+                        "acting through the device the owner's browser handed over, not the one \
+                         SENSOR_OWNER_DEVICE_ACCESS_TOKEN names: a handover is the owner's own \
+                         latest decision and the remedy for a revoked device (ADR 0034). The \
+                         configured one is left alone — it is a device of their account like any \
+                         other and theirs to revoke"
+                    );
+                }
+            }
+            (handover.access_token.as_str(), handover.device_id.as_str())
+        }
+        (None, Some((access_token, device_id))) => (access_token, device_id),
+        (None, None) => {
+            info!(
+                "no device of the owner's account configured (SENSOR_OWNER_DEVICE_ACCESS_TOKEN) \
+                 and none handed over: approved replies are posted by the Sensor's own account, \
+                 which a mautrix bridge does not relay to its network — on a bridged conversation \
+                 the contact receives nothing, and the Sensor says so per reply on \
+                 twalk.persona.reply.approved.v1.posted (reach=nobody). This is issue #123's \
+                 defect, degraded on purpose rather than silently; onboarding hands one over \
+                 (ADR 0034), and a deployment provisioned by script sets the variable"
+            );
+            return Ok(None);
+        }
+    };
+    let Some(owner) = owner else {
+        // Configuration guarantees an owner beside a *configured* credential, and
+        // a handover is only ever accepted when one is configured — so this is a
+        // deployment whose SENSOR_OWNER was taken away after a handover. Not
+        // fatal: the Sensor observes and publishes exactly as it did, and nothing
+        // can act as an owner nobody named.
+        warn!(
+            "a device credential is held and SENSOR_OWNER names nobody: nothing can be acted as, \
+             so approved replies are posted by the Sensor's own account. Set SENSOR_OWNER to the \
+             account the credential belongs to"
         );
         return Ok(None);
     };
-    let owner = owner.expect("config validation guarantees an owner beside the owner's device");
-
-    // Whose token is this? Asked before anything else, because a token for the
-    // wrong account is a configuration error whose natural discovery is a
-    // contact receiving a reply from a stranger — and because a device of
-    // somebody else's account joining portal rooms is worse than not starting.
-    let identity = whoami(&config.homeserver_url, access_token)
-        .await
-        .context("could not ask the homeserver whose SENSOR_OWNER_DEVICE_ACCESS_TOKEN this is")?;
-    if identity.user_id != owner.matrix_id() {
-        anyhow::bail!(
-            "SENSOR_OWNER_DEVICE_ACCESS_TOKEN belongs to {} and SENSOR_OWNER is {}: the device \
-             Twalk acts through must be a device of the owner's own account, because that is the \
-             only account a bridge relays. Refusing to start rather than writing into \
-             conversations as somebody else",
-            identity.user_id,
-            owner.matrix_id()
-        );
-    }
-    // The crypto store is bound to the device, so a mismatch here is the same
-    // class of error as pointing SENSOR_DEVICE_ID at another device's store —
-    // and the homeserver already knows the answer, so there is no reason to let
-    // matrix-sdk discover it later.
-    if let Some(reported) = &identity.device_id {
-        if reported != device_id {
-            anyhow::bail!(
-                "SENSOR_OWNER_DEVICE_ACCESS_TOKEN was issued for device {reported} and \
-                 SENSOR_OWNER_DEVICE_ID is {device_id}: the crypto store is bound to the device"
+    let (access_token, device_id) = credential;
+    let handed_over = held.is_some();
+    let opened = open_owner_device(
+        &config.homeserver_url,
+        config.state_dir.as_deref(),
+        owner.matrix_id(),
+        access_token,
+        device_id,
+        if handed_over {
+            CredentialFrom::AHandover
+        } else {
+            CredentialFrom::Configuration
+        },
+        false,
+    )
+    .await;
+    let client = match opened {
+        Ok(client) => client,
+        // A **configured** credential that cannot be used is fatal, as it has
+        // always been: it is an operator's to fix, and a Sensor that started
+        // anyway would act as nobody while its configuration says otherwise.
+        Err(error) if !handed_over => return Err(error),
+        // A **handed-over** one is not, and the reason is a deadlock. The owner
+        // revokes the device from their phone (which is ADR 0025's whole
+        // mitigation and #229's whole subject) and restarts the deployment: the
+        // credential is still on the volume, the homeserver no longer knows it,
+        // and a Sensor that refused to start over that could not be re-onboarded
+        // — the remedy needs a running Sensor to accept the new handover. So the
+        // deployment starts, observes and publishes exactly as it did, and says
+        // what is true: it was given a device and cannot act through it.
+        Err(error) => {
+            metrics.record_owner_device_present();
+            metrics.record_owner_device_credential_gone();
+            error!(
+                device_id,
+                %error,
+                "the device the owner's browser handed over cannot be used — revoked, or the \
+                 homeserver would not answer for it. This deployment observes and publishes as \
+                 before and posts approved replies as its own account, which a bridge does not \
+                 relay: twalk_sensor_owner_device_credential_gone is 1 and every reply to a \
+                 bridged conversation is refused rather than silently delivered to nobody. The \
+                 remedy is the owner's: onboard again in the Companion, which hands over a new \
+                 device without a restart. The credential is kept, in case the homeserver was \
+                 merely away"
             );
+            return Ok(None);
         }
-    }
-
-    let store_dir = config
-        .state_dir
-        .as_ref()
-        .map(|dir| dir.join(owner_device::STORE_SUBDIR));
-    let builder = Client::builder()
-        .homeserver_url(&config.homeserver_url)
-        .with_encryption_settings(EncryptionSettings::default());
-    let client = match &store_dir {
-        Some(dir) => builder.sqlite_store(dir, None).build().await,
-        None => builder.build().await,
-    }
-    .context("failed to build the owner's device client")?;
-    client
-        .restore_session(MatrixSession {
-            meta: matrix_sdk::SessionMeta {
-                user_id: matrix_sdk::ruma::UserId::parse(owner.matrix_id())
-                    .context("SENSOR_OWNER is not a valid Matrix user ID")?,
-                device_id: device_id.into(),
-            },
-            tokens: matrix_sdk::SessionTokens {
-                access_token: access_token.to_owned(),
-                refresh_token: None,
-            },
-        })
-        .await
-        .context("failed to start from the configured owner device token")?;
+    };
     metrics.record_owner_device_present();
     info!(
-        acting_as = %identity.user_id,
+        acting_as = owner.matrix_id(),
         device_id,
-        store = store_dir.as_ref().map(|dir| dir.display().to_string()),
+        handed_over,
         "holding a device of the owner's own account: approved replies are posted by it, so a \
          bridge relays them (ADR 0025). It observes nothing, publishes nothing, and reads no \
          history — no cross-signing and no recovery key (ADR 0034)"
     );
     Ok(Some(client))
+}
+
+/// Builds the client one credential of the owner's account acts through, whether
+/// it came from configuration or from the owner's browser (#228).
+///
+/// The two checks are the same for both and are made **before** the store is
+/// touched, because a token for the wrong account is a configuration error whose
+/// natural discovery is a contact receiving a reply from a stranger, and because
+/// a device of somebody else's account joining portal rooms is worse than not
+/// starting. They fail the caller: fatal at startup, and a handover the Sensor
+/// does not acknowledge at runtime.
+///
+/// `clear_store` is for the second case. A crypto store belongs to one device —
+/// matrix-sdk refuses to open one built by another
+/// (`CryptoStoreError::MismatchedAccount`) — so a handover of a *different*
+/// device is one whose store has to go. Deleting it rather than setting it aside
+/// the way `set_stale_store_aside` does for the Sensor's own is the difference ADR
+/// 0034 rests on: this device reads no history, holds no room keys anybody will
+/// want again, and its identity dies with the credential it belonged to. The
+/// directory may still be open by a reply in flight on the device being replaced;
+/// on Linux unlinking an open sqlite file leaves that reply writing to an inode
+/// nobody will read again, and the new store is built from new files.
+///
+/// A store that cannot be opened at all is cleared once and retried, even when
+/// the caller did not ask: that is the state a deployment is in when its
+/// credential file was removed by hand while the store on disk still belonged to
+/// the device the file named, and a Sensor that refused to start over it would be
+/// down for a credential it no longer has.
+async fn open_owner_device(
+    homeserver_url: &str,
+    state_dir: Option<&Path>,
+    owner: &str,
+    access_token: &str,
+    device_id: &str,
+    source: CredentialFrom,
+    clear_store: bool,
+) -> Result<Client> {
+    let identity = whoami(homeserver_url, access_token)
+        .await
+        .context("could not ask the homeserver whose owner-device credential this is")?;
+    if identity.user_id != owner {
+        anyhow::bail!(
+            "{} belongs to {} and SENSOR_OWNER is {}: the device Twalk acts through must be \
+             a device of the owner's own account, because that is the only account a bridge \
+             relays. Refusing it rather than writing into conversations as somebody else",
+            source.as_str(),
+            identity.user_id,
+            owner
+        );
+    }
+    // The homeserver already knows which device the token was issued for, so
+    // there is no reason to let matrix-sdk discover a mismatch later.
+    if let Some(reported) = &identity.device_id {
+        if reported != device_id {
+            anyhow::bail!(
+                "{} was issued for device {reported} and the deployment names {device_id}: the \
+                 crypto store is bound to the device",
+                source.as_str()
+            );
+        }
+    }
+
+    let store_dir = state_dir.map(|dir| dir.join(owner_device::STORE_SUBDIR));
+    if clear_store {
+        clear_owner_device_store(store_dir.as_deref(), device_id);
+    }
+    let session = MatrixSession {
+        meta: matrix_sdk::SessionMeta {
+            user_id: matrix_sdk::ruma::UserId::parse(owner)
+                .context("SENSOR_OWNER is not a valid Matrix user ID")?,
+            device_id: device_id.into(),
+        },
+        tokens: matrix_sdk::SessionTokens {
+            access_token: access_token.to_owned(),
+            refresh_token: None,
+        },
+    };
+    match open_with_store(homeserver_url, store_dir.as_deref(), session.clone()).await {
+        Ok(client) => Ok(client),
+        Err(error) if store_dir.is_some() && !clear_store => {
+            warn!(
+                %error,
+                device_id,
+                "the owner device's crypto store could not be opened: clearing it and starting \
+                 this device on a clean one. Nothing is lost — the device Twalk acts through reads \
+                 no history and holds no room keys anybody will ask for again"
+            );
+            clear_owner_device_store(store_dir.as_deref(), device_id);
+            open_with_store(homeserver_url, store_dir.as_deref(), session).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Builds the client and restores the session, which is where a store belonging
+/// to another device is discovered.
+async fn open_with_store(
+    homeserver_url: &str,
+    store_dir: Option<&Path>,
+    session: MatrixSession,
+) -> Result<Client> {
+    let builder = Client::builder()
+        .homeserver_url(homeserver_url)
+        .with_encryption_settings(EncryptionSettings::default());
+    let client = match store_dir {
+        Some(dir) => builder.sqlite_store(dir, None).build().await,
+        None => builder.build().await,
+    }
+    .context("failed to build the owner device's client")?;
+    client
+        .restore_session(session)
+        .await
+        .context("failed to start from the owner device's token")?;
+    Ok(client)
+}
+
+/// Removes the crypto store the previous owner device built. Never fatal: a
+/// store that cannot be removed is reported and the open below says what it means.
+fn clear_owner_device_store(store_dir: Option<&Path>, for_device: &str) {
+    let Some(dir) = store_dir else {
+        return;
+    };
+    if !dir.exists() {
+        return;
+    }
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => info!(
+            store = %dir.display(),
+            device_id = for_device,
+            "cleared the previous owner device's crypto store: a crypto store belongs to one \
+             device, and this one reads no history"
+        ),
+        Err(error) => warn!(
+            store = %dir.display(),
+            %error,
+            "could not clear the previous owner device's crypto store"
+        ),
+    }
+}
+
+/// Everything accepting a handover needs that a sync response does not carry
+/// (#228, ADR 0034).
+struct Handovers {
+    /// The account a credential may belong to, and the only account a handover is
+    /// accepted from. A deployment with no `SENSOR_OWNER` has none, and then
+    /// nothing here runs at all.
+    owner: String,
+    homeserver_url: String,
+    state_dir: Option<std::path::PathBuf>,
+    /// The device's own sync loop needs them to tell a portal invitation from a
+    /// room a stranger built, exactly as the startup path does.
+    bridge_bots: BridgeBots,
+    held: Arc<OwnerDevice>,
+    metrics: Arc<Metrics>,
+}
+
+/// Reads the sync response's to-device events for the credential the owner's
+/// browser hands over (ADR 0034, #228).
+///
+/// # Why here, and not in an event handler
+///
+/// The decision needs the event's `EncryptionInfo` — whether it decrypted, and
+/// which device sent it — and that is what `ProcessedToDeviceEvent` carries and
+/// what `add_event_handler` does not: a handler receives a deserialized event of a
+/// type ruma knows, and this one is ours. It is also the only place where "it
+/// arrived in the clear" and "it arrived and could not be decrypted" are still two
+/// distinguishable facts.
+///
+/// # What it costs to look
+///
+/// Nothing for ordinary traffic: key requests, verification starts and everything
+/// else on this channel are read no further than their `type`, and counted by
+/// nothing. A **candidate** — the handover type, decrypted, from the owner's own
+/// account — costs one `GET` of the handover room's offer, because the expected
+/// device is a fact in that room and the store is the wrong place to read it
+/// from: a room whose state has not arrived in a sync yet reads as a room with no
+/// offer, and the handover it would refuse is the one the deployment is waiting
+/// for. Only the owner's own devices can produce a candidate, so nobody else can
+/// make this Sensor issue a request.
+async fn receive_handovers(client: &Client, events: &[ProcessedToDeviceEvent], ctx: &Handovers) {
+    for event in events {
+        let (decrypted, sender, sender_device, raw) = match event {
+            ProcessedToDeviceEvent::Decrypted {
+                raw,
+                encryption_info,
+            } => (
+                true,
+                encryption_info.sender.to_string(),
+                encryption_info
+                    .sender_device
+                    .as_ref()
+                    .map(|device| device.to_string()),
+                raw,
+            ),
+            ProcessedToDeviceEvent::PlainText(raw) => {
+                (false, event_field(raw, "sender"), None, raw)
+            }
+            ProcessedToDeviceEvent::UnableToDecrypt {
+                encrypted_event: unreadable,
+                ..
+            }
+            | ProcessedToDeviceEvent::Invalid(unreadable) => {
+                // Two ways an event cannot be read, and one answer. The type is
+                // inside what could not be read, so neither can be *known* to be a
+                // handover: an Olm message this Sensor has no session for, and one
+                // whose ciphertext is not a well-formed Olm message at all
+                // (measured: matrix-sdk reports the second as `Invalid`, not as a
+                // decryption failure).
+                //
+                // Counted as a refused handover only when the owner has an offer
+                // standing in the handover room and the event came from their
+                // account: that is a deployment waiting for a credential that will
+                // not arrive, and ADR 0034 records why it must read as a refusal
+                // rather than as an error nobody recognises — hardening the
+                // Sensor's trust requirement to `CrossSigned` turns this channel
+                // into exactly these events.
+                if event_field(unreadable, "sender") == ctx.owner
+                    && !offers_standing(client, ctx).await.is_empty()
+                {
+                    ctx.metrics
+                        .record_handover_refused(owner_device::NotAHandover::NotEncrypted);
+                    warn!(
+                        sender = %ctx.owner,
+                        event_type = event_field(unreadable, "type"),
+                        "a to-device event from the owner's account could not be read while a \
+                         handover was offered in the handover room: no credential was taken from \
+                         it. Onboarding will report that the Sensor never acknowledged one"
+                    );
+                }
+                continue;
+            }
+        };
+        let event_type = event_field(raw, "type");
+        if event_type != owner_device::HANDOVER_EVENT_TYPE {
+            continue;
+        }
+        // The offers are read only for a candidate: a plaintext event claiming this
+        // type is refused on its encryption, and anybody can send one.
+        let offers = if decrypted && sender == ctx.owner {
+            offers_standing(client, ctx).await
+        } else {
+            Vec::new()
+        };
+        let content = serde_json::from_str::<serde_json::Value>(raw.json().get())
+            .map(|event| event.get("content").cloned().unwrap_or_default())
+            .unwrap_or_default();
+        let delivered = owner_device::Delivered {
+            event_type: &event_type,
+            decrypted,
+            sender: &sender,
+            sender_device: sender_device.as_deref(),
+        };
+        // Asked of the policy once per offer standing, and once with none when
+        // there are none: whether a delivery is a handover is
+        // `owner_device::handover_in`'s to say, and what is here is only the facts
+        // it needs. The room that offered this device is the room the
+        // acknowledgement belongs in.
+        let mut taken = None;
+        // With no offer the policy refuses on the device, so that is the reason to
+        // report unless an offer produced a **better** one: `Unreadable` and
+        // `NotTheOwners` are facts about the delivery itself and say the same thing
+        // whichever offer was passed, while a second `UnexpectedSender` says only
+        // that another room expects another device. Keeping the last refusal would
+        // report whichever offer happened to be read last.
+        let mut refusal = owner_device::NotAHandover::UnexpectedSender;
+        for (room, offered) in &offers {
+            match owner_device::handover_in(&delivered, &content, Some(offered), &ctx.owner) {
+                Ok(handover) => {
+                    taken = Some((room.clone(), handover));
+                    break;
+                }
+                Err(why) => {
+                    if why != owner_device::NotAHandover::UnexpectedSender {
+                        refusal = why;
+                    }
+                }
+            }
+        }
+        if offers.is_empty() {
+            refusal = owner_device::handover_in(&delivered, &content, None, &ctx.owner)
+                .expect_err("a handover with nothing offered is refused");
+        }
+        match taken {
+            Some((room, handover)) => {
+                let offered_by = sender_device.unwrap_or_default();
+                take_the_handover(&room, handover, &offered_by, ctx).await;
+            }
+            None => {
+                let why = refusal;
+                ctx.metrics.record_handover_refused(why);
+                warn!(
+                    why = why.as_str(),
+                    sender = %sender,
+                    sender_device = sender_device.as_deref().unwrap_or("none"),
+                    offers = offers.len(),
+                    "refused a to-device event claiming to hand over a device credential; nothing \
+                     was taken from it and the Sensor goes on as it was. Anybody can send one, so \
+                     twalk_sensor_handovers_refused_total is where this belongs as well as here"
+                );
+            }
+        }
+    }
+}
+
+/// One field of a to-device event, as the homeserver addressed it or the
+/// decryption produced it. Absent, or not a string, reads as empty — which
+/// matches nothing.
+fn event_field(raw: &matrix_sdk::ruma::serde::Raw<AnyToDeviceEvent>, name: &str) -> String {
+    raw.get_field::<String>(name)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// The rooms the owner's account and this Sensor share that were created to hand a
+/// credential over (#226), as their own `m.room.create` names them.
+///
+/// Found rather than configured, and found by the two facts nobody can forge: the
+/// room type `m.room.create` carries for its whole life — it can be neither
+/// replaced nor redacted — and the owner being its creator. A room somebody else
+/// built with the same type is not one of these.
+///
+/// **Rooms**, plural, and that is not pedantry. The Companion keeps one per owner
+/// and finds it by its canonical alias, but the Sensor cannot rely on that being
+/// the only one it is joined to: its account outlives any store, and a homeserver
+/// several deployments have been onboarded against — every test stack, and any
+/// owner who left a room and was onboarded again — holds more than one. A Sensor
+/// that picked the first would read a stale offer and refuse the handover it was
+/// waiting for. (Measured, and it is how this function came to be written this
+/// way: the refusal said `sender_device` and `offered` were different devices, and
+/// the offer it had read belonged to a room from a previous run.)
+fn handover_rooms(client: &Client, owner: &str) -> Vec<Room> {
+    client
+        .joined_rooms()
+        .into_iter()
+        .filter(|room| {
+            room.room_type()
+                .is_some_and(|room_type| room_type.as_str() == owner_device::HANDOVER_ROOM_TYPE)
+                && room.creators().is_some_and(|creators| {
+                    creators.iter().any(|creator| creator.as_str() == owner)
+                })
+        })
+        .collect()
+}
+
+/// Every device the owner has offered a handover from, and the room they offered
+/// it in — read from the homeserver and not from the store.
+///
+/// The store is the wrong source for the same reason `the_room_is_a_portal` gives:
+/// a room the Sensor is in whose state has not arrived in a sync yet answers "no
+/// offer", and believing it would refuse the very handover this deployment is
+/// waiting for. One `GET` per room, which in a deployment is one; an unreadable
+/// answer is no offer, because a handover nobody offered is one nobody asked for.
+async fn offers_standing(client: &Client, ctx: &Handovers) -> Vec<(Room, String)> {
+    let mut offers = Vec::new();
+    for room in handover_rooms(client, &ctx.owner) {
+        let answer = client
+            .send(get_state_event_for_key::v3::Request::new(
+                room.room_id().to_owned(),
+                owner_device::HANDOVER_OFFER_TYPE.into(),
+                String::new(),
+            ))
+            .await;
+        match answer {
+            Ok(response) => {
+                let content =
+                    serde_json::from_str::<serde_json::Value>(response.event_or_content.get()).ok();
+                if let Some(device) = owner_device::offered_from(content.as_ref()) {
+                    offers.push((room, device.to_owned()));
+                }
+            }
+            Err(error) => {
+                // `M_NOT_FOUND` is the ordinary answer in a room where nothing has
+                // been offered, and is not worth a line.
+                if !matches!(
+                    error.client_api_error_kind(),
+                    Some(matrix_sdk::ruma::api::error::ErrorKind::NotFound)
+                ) {
+                    warn!(
+                        room = %room.room_id(),
+                        %error,
+                        "could not read who the owner offered a device handover from in this room"
+                    );
+                }
+            }
+        }
+    }
+    offers
+}
+
+/// Holds a handed-over credential: uses it, writes it down, acts through it, and
+/// only then says so in the handover room (#228).
+///
+/// The order is the whole of it, and each step is what makes the next one true.
+/// The credential is **used** first — the same two checks the startup path makes,
+/// on the account and the device — because a token that cannot be used is not a
+/// credential this deployment holds. It is **written down** next, because the
+/// acknowledgement means "this deployment holds it", and one that is only in
+/// memory is one the next restart loses: a deployment that acted as the owner
+/// until its next restart and silently stopped afterwards is the failure this
+/// product has shipped repeatedly. It is **acted through** next, which is what
+/// makes onboarding change anything at all without a restart. And it is
+/// **acknowledged** last, because ADR 0034 says the Companion reports success
+/// when the Sensor says it holds the credential and never when its own send
+/// resolves — a to-device send to an untracked user resolves successfully having
+/// sent nothing.
+///
+/// Every way this can fail leaves the acknowledgement unwritten, which is the
+/// honest answer: onboarding reports a handover the Sensor never took, and the
+/// user can hand over another one. The previous device is left alone — it is a
+/// device of their account like any other, and revoking it is theirs to do from
+/// any Matrix client, which is ADR 0025's own mitigation.
+async fn take_the_handover(
+    room: &Room,
+    handover: owner_device::Handover,
+    offered_by: &str,
+    ctx: &Handovers,
+) {
+    let replacing = ctx.held.device_id().await;
+    let clear_store = replacing
+        .as_deref()
+        .is_some_and(|held| held != handover.device_id);
+    let opened = match open_owner_device(
+        &ctx.homeserver_url,
+        ctx.state_dir.as_deref(),
+        &ctx.owner,
+        &handover.access_token,
+        &handover.device_id,
+        CredentialFrom::AHandover,
+        clear_store,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            error!(
+                device_id = %handover.device_id,
+                %error,
+                "a credential was handed over and this Sensor cannot use it: nothing is \
+                 acknowledged, so onboarding reports the handover failed rather than reporting a \
+                 device this deployment does not have"
+            );
+            return;
+        }
+    };
+
+    match &ctx.state_dir {
+        Some(dir) => {
+            let path = dir.join(owner_device::CREDENTIAL_FILE);
+            let document = owner_device::credential_document(&handover).to_string();
+            if let Err(error) = write_private_file(&path, document.as_bytes()) {
+                error!(
+                    file = %path.display(),
+                    %error,
+                    "a credential was handed over and could not be written down: nothing is \
+                     acknowledged, because a credential this deployment loses on its next restart \
+                     is not one it holds"
+                );
+                return;
+            }
+        }
+        None => warn!(
+            "a credential was handed over and there is no SENSOR_STATE_DIR to write it to: this \
+             deployment acts through it now and loses it on its next restart. Configure a state \
+             directory"
+        ),
+    }
+
+    ctx.held
+        .hold(opened, ctx.bridge_bots.clone(), ctx.metrics.clone())
+        .await;
+    ctx.metrics.record_handover_held();
+
+    match room
+        .send_state_event_raw(
+            owner_device::HANDOVER_HELD_TYPE,
+            "",
+            owner_device::held(&handover, offered_by),
+        )
+        .await
+    {
+        Ok(_) => info!(
+            device_id = %handover.device_id,
+            offered_by,
+            room = %room.room_id(),
+            replacing = replacing.as_deref().unwrap_or("nothing"),
+            "holding the device the owner's browser handed over, and said so in the handover \
+             room: approved replies are posted by it from now on, so a bridge relays them \
+             (ADR 0025, ADR 0034)"
+        ),
+        Err(error) => warn!(
+            device_id = %handover.device_id,
+            room = %room.room_id(),
+            %error,
+            "the credential is held and the acknowledgement could not be written in the handover \
+             room: onboarding will report that the handover failed although this deployment has \
+             it. The room's power levels are what let the Sensor write that one state event — a \
+             room created before they granted it needs the Companion to add the exception"
+        ),
+    }
 }
 
 /// How long the owner-device's `/sync` may long-poll, and how long to wait
@@ -2420,7 +3120,7 @@ const CONSUMER_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// for as long as the Sensor runs.
 async fn consume_approved_replies(
     client: Client,
-    owner_device: Option<Client>,
+    owner_device: Arc<OwnerDevice>,
     jetstream: async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
@@ -2429,7 +3129,7 @@ async fn consume_approved_replies(
     loop {
         match run_approved_reply_consumer(
             &client,
-            owner_device.as_ref(),
+            &owner_device,
             &jetstream,
             retry_base,
             max_attempts,
@@ -2448,7 +3148,7 @@ async fn consume_approved_replies(
 /// consumer and processes its messages until the stream ends.
 async fn run_approved_reply_consumer(
     client: &Client,
-    owner_device: Option<&Client>,
+    owner_device: &OwnerDevice,
     jetstream: &async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
@@ -2529,8 +3229,11 @@ async fn run_approved_reply_consumer(
             }
         };
         // Asked per approval and not once at startup: the credential can be
-        // revoked while this process runs, which is the whole of #229.
-        let acting = match owner_device {
+        // revoked while this process runs, which is the whole of #229 — and since
+        // #228 a credential can *arrive* while it runs too, so the device itself
+        // is read here and not captured when the consumer was built.
+        let held = owner_device.current().await;
+        let acting = match &held {
             Some(device) if metrics.owner_device_can_act() => Acting::OwnersDevice(device),
             Some(_) => Acting::CredentialGone,
             None => Acting::NotConfigured,

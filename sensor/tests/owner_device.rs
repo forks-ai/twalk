@@ -233,18 +233,26 @@ async fn the_owners_device_joins_portals_and_nothing_else() -> Result<()> {
          an invitation"
     );
 
-    let logs = sensor.logs().await;
-    assert!(
-        logs.iter()
-            .any(|line| line.contains("joined a portal of a configured bridge")),
-        "the join is announced: {logs:?}"
-    );
-    assert!(
-        logs.iter().any(|line| {
+    // Both lines, waited for rather than snapshotted: the membership the
+    // homeserver already reports and the line the Sensor has written are two
+    // different moments, and the whole suite running at once is enough to put
+    // them in that order.
+    let logs = wait_up_to(Duration::from_secs(30), || async {
+        let logs = sensor.logs().await;
+        let joined = logs
+            .iter()
+            .any(|line| line.contains("joined a portal of a configured bridge"));
+        let refused = logs.iter().any(|line| {
             line.contains("not joining the owner's device to this room")
                 && line.contains("inviter_is_not_a_bridge_bot")
-        }),
-        "the refusal is announced with its reason, not silent: {logs:?}"
+        });
+        (joined && refused).then_some(logs)
+    })
+    .await;
+    assert!(
+        logs.is_ok(),
+        "the join and the refusal are both announced with their reason, not silent: {:?}",
+        sensor.logs().await
     );
 
     sensor.stop().await;
@@ -768,6 +776,486 @@ async fn a_revoked_acting_device_is_noticed_and_named_and_no_reply_goes_out_as_t
         Some(OWNER),
         "a re-provisioned device sends as the owner again"
     );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// The credential arrives over a channel anybody can write to, and the two ways
+/// it arrives that this Sensor takes nothing from (#228, ADR 0034).
+///
+/// A to-device event is addressable by **any account on any homeserver**: there is
+/// no invitation to accept and no room to be in. So the property under test is not
+/// that a handover works — the browser's journey proves that, with a real Olm
+/// session — but that the two deliveries which are *not* a handover are refused,
+/// counted, and leave the deployment exactly as it was.
+///
+/// The two are one test for the reason the join/refuse pair above is one test: the
+/// refusals are asserted against a room and a state directory that the Sensor
+/// **could** have written to, and that is what tells "it refused" from "it could
+/// not have done it anyway". The room is created the way the Companion creates it,
+/// power-level exception included, and the offer the owner writes in it names a
+/// real device of theirs — so everything about this handover is right except the
+/// one thing each half gets wrong.
+#[tokio::test]
+async fn a_handover_in_the_clear_or_one_that_cannot_be_read_is_refused_and_counted() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+
+    let owner = Bot::login("owner").await?;
+    let state_dir = fresh_state_dir("handover-refused");
+    let metrics_addr = harness::free_loopback_addr()?;
+    let metrics_url = format!("http://{metrics_addr}/metrics");
+    let mut env = sensor_env_with(&[
+        ("SENSOR_OWNER", OWNER),
+        ("SENSOR_BRIDGE_BOTS", BRIDGE_BOT),
+        ("SENSOR_STATE_DIR", &state_dir.to_string_lossy()),
+        ("SENSOR_METRICS_LISTEN", &metrics_addr),
+    ]);
+    // The Sensor has to accept the owner's invitation to the handover room, which
+    // is the only room this test is about.
+    for (name, value) in env.iter_mut() {
+        if name == "SENSOR_ALLOWED_INVITERS" {
+            *value = format!("{OWNER},{BRIDGE_BOT}");
+        }
+    }
+    let sensor = SensorProc::start(&env)?;
+
+    // The room, as `companion/src/lib/matrix/handover.ts` creates it, and the
+    // offer that says which device the credential will come from.
+    let room = owner
+        .create_handover_room("h228 the handover room", SENSOR_USER_ID)
+        .await?;
+    owner
+        .wait_for_membership(&room, SENSOR_USER_ID, "join")
+        .await?;
+    owner
+        .send_state_event(
+            &room,
+            "fr.linagora.twalk.owner_device.handover.from",
+            "",
+            json!({ "device_id": owner.device_id() }),
+        )
+        .await?;
+
+    // Half one: the credential in the clear, from the very device the owner
+    // offered. Everything a real handover carries, and no encryption — which is
+    // either an attacker's or a bug, and the two get the same answer because
+    // nothing about a plaintext event says which.
+    owner
+        .send_to_device(
+            "fr.linagora.twalk.owner_device.handover",
+            SENSOR_USER_ID,
+            json!({
+                "user_id": OWNER,
+                "device_id": owner.device_id(),
+                "access_token": owner.access_token(),
+            }),
+        )
+        .await?;
+
+    // Half two: an Olm-shaped event this Sensor cannot read, sent while the offer
+    // stands. The type is inside what cannot be read, so the only reason this
+    // counts as a refused handover at all is the offer — which is the state ADR
+    // 0034 says hardening the trust requirement would turn this channel into.
+    //
+    // The ciphertext is deliberately not a real Olm message: what a test can
+    // produce over plain HTTP is an event nobody can read, and the Sensor answers
+    // the same way for that as for one it has no session for.
+    owner
+        .send_to_device(
+            "m.room.encrypted",
+            SENSOR_USER_ID,
+            json!({
+                "algorithm": "m.olm.v1.curve25519-aes-sha2",
+                "sender_key": "3C5BFWi2Y8MaVvjM8M22DBmh24PmgR0nPvJOIArzgyI",
+                "ciphertext": {
+                    "7qZcfnBmbEGzxxaWfBjElJuvn7BZx+lSz+SXVoUaqlY": {
+                        "type": 0,
+                        "body": "AwogGJJzMhf/S3GQFXAOrCZ3iKyGU5ZScVtjI0KypTYrW1kQ",
+                    },
+                },
+            }),
+        )
+        .await?;
+
+    // Both refusals, from the Sensor's own words. Two lines, because a Sensor
+    // that said this once for two deliveries would be one that stopped reading
+    // the channel after the first.
+    let refusals = wait_up_to(Duration::from_secs(60), || async {
+        let lines = sensor.logs().await;
+        let refused = lines
+            .iter()
+            .filter(|line| line.contains("refused a to-device event claiming to hand over"))
+            .count();
+        let unreadable = lines
+            .iter()
+            .filter(|line| line.contains("could not be read while a handover was offered"))
+            .count();
+        (refused >= 1 && unreadable >= 1).then_some((refused, unreadable))
+    })
+    .await;
+    let refusals = match refusals {
+        Ok(counts) => counts,
+        Err(error) => {
+            // The Sensor's own first lines say why it refused or never saw
+            // anything, and a timeout on its own would send somebody to read this
+            // file instead of that log.
+            let log = sensor.logs().await.join("\n");
+            sensor.stop().await;
+            anyhow::bail!(
+                "the Sensor never refused both deliveries ({error}); its log was:\n{log}"
+            );
+        }
+    };
+    assert!(refusals.0 >= 1 && refusals.1 >= 1);
+
+    // And on /metrics, which is the only place an operator would ever see that
+    // somebody is trying: two refusals, both `not_encrypted`, and nothing held.
+    let body = wait_up_to(Duration::from_secs(30), || async {
+        let body = reqwest::get(&metrics_url).await.ok()?.text().await.ok()?;
+        body.contains("twalk_sensor_handovers_refused_total{why=\"not_encrypted\"} 2")
+            .then_some(body)
+    })
+    .await
+    .context("the two refusals are counted by why")?;
+    assert!(
+        body.contains("twalk_sensor_handovers_held_total 0"),
+        "nothing was held: {body}"
+    );
+    assert!(
+        body.contains("twalk_sensor_handovers_refused_total{why=\"unexpected_sender\"} 0"),
+        "and neither refusal was about the device: {body}"
+    );
+
+    // Nothing was written down, so nothing is acted through after a restart
+    // either.
+    assert!(
+        !state_dir.join("owner-device.json").exists(),
+        "no credential is on the volume in {}",
+        state_dir.display()
+    );
+
+    // And nothing was acknowledged in the room — in a room whose power levels
+    // grant the Sensor that one state event, so the absence is a decision and not
+    // a permission.
+    let acknowledgement = owner
+        .get_state_event(&room, "fr.linagora.twalk.owner_device.handover.held", "")
+        .await;
+    assert!(
+        acknowledgement.is_err(),
+        "the Sensor acknowledged a handover it refused: {acknowledgement:?}"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// The whole of ADR 0034, closed: a credential handed over in the browser makes
+/// this deployment reply **as the owner** — with no restart, and with nothing
+/// configured (#228).
+///
+/// This is the acceptance the ticket asks for and the one nothing else can give.
+/// The refusal test above drives the deliveries a test can drive over plain HTTP;
+/// the Companion's own suite drives the browser's half against a recorded
+/// homeserver. Neither answers the question that has sunk this product's outbound
+/// path before: do the two halves actually fit — the event type, the content, the
+/// device the `EncryptionInfo` reports against the device the offer named, the
+/// power-level exception the acknowledgement needs — on a real homeserver, with a
+/// real Olm session.
+///
+/// So the browser is played by a `CryptoBot` with a real crypto stack, and every
+/// assertion is made from outside the Sensor: the acknowledgement in the room, the
+/// credential on the volume, `/metrics`, and — the one that matters — a portal
+/// message whose `sender` is the owner's own account, posted by a device this
+/// process was not started with.
+#[tokio::test]
+async fn a_handover_makes_the_deployment_reply_as_the_owner_with_no_restart() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+
+    // The browser: the owner's own session, with the crypto stack that will
+    // encrypt the credential.
+    let browser = CryptoBot::login("owner").await?;
+    let bridge = Bot::login("whatsappbot").await?;
+
+    // A Sensor that has been given **nothing**: no SENSOR_OWNER_DEVICE_ACCESS_TOKEN
+    // and no credential on its volume. This is every deployment before onboarding,
+    // and it is the state #123 describes — replies go out as `@sensor:` and reach
+    // nobody.
+    let state_dir = fresh_state_dir("handover-held");
+    let metrics_addr = harness::free_loopback_addr()?;
+    let metrics_url = format!("http://{metrics_addr}/metrics");
+    let mut env = sensor_env_with(&[
+        ("SENSOR_OWNER", OWNER),
+        ("SENSOR_BRIDGE_BOTS", BRIDGE_BOT),
+        ("SENSOR_STATE_DIR", &state_dir.to_string_lossy()),
+        ("SENSOR_METRICS_LISTEN", &metrics_addr),
+        ("SENSOR_SEND_RETRY_BASE_MS", "100"),
+        ("SENSOR_SEND_RETRY_MAX_ATTEMPTS", "8"),
+    ]);
+    for (name, value) in env.iter_mut() {
+        if name == "SENSOR_ALLOWED_INVITERS" {
+            *value = format!("{OWNER},{BRIDGE_BOT}");
+        }
+    }
+    let sensor = SensorProc::start(&env)?;
+    harness::wait_up_to(Duration::from_secs(30), || async {
+        sensor
+            .logs()
+            .await
+            .iter()
+            .any(|line| line.contains("and none handed over"))
+            .then_some(())
+    })
+    .await
+    .context("the Sensor says it holds no acting device before the handover")?;
+
+    // The room the two share, created as the Companion creates it, and the two
+    // waits that make an encrypted send to the Sensor possible at all (#226).
+    let room = browser
+        .create_handover_room("h228 handover, accepted", SENSOR_USER_ID)
+        .await?;
+    browser
+        .wait_for_joined_member(&room, SENSOR_USER_ID)
+        .await?;
+    harness::crypto::wait_for_user_devices(browser.client(), SENSOR_USER_ID).await?;
+
+    // The offer: the owner says which of their devices will hand a credential
+    // over. Only their account can write it here.
+    browser
+        .send_state_event(
+            &room,
+            "fr.linagora.twalk.owner_device.handover.from",
+            "",
+            json!({ "device_id": browser.device_id() }),
+        )
+        .await?;
+
+    // The device the browser creates for Twalk to act through: an ordinary login
+    // on the owner's own account, which is what `initial_device_display_name:
+    // twalk` is in the Companion.
+    let acting = Bot::login_named("owner", "twalk").await?;
+    assert_ne!(
+        acting.device_id(),
+        browser.device_id(),
+        "the device handed over is not the browser's own"
+    );
+    let encrypted_to = browser
+        .hand_over_encrypted(
+            SENSOR_USER_ID,
+            "fr.linagora.twalk.owner_device.handover",
+            json!({
+                "user_id": OWNER,
+                "device_id": acting.device_id(),
+                "access_token": acting.access_token(),
+            }),
+        )
+        .await?;
+    assert!(
+        encrypted_to >= 1,
+        "the credential went to a device of the Sensor's"
+    );
+
+    // The acknowledgement, which is the only thing the Companion reads as
+    // success — and it names the device, so a browser waiting for its own
+    // handover is not satisfied by an earlier one.
+    let acknowledgement = wait_up_to(Duration::from_secs(90), || async {
+        let answer = acting
+            .get_state_event(&room, "fr.linagora.twalk.owner_device.handover.held", "")
+            .await
+            .ok()?;
+        answer["device_id"]
+            .as_str()
+            .is_some_and(|device| device == acting.device_id())
+            .then_some(answer)
+    })
+    .await
+    .with_context(|| format!("the Sensor never acknowledged the handover in {room}"))?;
+    assert_eq!(acknowledgement["user_id"].as_str(), Some(OWNER));
+    assert_eq!(
+        acknowledgement["offered_by"].as_str(),
+        Some(browser.device_id().as_str()),
+        "the acknowledgement names the device that offered it"
+    );
+    assert!(
+        !acknowledgement.to_string().contains(acting.access_token()),
+        "the acknowledgement is unencrypted state in a room and must not carry the credential"
+    );
+
+    // And it is a device the owner can see and revoke, under the name the
+    // Companion gives it: that is ADR 0025's whole mitigation for a long-lived
+    // credential at rest, and a mitigation nobody can find is not one.
+    // The device **this** run created, and not a count: the owner's account on a
+    // shared test homeserver carries every device every previous run minted, and
+    // "one device named twalk" is a property of a deployment rather than of this
+    // stack. (The same accumulation is what made `handover_rooms` read a stale
+    // offer.)
+    let listed = acting.devices().await?;
+    let named = listed
+        .iter()
+        .find(|device| device["device_id"].as_str() == Some(acting.device_id()))
+        .context("the device this run created is in the owner's device list")?;
+    assert_eq!(
+        named["display_name"].as_str(),
+        Some("twalk"),
+        "under the name the Companion gives it, which is the name they revoke: {named}"
+    );
+
+    // It is on the volume, readable by nobody else, so the next restart still has
+    // it — an acknowledgement for a credential held only in memory would be a
+    // deployment that stops replying as the owner when it is next restarted.
+    let credential_file = state_dir.join("owner-device.json");
+    let held: Value = serde_json::from_str(&std::fs::read_to_string(&credential_file)?)?;
+    assert_eq!(held["device_id"].as_str(), Some(acting.device_id()));
+    assert_eq!(held["user_id"].as_str(), Some(OWNER));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&credential_file)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the credential is readable by its owner alone");
+    }
+
+    // And on /metrics, where a revoked deployment's own gauge now says it can act
+    // again (#229 could not put that back without a restart).
+    let body = wait_up_to(Duration::from_secs(30), || async {
+        let body = reqwest::get(&metrics_url).await.ok()?.text().await.ok()?;
+        body.contains("twalk_sensor_handovers_held_total 1")
+            .then_some(body)
+    })
+    .await
+    .context("the handover is counted")?;
+    assert!(
+        body.contains("twalk_sensor_owner_device_credential_gone 0"),
+        "the deployment holds a usable device: {body}"
+    );
+    assert!(
+        body.contains("twalk_sensor_handovers_refused_total{why=\"unexpected_sender\"} 0"),
+        "and nothing about this handover was refused: {body}"
+    );
+
+    // The proof. A portal, an approved reply on the bus, and the sender of the
+    // message that lands in the room: the owner's own account, through a device
+    // this process was not started with and nobody restarted it to use.
+    let portal = make_whatsapp_portal(&bridge, "handover-reply").await?;
+    bridge.invite(&portal, SENSOR_USER_ID).await?;
+    bridge.invite(&portal, OWNER).await?;
+    bridge.wait_for_membership(&portal, OWNER, "join").await?;
+
+    let body = "Oui, je confirme pour 20h.";
+    let approved = approved_reply(&portal, body)?;
+    let approval_id = approved["id"].as_str().unwrap().to_owned();
+    bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
+
+    let posted = wait_up_to(Duration::from_secs(120), || async {
+        bridge
+            .room_events(&portal, 50)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|event| {
+                event["sender"].as_str() == Some(OWNER)
+                    && event.pointer("/content/body").and_then(Value::as_str) == Some(body)
+            })
+    })
+    .await
+    .context("the handed-over device never posted the reply as the owner")?;
+    assert_eq!(posted["sender"].as_str(), Some(OWNER));
+
+    // And the Sensor says on the bus what that reached, which is the fact #216
+    // exists for: a reply posted by the owner's account is one the bridge relays.
+    let report = posted_report(&bus, &approval_id).await?;
+    assert_eq!(report.header("reach"), Some("contact"));
+    assert_eq!(report.header("posted-as"), Some(OWNER));
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// A handed-over credential the homeserver no longer knows does not stop the
+/// Sensor from starting — and the deadlock that would be if it did (#228, #229).
+///
+/// The owner revokes the device from their phone, which is ADR 0025's whole
+/// mitigation, and the deployment is restarted. The credential is still on the
+/// volume and the homeserver refuses it. A Sensor that treated that the way it
+/// treats a **configured** credential it cannot use — refusing to start — could
+/// never be re-onboarded, because the remedy needs a running Sensor to accept the
+/// new handover: the deployment would be down until somebody with shell access
+/// deleted a file.
+///
+/// So it starts, says what is true, and shows it on `/metrics` as the state #229
+/// named: a device was given and nothing can act through it.
+#[tokio::test]
+async fn a_handed_over_credential_the_homeserver_refuses_does_not_stop_the_sensor() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+
+    // A real device of the owner's, revoked the way the owner revokes one.
+    let revoked = Bot::login("owner").await?;
+    let device_id = revoked.device_id().to_owned();
+    let credential = json!({
+        "user_id": OWNER,
+        "device_id": device_id,
+        "access_token": revoked.access_token(),
+    });
+    revoked.revoke_this_device().await?;
+
+    let state_dir = fresh_state_dir("handover-revoked");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::write(
+        state_dir.join("owner-device.json"),
+        serde_json::to_vec(&credential)?,
+    )?;
+    let metrics_addr = harness::free_loopback_addr()?;
+    let mut sensor = SensorProc::start(&sensor_env_with(&[
+        ("SENSOR_OWNER", OWNER),
+        ("SENSOR_BRIDGE_BOTS", BRIDGE_BOT),
+        ("SENSOR_STATE_DIR", &state_dir.to_string_lossy()),
+        ("SENSOR_METRICS_LISTEN", &metrics_addr),
+    ]))?;
+
+    poll_until(
+        || async {
+            let logs = sensor.logs().await;
+            (logs
+                .iter()
+                .any(|line| line.contains("cannot be used") && line.contains("onboard again"))
+                && logs.iter().any(|line| line.contains("sensor running")))
+            .then_some(())
+        },
+        "the Sensor naming the dead credential, the remedy, and running anyway",
+    )
+    .await?;
+    assert!(
+        sensor.is_running(),
+        "a revoked handover must not take the whole deployment down: it observes and publishes as \
+         before"
+    );
+
+    // And the gauge says which of the two situations this is: a device was given
+    // and cannot act, not a deployment that was never given one.
+    let body = wait_up_to(Duration::from_secs(30), || async {
+        let body = reqwest::get(format!("http://{metrics_addr}/metrics"))
+            .await
+            .ok()?
+            .text()
+            .await
+            .ok()?;
+        body.contains("twalk_sensor_owner_device_credential_gone 1")
+            .then_some(body)
+    })
+    .await
+    .context("the credential-gone gauge is 1")?;
+    assert!(
+        body.contains("twalk_sensor_handovers_held_total 0"),
+        "{body}"
+    );
+
+    // The credential is kept: the homeserver may have been merely away, and
+    // deleting the owner's credential over one failed request is not this
+    // process's decision to make.
+    assert!(state_dir.join("owner-device.json").exists());
 
     sensor.stop().await;
     Ok(())

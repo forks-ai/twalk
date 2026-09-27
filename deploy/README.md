@@ -119,7 +119,13 @@ The gauge is the one to alert on, because from the moment it is `1` no reply to 
 twalk_sensor_owner_device_credential_gone > 0
 ```
 
-The remedy is `docker-compose/provision-owner-device.sh` and a restart of the Sensor — nothing else. No invitation to re-accept: the new device joins the portals as the bridges' own bots invite it, which is the same path the first one took. The restart is there because the credential is an environment variable an operator sets; [#228](https://github.com/linagora/twalk/issues/228) is the handover that removes that step.
+Two counters beside it belong to the handover itself. `twalk_sensor_handovers_held_total` is onboarding working: each increment is one credential this Sensor persisted, brought up and acknowledged in the handover room. `twalk_sensor_handovers_refused_total{why}` is the channel's security property made observable — a to-device event can be addressed to this Sensor by **any account on any homeserver**, so `not_encrypted` or `unexpected_sender` climbing with no onboarding in progress is somebody trying, and there is nowhere else that would ever show it:
+
+```promql
+increase(twalk_sensor_handovers_refused_total[1h]) > 0
+```
+
+There are two remedies, and since [#228](https://github.com/linagora/twalk/issues/228) the owner has one of their own: **onboarding again in the Companion** creates a new device on their account and hands its credential to the Sensor Olm-encrypted, which the Sensor writes to `SENSOR_STATE_DIR/owner-device.json` and acts through **without a restart** — `twalk_sensor_handovers_held_total` climbs, the gauge above goes back to `0`, and a reply still inside its retry schedule goes out. The operator's remedy is the one it always was: `docker-compose/provision-owner-device.sh` and a restart of the Sensor. No invitation to re-accept: the new device joins the portals as the bridges' own bots invite it, which is the same path the first one took. The restart is there because the credential is an environment variable an operator sets; [#228](https://github.com/linagora/twalk/issues/228) is the handover that removes that step.
 
 ### Choosing which conversations are observed
 

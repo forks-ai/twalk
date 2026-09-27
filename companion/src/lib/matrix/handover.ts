@@ -96,8 +96,37 @@
 // caller a device list the machine never saw, which is exactly the answer that
 // would make a broken handover look ready.
 
+import { homeserverCalls, refusalOf, waitFor, type Answer, type Call } from './homeserver';
+
 /** The `m.room.create` type that says this room is not a conversation. */
 export const HANDOVER_ROOM_TYPE = 'fr.linagora.twalk.handover';
+
+/**
+ * The state event in which the owner says **which device** will hand the
+ * credential over (#228, ADR 0034).
+ *
+ * It lives here, in the room's own module, because what makes it worth anything
+ * is a property of the room: `state_default` is 50 and the Sensor sits at 0, so
+ * this is a sentence only the owner's account can write, authenticated by the
+ * homeserver rather than by anything Twalk checks. The Sensor refuses a
+ * credential from any device but the one named here, and nothing could have
+ * configured that device beforehand — it is minted by a login performed seconds
+ * earlier.
+ */
+export const HANDOVER_OFFER_TYPE = 'fr.linagora.twalk.owner_device.handover.from';
+
+/**
+ * The state event the **Sensor** writes once it holds the credential: the
+ * acknowledgement ADR 0034 requires, and the only thing the Companion may read as
+ * success.
+ *
+ * This is the room's one exception to "nobody can post in it at all". The Sensor
+ * is granted level 0 for this single event type and nothing else, in the `events`
+ * map of the power levels below, because a room in which the Sensor could say
+ * nothing would be a room in which a handover could never be confirmed — and
+ * ADR 0034's whole point is that a send resolving is not a confirmation.
+ */
+export const HANDOVER_HELD_TYPE = 'fr.linagora.twalk.owner_device.handover.held';
 
 /**
  * The `events_default` the room is created with: one above the 100 a room's
@@ -200,7 +229,12 @@ export function handoverRoomCreation(options: {
 			// neither invite a third account nor remove the user.
 			invite: 100,
 			kick: 100,
-			redact: 100
+			redact: 100,
+			// And the one thing the Sensor may write: the acknowledgement of a
+			// handover, at level 0, by name. Everything else it could attempt —
+			// any message, any other state event — is still refused by the
+			// homeserver and not by us.
+			events: { [HANDOVER_HELD_TYPE]: 0 }
 		}
 	};
 }
@@ -302,37 +336,7 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 		return { kind: 'failed', detail: `${userId} is not a Matrix user ID` };
 	}
 
-	const call = async (
-		method: string,
-		path: string,
-		body?: unknown
-	): Promise<{ status: number; document: Record<string, unknown> }> => {
-		const response = await doFetch(`${baseUrl}${path}`, {
-			method,
-			headers: {
-				authorization: `Bearer ${accessToken}`,
-				...(body === undefined ? {} : { 'content-type': 'application/json' })
-			},
-			...(body === undefined ? {} : { body: JSON.stringify(body) })
-		});
-		let document: Record<string, unknown> = {};
-		try {
-			const parsed: unknown = await response.json();
-			if (parsed !== null && typeof parsed === 'object') {
-				document = parsed as Record<string, unknown>;
-			}
-		} catch {
-			// A body that is not JSON leaves `document` empty; the status is
-			// what the callers below decide on.
-		}
-		return { status: response.status, document };
-	};
-
-	const errorOf = (document: Record<string, unknown>, status: number): string => {
-		const errcode = typeof document['errcode'] === 'string' ? document['errcode'] : '';
-		const error = typeof document['error'] === 'string' ? document['error'] : '';
-		return [String(status), errcode, error].filter((part) => part !== '').join(' ');
-	};
+	const call = homeserverCalls(doFetch, baseUrl, accessToken);
 
 	let roomId: string;
 	let created: boolean;
@@ -364,8 +368,18 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 				roomId = raced;
 				created = false;
 			} else {
-				return { kind: 'failed', detail: errorOf(creation.document, creation.status) };
+				return { kind: 'failed', detail: refusalOf(creation) };
 			}
+		}
+
+		// The Sensor's one power-level exception, on a room that may predate it.
+		// A room created by #226 grants the Sensor nothing at all, so the
+		// acknowledgement #228 needs would be refused by the homeserver — and a
+		// handover that works and cannot be confirmed reads exactly like one that
+		// never arrived. Adding it is the owner's to do: they hold 100 here.
+		const granted = await grantTheAcknowledgement(call, roomId);
+		if (granted !== null) {
+			return { kind: 'failed', detail: granted };
 		}
 
 		// An existing room whose Sensor has left, or a deployment whose Sensor
@@ -383,7 +397,7 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 				invitation.status !== 200 &&
 				!String(invitation.document['error'] ?? '').includes('already in the room')
 			) {
-				return { kind: 'failed', detail: errorOf(invitation.document, invitation.status) };
+				return { kind: 'failed', detail: refusalOf(invitation) };
 			}
 		}
 
@@ -425,11 +439,47 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 		: { kind: 'sensor-untracked', roomId };
 }
 
-type Call = (
-	method: string,
-	path: string,
-	body?: unknown
-) => Promise<{ status: number; document: Record<string, unknown> }>;
+/**
+ * Makes sure the Sensor may write [`HANDOVER_HELD_TYPE`] in this room, and
+ * nothing else. Answers `null` when it may, or the homeserver's words.
+ *
+ * Idempotent and normally free: a room created by [`handoverRoomCreation`] already
+ * carries the exception, so this reads the power levels and writes nothing. A room
+ * created before the exception existed is amended in one request, with every other
+ * level left exactly as it was — this is the user's own room, and the only thing
+ * being changed is the one type the Sensor is allowed to say.
+ */
+async function grantTheAcknowledgement(call: Call, roomId: string): Promise<string | null> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`;
+	const current = await call('GET', path);
+	if (current.status !== 200) {
+		return `${current.status} reading this room's power levels`;
+	}
+	const events =
+		typeof current.document['events'] === 'object' && current.document['events'] !== null
+			? (current.document['events'] as Record<string, unknown>)
+			: {};
+	if (events[HANDOVER_HELD_TYPE] === 0) {
+		return null;
+	}
+	const amended = { ...current.document, events: { ...events, [HANDOVER_HELD_TYPE]: 0 } };
+	let written = await call('PUT', path, amended);
+	if (written.status !== 200) {
+		// Once more, after whatever the homeserver asked for. Synapse rate-limits
+		// state sends, and a `429` on this one request would otherwise fail an
+		// onboarding that is being re-run — the room is there, the Sensor is in it,
+		// and the only thing missing is a power level it already agreed to. A
+		// refusal that is not about rate is answered the same way and costs one
+		// extra request.
+		const askedFor = written.document['retry_after_ms'];
+		const wait = typeof askedFor === 'number' ? Math.min(askedFor, 5_000) : 1_000;
+		await new Promise((resolve) => setTimeout(resolve, wait));
+		written = await call('PUT', path, amended);
+	}
+	return written.status === 200
+		? null
+		: `${written.status} granting the Sensor the one state event it may write`;
+}
 
 /** The room the handover alias points at, or `null`. */
 async function resolveAlias(call: Call, alias: string): Promise<string | null> {
@@ -448,23 +498,3 @@ async function memberOf(call: Call, roomId: string, userId: string): Promise<str
 	return answer.status === 200 && typeof membership === 'string' ? membership : null;
 }
 
-/**
- * Polls `condition` until it holds or the deadline passes. Answers whether it
- * held — a deadline is an answer about the system, never an exception.
- */
-async function waitFor(
-	condition: () => Promise<boolean>,
-	deadlineMs: number,
-	intervalMs: number
-): Promise<boolean> {
-	const deadline = Date.now() + deadlineMs;
-	for (;;) {
-		if (await condition()) {
-			return true;
-		}
-		if (Date.now() >= deadline) {
-			return false;
-		}
-		await new Promise((resolve) => setTimeout(resolve, intervalMs));
-	}
-}
