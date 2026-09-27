@@ -50,20 +50,14 @@ pub async fn consume_approvals(
     jetstream: async_nats::jetstream::Context,
     mailbox: Arc<Mailbox>,
     held: Vec<String>,
-    owner_email: String,
+    owner: crate::owner::Owner,
     access: SharedCredential,
     metrics: Arc<Metrics>,
     retry: RetryPolicy,
 ) {
     loop {
         match run(
-            &jetstream,
-            &mailbox,
-            &held,
-            &owner_email,
-            &access,
-            &metrics,
-            retry,
+            &jetstream, &mailbox, &held, &owner, &access, &metrics, retry,
         )
         .await
         {
@@ -78,7 +72,7 @@ async fn run(
     jetstream: &async_nats::jetstream::Context,
     mailbox: &Mailbox,
     held: &[String],
-    owner_email: &str,
+    owner: &crate::owner::Owner,
     access: &SharedCredential,
     metrics: &Metrics,
     retry: RetryPolicy,
@@ -166,7 +160,7 @@ async fn run(
         match mailbox.send_reply(&reply, &token).await {
             Ok(sent) => {
                 metrics.record_published("persona.reply.approved.posted");
-                report_posted(jetstream, &message, &reply.event_id, owner_email).await;
+                report_posted(jetstream, &message, &reply.event_id, owner).await;
                 if let Err(error) = message.ack().await {
                     warn!(id = %reply.event_id, %error, "ack failed after a sent reply");
                 }
@@ -301,7 +295,7 @@ async fn report_posted(
     jetstream: &async_nats::jetstream::Context,
     message: &async_nats::jetstream::Message,
     event_id: &str,
-    owner_email: &str,
+    owner: &crate::owner::Owner,
 ) {
     let mut headers = async_nats::header::HeaderMap::new();
     headers.insert(
@@ -312,7 +306,11 @@ async fn report_posted(
     headers.insert(outbound::POSTED_REACH_HEADER, "contact");
     headers.insert(
         outbound::POSTED_AS_HEADER,
-        crate::side::owner_mailto(owner_email).as_str(),
+        // The address the owner is **named** by, whichever of theirs the reply
+        // left as (#322): `posted-as` is the owner's subject, the same one the
+        // calendar's envelopes and the consent cache use, and not the transport's
+        // `From`. One owner, one subject.
+        crate::side::owner_mailto(owner.primary()).as_str(),
     );
     if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&message.payload) {
         duplicate_extensions(&event, &mut headers);

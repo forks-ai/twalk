@@ -17,6 +17,15 @@ use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
 use twalk_test_harness::{nats_url, poll_until, Bus, FakeSso};
 
 pub const OWNER: &str = "michel@example.com";
+
+/// Another address of the owner's, declared in every run's
+/// `COLLECTOR_OWNER_ALIASES` (#322).
+///
+/// Declared always, and not only by the test that is about it, because the
+/// question the ticket asks is whether the ordinary assertions still hold for a
+/// deployment whose owner has more than one address — which is the normal case for
+/// a mailbox and was the reference deployment's on its first production run.
+pub const OWNER_ALIAS: &str = "michel.maudet@example.com";
 pub const STREAM: &str = "twalk";
 pub const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
 
@@ -106,6 +115,7 @@ impl Run {
             ("COLLECTOR_JMAP_SESSION_URL", self.sso.jmap_session_url()),
             ("COLLECTOR_CALDAV_URL", self.sso.caldav_url()),
             ("COLLECTOR_OWNER_EMAIL", OWNER.to_owned()),
+            ("COLLECTOR_OWNER_ALIASES", OWNER_ALIAS.to_owned()),
             ("COLLECTOR_MAIL_CONNECTION", self.mail.clone()),
             ("COLLECTOR_CALENDAR_CONNECTION", self.calendar.clone()),
             ("COLLECTOR_NATS_URL", nats_url()),

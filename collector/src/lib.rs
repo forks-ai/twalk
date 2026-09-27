@@ -23,6 +23,7 @@ pub mod mails;
 pub mod metrics;
 pub mod oidc;
 pub mod outbound;
+pub mod owner;
 pub mod push;
 pub mod replies;
 pub mod side;

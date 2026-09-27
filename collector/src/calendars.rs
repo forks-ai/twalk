@@ -33,7 +33,9 @@ use crate::freebusy::{parse_free_busy, Busy, Window};
 /// needs.
 pub struct Calendars {
     pub connection: String,
-    pub owner_email: String,
+    /// Every address the owner holds (#322): the subject is the one they are
+    /// named by, and the reduction withholds none of them.
+    pub owner: crate::owner::Owner,
     /// The mail connection of the same account, whose decisions govern the
     /// participants; `None` on a deployment with no mail connection, where
     /// nobody is ever withheld because nobody was ever decided about.
@@ -66,7 +68,6 @@ pub type SharedSwitch = Arc<AtomicBool>;
 /// than an atomic, because what it holds is three values that must change
 /// together: a set of days and two clock times.
 pub type SharedWorkingDay = Arc<std::sync::Mutex<Option<crate::freebusy::WorkingDay>>>;
-
 
 /// What one poll found: the envelopes to publish, in order, and the cursors
 /// to write once they are on the bus.
@@ -131,7 +132,6 @@ pub struct Zone {
 }
 
 impl Calendars {
-
     fn cursor_path(&self, calendar_id: &str) -> PathBuf {
         self.state_dir
             .join("caldav")
@@ -415,12 +415,8 @@ impl Calendars {
         resources: &[Resource],
         now: &str,
     ) -> (Vec<Value>, Cursor, Vec<Refused>) {
-        let envelopes = Envelopes::new(
-            &self.connection,
-            &self.owner_email,
-            &self.side.host(),
-            collection,
-        );
+        let envelopes =
+            Envelopes::new(&self.connection, &self.owner, &self.side.host(), collection);
         let by_href: BTreeMap<&str, &Resource> = resources
             .iter()
             .map(|resource| (resource.href.as_str(), resource))
@@ -494,7 +490,7 @@ impl Calendars {
         match caldav::parse_vevent(&resource.ics) {
             Ok(event) => Some(caldav::reduce(
                 &event,
-                &self.owner_email,
+                &self.owner,
                 if self.locations_may_travel.load(Ordering::Relaxed) {
                     caldav::Location::Carried
                 } else {
@@ -821,7 +817,10 @@ mod tests {
             tzid_in("BEGIN:VTIMEZONE&#13;\nTZID:America/New_York&#13;\nEND:VTIMEZONE").as_deref(),
             Some("America/New_York")
         );
-        assert_eq!(tzid_in("TZID:Asia/Tokyo</x>").as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(
+            tzid_in("TZID:Asia/Tokyo</x>").as_deref(),
+            Some("Asia/Tokyo")
+        );
 
         // A collection that declares none answers the property `404` inside
         // the `207`, and there is no TZID anywhere in it.

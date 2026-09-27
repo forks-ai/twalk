@@ -446,21 +446,44 @@ pub fn email_by_message_id(account_id: &str, message_id: &str) -> (&'static str,
 }
 
 /// The id of the identity whose address is the owner's, off `Identity/get`.
-pub fn identity_for(identity_get: &Value, owner_email: &str) -> Option<String> {
-    let owner = owner_email.trim().to_ascii_lowercase();
-    identity_get
-        .get("list")
-        .and_then(Value::as_array)?
-        .iter()
-        .find(|identity| {
-            identity
-                .get("email")
-                .and_then(Value::as_str)
-                .is_some_and(|email| email.trim().eq_ignore_ascii_case(&owner))
-        })
-        .and_then(|identity| identity.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+///
+/// Their **primary** address if the mailbox can send as it, and otherwise any
+/// address they hold (#322): a mailbox whose sending identity is the alias used to
+/// have no identity at all here, so every approved reply failed permanently with a
+/// message that was clear and puzzling at once. The order is the preference, and
+/// the fallback is what makes a reply leave rather than a refusal arrive.
+pub fn identity_for(identity_get: &Value, owner: &crate::owner::Owner) -> Option<Sending> {
+    let identities = identity_get.get("list").and_then(Value::as_array)?;
+    let with_address = |wanted: &str| -> Option<Sending> {
+        identities
+            .iter()
+            .find(|identity| {
+                identity
+                    .get("email")
+                    .and_then(Value::as_str)
+                    .is_some_and(|email| email.trim().eq_ignore_ascii_case(wanted))
+            })
+            .and_then(|identity| identity.get("id"))
+            .and_then(Value::as_str)
+            .map(|id| Sending {
+                id: id.to_owned(),
+                email: wanted.to_owned(),
+            })
+    };
+    owner.addresses().find_map(with_address)
+}
+
+/// The identity a reply leaves as: its id, and **its own address**.
+///
+/// The two travel together because the `From` of the reply has to be the address
+/// of the identity that sends it. When the fallback is taken — the mailbox cannot
+/// send as the owner's primary address but can send as an alias of theirs — a
+/// reply built with the primary address in `From` would be a reply the server is
+/// entitled to refuse, and the refusal would arrive per reply and for ever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sending {
+    pub id: String,
+    pub email: String,
 }
 
 /// A mailbox's id by role (`sent`, `drafts`), off `Mailbox/get`.
@@ -852,8 +875,11 @@ impl Dropped {
 /// The frontier: `Ok` is a person writing, `Err` says why not. Checked in
 /// the order that names the more specific reason first — the owner's own
 /// invitation is still the owner's.
-pub fn frontier(mail: &Mail, owner_email: &str) -> Result<(), Dropped> {
-    if mail.from.email == owner_email.trim().to_ascii_lowercase() {
+pub fn frontier(mail: &Mail, owner: &crate::owner::Owner) -> Result<(), Dropped> {
+    // Every address the owner holds, not the one they are named by (#322): a mail
+    // they sent from their other address is still theirs, and publishing it made
+    // the owner a contact in their own Companion.
+    if owner.holds(&mail.from.email) {
         return Err(Dropped::Owner);
     }
     if mail.has_itip_part {
@@ -876,9 +902,8 @@ pub fn frontier(mail: &Mail, owner_email: &str) -> Result<(), Dropped> {
 }
 
 /// `direct` when the owner was the only recipient, `group` otherwise.
-pub fn audience(mail: &Mail, owner_email: &str) -> &'static str {
-    let owner = owner_email.trim().to_ascii_lowercase();
-    let only_the_owner = mail.to.len() == 1 && mail.to[0].email == owner && mail.cc.is_empty();
+pub fn audience(mail: &Mail, owner: &crate::owner::Owner) -> &'static str {
+    let only_the_owner = mail.to.len() == 1 && owner.holds(&mail.to[0].email) && mail.cc.is_empty();
     if only_the_owner {
         "direct"
     } else {
@@ -993,7 +1018,7 @@ pub struct Envelopes {
     /// `jmap://<host>/<accountId>/<INBOX id>`.
     pub source: String,
     pub account_id: String,
-    pub owner_email: String,
+    pub owner: crate::owner::Owner,
 }
 
 impl Envelopes {
@@ -1002,13 +1027,13 @@ impl Envelopes {
         host: &str,
         account_id: &str,
         inbox_id: &str,
-        owner_email: &str,
+        owner: &crate::owner::Owner,
     ) -> Self {
         Self {
             connection: connection.to_owned(),
             source: format!("jmap://{host}/{account_id}/{inbox_id}"),
             account_id: account_id.to_owned(),
-            owner_email: owner_email.to_owned(),
+            owner: owner.clone(),
         }
     }
 
@@ -1048,7 +1073,7 @@ impl Envelopes {
                 .unwrap_or(Value::Null),
             "attachments": attachments,
             "contact": { "display_name": capped(&display_name, DISPLAY_NAME_MAX) },
-            "audience": audience(mail, &self.owner_email),
+            "audience": audience(mail, &self.owner),
         });
         if !mail.received_at.is_empty() {
             data["network_timestamp"] = json!(mail.received_at);
@@ -1086,6 +1111,12 @@ impl Envelopes {
 
 #[cfg(test)]
 mod tests {
+
+    /// The owner, named by one address and holding no other: what every test here
+    /// passed as a string before #322 gave the question a type.
+    fn an_owner(email: &str) -> crate::owner::Owner {
+        crate::owner::Owner::new(email, Vec::<String>::new())
+    }
     use super::*;
 
     /// #331's other half: a reply already in Sent is recognised by the
@@ -1247,7 +1278,7 @@ mod tests {
             "mail.example.com",
             "u1",
             "inbox-1",
-            "michel@example.com",
+            &an_owner("michel@example.com"),
         );
         let event = envelopes.message_received(&mail, Consent::Granted, "2026-09-21T08:15:03Z");
         let fixture: Value = serde_json::from_str(include_str!(
@@ -1276,7 +1307,13 @@ mod tests {
         object["bodyValues"]["1"]["value"] = json!("x".repeat(100_000));
         object["from"][0]["name"] = json!("n".repeat(500));
         let mail = Mail::parse(&object).unwrap();
-        let envelopes = Envelopes::new("mail-linagora", "h", "u1", "i", "michel@example.com");
+        let envelopes = Envelopes::new(
+            "mail-linagora",
+            "h",
+            "u1",
+            "i",
+            &an_owner("michel@example.com"),
+        );
         let event = envelopes.message_received(&mail, Consent::Pending, "2026-09-21T08:15:03Z");
         assert_eq!(
             event["data"]["body"].as_str().unwrap().chars().count(),
@@ -1304,49 +1341,135 @@ mod tests {
     #[test]
     fn the_frontier_drops_on_a_positive_signal_only() {
         let mut mail = Mail::parse(&email_object()).unwrap();
-        assert_eq!(frontier(&mail, "michel@example.com"), Ok(()));
-        assert_eq!(audience(&mail, "Michel@example.com"), "direct");
+        assert_eq!(frontier(&mail, &an_owner("michel@example.com")), Ok(()));
+        assert_eq!(audience(&mail, &an_owner("Michel@example.com")), "direct");
 
         mail.auto_submitted = Some("no".to_owned());
         assert_eq!(
-            frontier(&mail, "michel@example.com"),
+            frontier(&mail, &an_owner("michel@example.com")),
             Ok(()),
             "Auto-Submitted: no is a person"
         );
         mail.auto_submitted = Some("auto-generated".to_owned());
         assert_eq!(
-            frontier(&mail, "michel@example.com"),
+            frontier(&mail, &an_owner("michel@example.com")),
             Err(Dropped::NonHumanSender)
         );
         mail.auto_submitted = None;
         mail.list_unsubscribe = Some("<https://example.org/unsubscribe>".to_owned());
         assert_eq!(
-            frontier(&mail, "michel@example.com"),
+            frontier(&mail, &an_owner("michel@example.com")),
             Err(Dropped::NonHumanSender)
         );
         mail.list_unsubscribe = None;
         mail.precedence = Some("Bulk".to_owned());
         assert_eq!(
-            frontier(&mail, "michel@example.com"),
+            frontier(&mail, &an_owner("michel@example.com")),
             Err(Dropped::NonHumanSender)
         );
         mail.precedence = Some("first-class".to_owned());
-        assert_eq!(frontier(&mail, "michel@example.com"), Ok(()));
+        assert_eq!(frontier(&mail, &an_owner("michel@example.com")), Ok(()));
 
         mail.has_itip_part = true;
         assert_eq!(
-            frontier(&mail, "michel@example.com"),
+            frontier(&mail, &an_owner("michel@example.com")),
             Err(Dropped::CalendarInvitation)
         );
         mail.has_itip_part = false;
         mail.from.email = "michel@example.com".to_owned();
-        assert_eq!(frontier(&mail, "Michel@Example.com"), Err(Dropped::Owner));
+        assert_eq!(
+            frontier(&mail, &an_owner("Michel@Example.com")),
+            Err(Dropped::Owner)
+        );
 
         mail.cc.push(Person {
             name: None,
             email: "bob@example.org".to_owned(),
         });
-        assert_eq!(audience(&mail, "michel@example.com"), "group");
+        assert_eq!(audience(&mail, &an_owner("michel@example.com")), "group");
+    }
+
+    /// Every address the owner holds is theirs, in the three places that used to
+    /// compare the one they are named by (#322).
+    #[test]
+    fn a_mail_from_another_address_of_the_owners_is_still_the_owners() {
+        const PRIMARY: &str = "mmaudet@linagora.com";
+        const ALIAS: &str = "michel.maudet@linagora.com";
+        let owner = crate::owner::Owner::new(PRIMARY, [ALIAS]);
+        let mut mail = Mail::parse(&email_object()).unwrap();
+
+        // The frontier. This is the defect the ticket is named for: a mail the
+        // owner sent from their other address — to themselves, back from a list,
+        // from a phone configured with the alias — became a message from a contact
+        // who was the owner, waiting for a decision in their own Companion.
+        mail.from.email = ALIAS.to_owned();
+        assert_eq!(frontier(&mail, &owner), Err(Dropped::Owner));
+        assert_eq!(
+            frontier(&mail, &an_owner(PRIMARY)),
+            Ok(()),
+            "and an undeclared alias is exactly what it was: a contact. That is what the variable \
+             buys, and what its absence costs"
+        );
+
+        // The audience: a mail addressed to any address of theirs, and to nobody
+        // else, is a mail to them.
+        mail.from.email = "alice@example.org".to_owned();
+        mail.to = vec![Person {
+            name: None,
+            email: ALIAS.to_owned(),
+        }];
+        assert_eq!(audience(&mail, &owner), "direct");
+        assert_eq!(
+            audience(&mail, &an_owner(PRIMARY)),
+            "group",
+            "a mail to an address nobody declared is a mail to somebody else"
+        );
+    }
+
+    /// The reply leaves as the owner even when the mailbox cannot send as the
+    /// address they are named by (#322).
+    #[test]
+    fn the_sending_identity_is_preferred_and_then_fallen_back_to() {
+        const PRIMARY: &str = "mmaudet@linagora.com";
+        const ALIAS: &str = "michel.maudet@linagora.com";
+        let owner = crate::owner::Owner::new(PRIMARY, [ALIAS]);
+        let identities = |emails: &[(&str, &str)]| {
+            json!({
+                "list": emails
+                    .iter()
+                    .map(|(id, email)| json!({ "id": id, "email": email }))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // Both offered: the address they are named by wins, whatever the order.
+        assert_eq!(
+            identity_for(&identities(&[("i2", ALIAS), ("i1", PRIMARY)]), &owner),
+            Some(Sending {
+                id: "i1".to_owned(),
+                email: PRIMARY.to_owned()
+            })
+        );
+
+        // Only the alias offered: a reply leaves as that, and its `From` is the
+        // identity's own address — which is what makes the send legitimate rather
+        // than a claim the server may refuse. Before this, such a mailbox had no
+        // identity at all and every approved reply failed permanently.
+        assert_eq!(
+            identity_for(&identities(&[("i2", "MICHEL.MAUDET@linagora.com")]), &owner),
+            Some(Sending {
+                id: "i2".to_owned(),
+                email: ALIAS.to_owned()
+            }),
+            "the address recorded is the owner's, spelled as they declared it"
+        );
+
+        // None of theirs: still nothing, and the caller still says so once and
+        // permanently.
+        assert_eq!(
+            identity_for(&identities(&[("i3", "somebody@example.com")]), &owner),
+            None
+        );
     }
 
     #[test]

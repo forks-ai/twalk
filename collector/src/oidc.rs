@@ -579,16 +579,35 @@ impl Identities {
         })
     }
 
-    pub fn owner_mismatch(&self, owner: &str) -> Vec<(&'static str, String)> {
+    pub fn owner_mismatch(&self, owner: &crate::owner::Owner) -> Vec<(&'static str, String)> {
         let mut mismatched = Vec::new();
         for (service, identity) in self.by_service() {
             if let Ok(account) = identity {
-                if !account.eq_ignore_ascii_case(owner) {
+                // Any address the owner holds (#322): the reference deployment's
+                // mailbox answers `mmaudet@` and their card says
+                // `michel.maudet@`, and one grant for one person was refused over
+                // that. The check is still against what the *service* says — that
+                // is the point of it — only now the answer may be any of the
+                // addresses the operator declared as the owner's.
+                if !owner.holds(account) {
                     mismatched.push((service, account.clone()));
                 }
             }
         }
         mismatched
+    }
+
+    /// The services that answered as the owner, and the address each answered
+    /// with: what makes "the grant is theirs" a sentence an operator can read
+    /// rather than the absence of a refusal (#322).
+    pub fn owner_matches(&self, owner: &crate::owner::Owner) -> Vec<(&'static str, String)> {
+        self.by_service()
+            .into_iter()
+            .filter_map(|(service, identity)| match identity {
+                Ok(account) if owner.holds(account) => Some((service, account.clone())),
+                _ => None,
+            })
+            .collect()
     }
 }
 

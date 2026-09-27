@@ -80,7 +80,7 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
     eprintln!();
     eprintln!(
         "1. Open this link in a browser and sign in as {}:",
-        config.owner_email
+        config.owner.primary()
     );
     eprintln!();
     eprintln!("   {}", started.authorization_url);
@@ -130,7 +130,7 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
             }
         }
     }
-    let mismatched = identities.owner_mismatch(&config.owner_email);
+    let mismatched = identities.owner_mismatch(&config.owner);
     if !mismatched.is_empty() {
         // Not kept: a stranger's grant on disk would be protected by the
         // next run's idempotence, and would be renewed for as long as the
@@ -145,7 +145,7 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
             "the grant is not {}'s: {} — the collector would publish nothing from it, so it was \
              not kept ({} removed; the SSO still holds the grant until that account revokes \
              it). Sign in as the owner and run authorize again.",
-            config.owner_email,
+            config.owner.primary(),
             mismatched
                 .iter()
                 .map(|(service, account)| format!("{service} answers as {account}"))
@@ -154,10 +154,19 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
             oidc.grant_file.display()
         );
     }
+    // Which address answered, and not merely that none mismatched: a mailbox that
+    // answers an alias is the ordinary case (#322), and an operator reading this
+    // is checking their own identity.
+    let answered = identities
+        .owner_matches(&config.owner)
+        .into_iter()
+        .map(|(service, account)| format!("{service} as {account}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     if unanswered.is_empty() {
         eprintln!(
             "Both services answer as {}. The collector can start.",
-            config.owner_email
+            answered
         );
     } else {
         // The grant is the owner's as far as anyone answered; what did not
@@ -172,7 +181,7 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
                 "   The collector will report the {service} connection as {} until {service} \
                  answers as {}.",
                 state.as_str(),
-                config.owner_email
+                config.owner.primary()
             );
         }
         eprintln!("The collector can start.");
@@ -234,7 +243,9 @@ async fn run(config: Config) -> Result<()> {
                     "no working day is set: a free/busy read offers every gap, night included"
                 ),
             }
-            *working_day.lock().expect("the working day mutex is never poisoned") = day;
+            *working_day
+                .lock()
+                .expect("the working day mutex is never poisoned") = day;
             if enabled {
                 warn!("the calendar location is ON: published events carry where a meeting is, by a decision recorded on the Companion Gateway. Turn it off there to stop it");
             } else {
@@ -264,7 +275,7 @@ async fn run(config: Config) -> Result<()> {
         .context("failed to ensure the twalk stream")?;
 
     let consent =
-        twalk_collector::consent::follow(jetstream.clone(), snapshot.as_ref(), &config.owner_email)
+        twalk_collector::consent::follow(jetstream.clone(), snapshot.as_ref(), &config.owner)
             .await?;
     // The calendar connection, when this process holds one: polled on every
     // round the grant and the side service allow (#280).
@@ -275,7 +286,7 @@ async fn run(config: Config) -> Result<()> {
         .map(|held| {
             Ok::<_, anyhow::Error>(twalk_collector::calendars::Calendars {
                 connection: held.id.clone(),
-                owner_email: config.owner_email.clone(),
+                owner: config.owner.clone(),
                 mail_connection: config
                     .connections
                     .iter()
@@ -308,7 +319,7 @@ async fn run(config: Config) -> Result<()> {
         .map(|held| {
             twalk_collector::mails::Mailbox::new(
                 &held.id,
-                &config.owner_email,
+                &config.owner,
                 config
                     .services
                     .jmap_session_url
@@ -361,7 +372,7 @@ async fn run(config: Config) -> Result<()> {
                 .iter()
                 .map(|held| held.id.clone())
                 .collect(),
-            config.owner_email.clone(),
+            config.owner.clone(),
             shared_access.clone(),
             metrics.clone(),
             twalk_collector::replies::RetryPolicy {
@@ -436,7 +447,7 @@ async fn run(config: Config) -> Result<()> {
                 match identities {
                     Ok(identities) => {
                         caldav_owner_id = identities.caldav_owner_id.clone();
-                        let mismatched = identities.owner_mismatch(&config.owner_email);
+                        let mismatched = identities.owner_mismatch(&config.owner);
                         if mismatched.is_empty() {
                             observe_services(&config, &identities)
                         } else {
@@ -449,7 +460,7 @@ async fn run(config: Config) -> Result<()> {
                                 hint: Some(format!(
                                     "The credential belongs to another account, not {}. Check \
                                      COLLECTOR_BASIC_USER and its password file.",
-                                    config.owner_email
+                                    config.owner.primary()
                                 )),
                             }
                         }
@@ -472,7 +483,7 @@ async fn run(config: Config) -> Result<()> {
                         .as_ref()
                         .map(|oidc| oidc.grant_file.display().to_string())
                         .unwrap_or_default(),
-                    config.owner_email
+                    config.owner.primary()
                 )),
             },
             (None, Some(current)) => {
@@ -878,7 +889,7 @@ fn reconnect_required(config: &Config) -> Observation {
             "The SSO refused to renew the grant. Run `twalk-collector authorize --renew` — on a \
              compose deployment, `deploy/docker-compose/provision-connection.sh --renew` — and \
              sign in again as {}; nothing is published until then.",
-            config.owner_email
+            config.owner.primary()
         )),
     }
 }
@@ -896,7 +907,7 @@ fn client_refused(detail: &str) -> Observation {
 /// this is and whether each service takes it — the observation that becomes
 /// each connection's state.
 fn observe_services(config: &Config, identities: &Identities) -> Observation {
-    let mismatched = identities.owner_mismatch(&config.owner_email);
+    let mismatched = identities.owner_mismatch(&config.owner);
     if !mismatched.is_empty() {
         // Named in the log — the account, not a token — and nothing
         // published from it: the grant is somebody else's.
@@ -904,7 +915,7 @@ fn observe_services(config: &Config, identities: &Identities) -> Observation {
             error!(
                 service,
                 account,
-                owner = %config.owner_email,
+                owner = %config.owner.primary(),
                 "the grant is not the owner's: nothing is published from this connection"
             );
         }
@@ -914,7 +925,7 @@ fn observe_services(config: &Config, identities: &Identities) -> Observation {
             hint: Some(format!(
                 "The grant belongs to another account, not {}. Run `twalk-collector authorize --renew` \
                  and sign in as the owner.",
-                config.owner_email
+                config.owner.primary()
             )),
         };
     }

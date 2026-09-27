@@ -28,7 +28,9 @@ use crate::side::{self, SideError};
 /// needs.
 pub struct Mailbox {
     pub connection: String,
-    pub owner_email: String,
+    /// Every address the owner holds (#322), which is what the frontier, the
+    /// audience and the reply path each ask about.
+    pub owner: crate::owner::Owner,
     pub session_url: String,
     pub state_dir: PathBuf,
     pub consent: ConsentCache,
@@ -112,14 +114,14 @@ pub struct MailPoll {
 impl Mailbox {
     pub fn new(
         connection: &str,
-        owner_email: &str,
+        owner: &crate::owner::Owner,
         session_url: &str,
         state_dir: &std::path::Path,
         consent: ConsentCache,
     ) -> Result<Self> {
         Ok(Self {
             connection: connection.to_owned(),
-            owner_email: owner_email.to_owned(),
+            owner: owner.clone(),
             session_url: session_url.to_owned(),
             state_dir: state_dir.to_owned(),
             consent,
@@ -343,7 +345,7 @@ impl Mailbox {
             &self.host(),
             account,
             &previous.inbox_id,
-            &self.owner_email,
+            &self.owner,
         );
         if !in_inbox.is_empty() {
             let response = self
@@ -370,7 +372,7 @@ impl Mailbox {
                 // Remembered whatever the frontier says, so a recovery
                 // never re-reads it either.
                 next.remember(&mail.id);
-                match jmap::frontier(&mail, &self.owner_email) {
+                match jmap::frontier(&mail, &self.owner) {
                     Ok(()) => {
                         let consent = self.consent.state(&mail.from.mailto(), &self.connection);
                         poll.envelopes
@@ -446,13 +448,25 @@ impl Mailbox {
         {
             return Ok(Sent { already_sent: true });
         }
-        let identity_id = jmap::identity_for(&response.result(1)?, &self.owner_email)
-            .ok_or_else(|| {
-                SendError::Permanent(format!(
-                    "the JMAP server offers no sending identity for {}: the reply cannot leave as the owner",
-                    self.owner_email
-                ))
-            })?;
+        let sending = jmap::identity_for(&response.result(1)?, &self.owner).ok_or_else(|| {
+            SendError::Permanent(format!(
+                "the JMAP server offers no sending identity for any address of the owner's ({}): \
+                 the reply cannot leave as them",
+                self.owner.addresses().collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+        if sending.email != self.owner.primary() {
+            // Said once per reply and worth it: the reply leaves as an address
+            // the owner holds and not the one they are named by, which is what
+            // the contact will see and what an operator would otherwise have to
+            // deduce from the mailbox.
+            tracing::info!(
+                identity = %sending.email,
+                primary = self.owner.primary(),
+                "the mailbox cannot send as the owner's primary address; the reply leaves as this \
+                 address of theirs (#322)"
+            );
+        }
         // The mail the reply answers, by the Message-ID as written and by
         // the same without its brackets (#331). A server that indexes one
         // form answers nothing to the other, and answers it with an empty
@@ -513,8 +527,8 @@ impl Mailbox {
         outbound::original_is_from_recipient(reply, &original).map_err(SendError::Permanent)?;
         let sender = outbound::Sender {
             account_id: account.to_owned(),
-            identity_id,
-            owner_email: self.owner_email.clone(),
+            identity_id: sending.id,
+            owner_email: sending.email,
             drafts_id,
             sent_id,
         };

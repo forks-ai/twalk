@@ -51,9 +51,12 @@ pub struct Config {
     /// `COLLECTOR_CALDAV_URL` with a calendar one) — and none for a service
     /// this process does not read (#321).
     pub services: Services,
-    /// The account both services must answer as (`COLLECTOR_OWNER_EMAIL`):
-    /// a grant for anybody else publishes nothing.
-    pub owner_email: String,
+    /// Who the owner is: the address they are named by
+    /// (`COLLECTOR_OWNER_EMAIL`) and every other address they hold
+    /// (`COLLECTOR_OWNER_ALIASES`, comma-separated, #322). A grant that answers
+    /// none of them publishes nothing; an address that is theirs and is not
+    /// declared is a contact this collector will publish.
+    pub owner: crate::owner::Owner,
     /// The connections this process holds: the mail one
     /// (`COLLECTOR_MAIL_CONNECTION`) and the calendar one
     /// (`COLLECTOR_CALENDAR_CONNECTION`), each optional, at least one set.
@@ -208,7 +211,13 @@ impl Config {
                 jmap_session_url: url_for("email", "COLLECTOR_JMAP_SESSION_URL")?,
                 caldav_url: url_for("calendar", "COLLECTOR_CALDAV_URL")?,
             },
-            owner_email: required("COLLECTOR_OWNER_EMAIL")?,
+            owner: crate::owner::Owner::new(
+                &required("COLLECTOR_OWNER_EMAIL")?,
+                optional_string("COLLECTOR_OWNER_ALIASES")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::to_owned),
+            ),
             connections,
             gateway_url,
             gateway_service_token,
@@ -351,7 +360,7 @@ mod tests {
                 jmap_session_url: Some("https://mail.example/jmap/session".to_owned()),
                 caldav_url: Some("https://calendar.example/".to_owned()),
             },
-            owner_email: "michel@example.com".to_owned(),
+            owner: crate::owner::Owner::new("michel@example.com", Vec::<String>::new()),
             connections,
             gateway_url: None,
             gateway_service_token: None,
