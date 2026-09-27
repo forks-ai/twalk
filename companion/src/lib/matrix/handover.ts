@@ -100,6 +100,33 @@
 export const HANDOVER_ROOM_TYPE = 'fr.linagora.twalk.handover';
 
 /**
+ * The state event in which the owner says **which device** will hand the
+ * credential over (#228, ADR 0034).
+ *
+ * It lives here, in the room's own module, because what makes it worth anything
+ * is a property of the room: `state_default` is 50 and the Sensor sits at 0, so
+ * this is a sentence only the owner's account can write, authenticated by the
+ * homeserver rather than by anything Twalk checks. The Sensor refuses a
+ * credential from any device but the one named here, and nothing could have
+ * configured that device beforehand — it is minted by a login performed seconds
+ * earlier.
+ */
+export const HANDOVER_OFFER_TYPE = 'fr.linagora.twalk.owner_device.handover.from';
+
+/**
+ * The state event the **Sensor** writes once it holds the credential: the
+ * acknowledgement ADR 0034 requires, and the only thing the Companion may read as
+ * success.
+ *
+ * This is the room's one exception to "nobody can post in it at all". The Sensor
+ * is granted level 0 for this single event type and nothing else, in the `events`
+ * map of the power levels below, because a room in which the Sensor could say
+ * nothing would be a room in which a handover could never be confirmed — and
+ * ADR 0034's whole point is that a send resolving is not a confirmation.
+ */
+export const HANDOVER_HELD_TYPE = 'fr.linagora.twalk.owner_device.handover.held';
+
+/**
  * The `events_default` the room is created with: one above the 100 a room's
  * creator holds, so no member — the user included — can post any message
  * event. See the module docs.
@@ -200,7 +227,12 @@ export function handoverRoomCreation(options: {
 			// neither invite a third account nor remove the user.
 			invite: 100,
 			kick: 100,
-			redact: 100
+			redact: 100,
+			// And the one thing the Sensor may write: the acknowledgement of a
+			// handover, at level 0, by name. Everything else it could attempt —
+			// any message, any other state event — is still refused by the
+			// homeserver and not by us.
+			events: { [HANDOVER_HELD_TYPE]: 0 }
 		}
 	};
 }
@@ -368,6 +400,16 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 			}
 		}
 
+		// The Sensor's one power-level exception, on a room that may predate it.
+		// A room created by #226 grants the Sensor nothing at all, so the
+		// acknowledgement #228 needs would be refused by the homeserver — and a
+		// handover that works and cannot be confirmed reads exactly like one that
+		// never arrived. Adding it is the owner's to do: they hold 100 here.
+		const granted = await grantTheAcknowledgement(call, roomId);
+		if (granted !== null) {
+			return { kind: 'failed', detail: granted };
+		}
+
 		// An existing room whose Sensor has left, or a deployment whose Sensor
 		// id changed: the invitation is what puts it back, and asking for one
 		// it already has is answered `already in the room` rather than being an
@@ -430,6 +472,38 @@ type Call = (
 	path: string,
 	body?: unknown
 ) => Promise<{ status: number; document: Record<string, unknown> }>;
+
+/**
+ * Makes sure the Sensor may write [`HANDOVER_HELD_TYPE`] in this room, and
+ * nothing else. Answers `null` when it may, or the homeserver's words.
+ *
+ * Idempotent and normally free: a room created by [`handoverRoomCreation`] already
+ * carries the exception, so this reads the power levels and writes nothing. A room
+ * created before the exception existed is amended in one request, with every other
+ * level left exactly as it was — this is the user's own room, and the only thing
+ * being changed is the one type the Sensor is allowed to say.
+ */
+async function grantTheAcknowledgement(call: Call, roomId: string): Promise<string | null> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`;
+	const current = await call('GET', path);
+	if (current.status !== 200) {
+		return `${current.status} reading this room's power levels`;
+	}
+	const events =
+		typeof current.document['events'] === 'object' && current.document['events'] !== null
+			? (current.document['events'] as Record<string, unknown>)
+			: {};
+	if (events[HANDOVER_HELD_TYPE] === 0) {
+		return null;
+	}
+	const amended = await call('PUT', path, {
+		...current.document,
+		events: { ...events, [HANDOVER_HELD_TYPE]: 0 }
+	});
+	return amended.status === 200
+		? null
+		: `${amended.status} granting the Sensor the one state event it may write`;
+}
 
 /** The room the handover alias points at, or `null`. */
 async function resolveAlias(call: Call, alias: string): Promise<string | null> {

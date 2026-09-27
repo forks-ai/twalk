@@ -38,6 +38,7 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { GeneratedSecretStorageKey } from 'matrix-js-sdk/lib/crypto-api';
 
+import type { CredentialCrypto } from '$lib/matrix/credential';
 import type { HandoverCrypto } from '$lib/matrix/handover';
 import { groupRecoveryKey } from '$lib/recovery/key';
 
@@ -457,9 +458,10 @@ async function startClient(
 }
 
 /**
- * The three moves the handover room needs from the crypto stack, and no others
- * (`$lib/matrix/handover.ts`, ticket #226). Here because this module is the one
- * place in the app that touches matrix-js-sdk.
+ * The moves the handover needs from the crypto stack, and no others
+ * (`$lib/matrix/handover.ts` for the room, `$lib/matrix/credential.ts` for the
+ * credential). Here because this module is the one place in the app that touches
+ * matrix-js-sdk.
  *
  * `null` when no bootstrap has run in this tab, which is a caller's mistake and
  * not an error worth throwing over.
@@ -474,7 +476,7 @@ async function startClient(
  * One bounded sync, started and stopped by the handover, is what makes the
  * room do the job it was created for.
  */
-export function handoverCrypto(): HandoverCrypto | null {
+export function handoverCrypto(): (HandoverCrypto & CredentialCrypto) | null {
 	const client = currentClient();
 	if (client === null) {
 		return null;
@@ -501,6 +503,57 @@ export function handoverCrypto(): HandoverCrypto | null {
 			// comes from the machine's own store or not at all.
 			const devices = await crypto.getUserDeviceInfo([userId], false);
 			return devices.get(userId)?.size ?? 0;
+		},
+		deviceId(): string | null {
+			return client.getDeviceId();
+		},
+		async sensorDevices(userId: string): Promise<string[]> {
+			const crypto = client.getCrypto();
+			if (crypto === undefined) {
+				return [];
+			}
+			// `downloadUncached` false, for the reason `trackedDeviceCount` gives:
+			// the machine's own store or nothing.
+			const devices = await crypto.getUserDeviceInfo([userId], false);
+			return [...(devices.get(userId)?.keys() ?? [])];
+		},
+		async sendEncrypted(
+			userId: string,
+			deviceIds: string[],
+			eventType: string,
+			content: Record<string, unknown>
+		): Promise<number> {
+			const crypto = client.getCrypto();
+			if (crypto === undefined) {
+				return 0;
+			}
+			// The batch is what the machine could encrypt: a device it does not
+			// know is skipped with a `logger.warn` and simply not in here, which is
+			// why the caller compares the count it gets back with the count it
+			// asked for.
+			const batch = await crypto.encryptToDeviceMessages(
+				eventType,
+				deviceIds.map((deviceId) => ({ userId, deviceId })),
+				content
+			);
+			if (batch.batch.length === 0) {
+				return 0;
+			}
+			// `sendToDevice` and not `queueToDevice`, which is the higher-level API
+			// and the wrong one here: the queue only drains while the client is
+			// running (`ToDeviceMessageQueue.start`, called from `startClient`), and
+			// this app runs no sync loop, so a queued batch would sit in the store
+			// and never leave. Sending it directly also means the homeserver's own
+			// answer is awaited — not a proof that the Sensor can read it, which is
+			// what the acknowledgement is for, but a fact rather than a hope.
+			const contentMap = new Map<string, Map<string, Record<string, unknown>>>();
+			for (const message of batch.batch) {
+				const forUser = contentMap.get(message.userId) ?? new Map();
+				forUser.set(message.deviceId, message.payload as Record<string, unknown>);
+				contentMap.set(message.userId, forUser);
+			}
+			await client.sendToDevice(batch.eventType, contentMap);
+			return batch.batch.length;
 		}
 	};
 }
