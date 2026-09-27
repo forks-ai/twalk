@@ -246,6 +246,14 @@ pub struct Delivered<'a> {
 /// encrypted channel whose failure would be indistinguishable from the first's.
 pub const HANDOVER_OFFER_TYPE: &str = "fr.linagora.twalk.owner_device.handover.from";
 
+/// The `m.room.create` type of the room those two travel in (#226).
+///
+/// `companion/src/lib/matrix/handover.ts` is the authority on the room's shape and
+/// creates it; this is the Sensor's copy of the one fact it has to recognise, for
+/// the reason the Companion Gateway's test harness keeps its own: a room type is a
+/// value in a wire protocol between two components, and each end states it.
+pub const HANDOVER_ROOM_TYPE: &str = "fr.linagora.twalk.handover";
+
 /// The Sensor's acknowledgement. See [`HANDOVER_OFFER_TYPE`].
 pub const HANDOVER_HELD_TYPE: &str = "fr.linagora.twalk.owner_device.handover.held";
 

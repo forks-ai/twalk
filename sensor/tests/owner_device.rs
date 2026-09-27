@@ -233,18 +233,26 @@ async fn the_owners_device_joins_portals_and_nothing_else() -> Result<()> {
          an invitation"
     );
 
-    let logs = sensor.logs().await;
-    assert!(
-        logs.iter()
-            .any(|line| line.contains("joined a portal of a configured bridge")),
-        "the join is announced: {logs:?}"
-    );
-    assert!(
-        logs.iter().any(|line| {
+    // Both lines, waited for rather than snapshotted: the membership the
+    // homeserver already reports and the line the Sensor has written are two
+    // different moments, and the whole suite running at once is enough to put
+    // them in that order.
+    let logs = wait_up_to(Duration::from_secs(30), || async {
+        let logs = sensor.logs().await;
+        let joined = logs
+            .iter()
+            .any(|line| line.contains("joined a portal of a configured bridge"));
+        let refused = logs.iter().any(|line| {
             line.contains("not joining the owner's device to this room")
                 && line.contains("inviter_is_not_a_bridge_bot")
-        }),
-        "the refusal is announced with its reason, not silent: {logs:?}"
+        });
+        (joined && refused).then_some(logs)
+    })
+    .await;
+    assert!(
+        logs.is_ok(),
+        "the join and the refusal are both announced with their reason, not silent: {:?}",
+        sensor.logs().await
     );
 
     sensor.stop().await;
@@ -767,6 +775,176 @@ async fn a_revoked_acting_device_is_noticed_and_named_and_no_reply_goes_out_as_t
         posted["sender"].as_str(),
         Some(OWNER),
         "a re-provisioned device sends as the owner again"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// The credential arrives over a channel anybody can write to, and the two ways
+/// it arrives that this Sensor takes nothing from (#228, ADR 0034).
+///
+/// A to-device event is addressable by **any account on any homeserver**: there is
+/// no invitation to accept and no room to be in. So the property under test is not
+/// that a handover works — the browser's journey proves that, with a real Olm
+/// session — but that the two deliveries which are *not* a handover are refused,
+/// counted, and leave the deployment exactly as it was.
+///
+/// The two are one test for the reason the join/refuse pair above is one test: the
+/// refusals are asserted against a room and a state directory that the Sensor
+/// **could** have written to, and that is what tells "it refused" from "it could
+/// not have done it anyway". The room is created the way the Companion creates it,
+/// power-level exception included, and the offer the owner writes in it names a
+/// real device of theirs — so everything about this handover is right except the
+/// one thing each half gets wrong.
+#[tokio::test]
+async fn a_handover_in_the_clear_or_one_that_cannot_be_read_is_refused_and_counted() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+
+    let owner = Bot::login("owner").await?;
+    let state_dir = fresh_state_dir("handover-refused");
+    let metrics_addr = harness::free_loopback_addr()?;
+    let metrics_url = format!("http://{metrics_addr}/metrics");
+    let mut env = sensor_env_with(&[
+        ("SENSOR_OWNER", OWNER),
+        ("SENSOR_BRIDGE_BOTS", BRIDGE_BOT),
+        ("SENSOR_STATE_DIR", &state_dir.to_string_lossy()),
+        ("SENSOR_METRICS_LISTEN", &metrics_addr),
+    ]);
+    // The Sensor has to accept the owner's invitation to the handover room, which
+    // is the only room this test is about.
+    for (name, value) in env.iter_mut() {
+        if name == "SENSOR_ALLOWED_INVITERS" {
+            *value = format!("{OWNER},{BRIDGE_BOT}");
+        }
+    }
+    let sensor = SensorProc::start(&env)?;
+
+    // The room, as `companion/src/lib/matrix/handover.ts` creates it, and the
+    // offer that says which device the credential will come from.
+    let room = owner
+        .create_handover_room("h228 the handover room", SENSOR_USER_ID)
+        .await?;
+    owner
+        .wait_for_membership(&room, SENSOR_USER_ID, "join")
+        .await?;
+    owner
+        .send_state_event(
+            &room,
+            "fr.linagora.twalk.owner_device.handover.from",
+            "",
+            json!({ "device_id": owner.device_id() }),
+        )
+        .await?;
+
+    // Half one: the credential in the clear, from the very device the owner
+    // offered. Everything a real handover carries, and no encryption — which is
+    // either an attacker's or a bug, and the two get the same answer because
+    // nothing about a plaintext event says which.
+    owner
+        .send_to_device(
+            "fr.linagora.twalk.owner_device.handover",
+            SENSOR_USER_ID,
+            json!({
+                "user_id": OWNER,
+                "device_id": owner.device_id(),
+                "access_token": owner.access_token(),
+            }),
+        )
+        .await?;
+
+    // Half two: an Olm-shaped event this Sensor cannot read, sent while the offer
+    // stands. The type is inside what cannot be read, so the only reason this
+    // counts as a refused handover at all is the offer — which is the state ADR
+    // 0034 says hardening the trust requirement would turn this channel into.
+    //
+    // The ciphertext is deliberately not a real Olm message: what a test can
+    // produce over plain HTTP is an event nobody can read, and the Sensor answers
+    // the same way for that as for one it has no session for.
+    owner
+        .send_to_device(
+            "m.room.encrypted",
+            SENSOR_USER_ID,
+            json!({
+                "algorithm": "m.olm.v1.curve25519-aes-sha2",
+                "sender_key": "3C5BFWi2Y8MaVvjM8M22DBmh24PmgR0nPvJOIArzgyI",
+                "ciphertext": {
+                    "7qZcfnBmbEGzxxaWfBjElJuvn7BZx+lSz+SXVoUaqlY": {
+                        "type": 0,
+                        "body": "AwogGJJzMhf/S3GQFXAOrCZ3iKyGU5ZScVtjI0KypTYrW1kQ",
+                    },
+                },
+            }),
+        )
+        .await?;
+
+    // Both refusals, from the Sensor's own words. Two lines, because a Sensor
+    // that said this once for two deliveries would be one that stopped reading
+    // the channel after the first.
+    let refusals = wait_up_to(Duration::from_secs(60), || async {
+        let lines = sensor.logs().await;
+        let refused = lines
+            .iter()
+            .filter(|line| line.contains("refused a to-device event claiming to hand over"))
+            .count();
+        let unreadable = lines
+            .iter()
+            .filter(|line| line.contains("could not be read while a handover was offered"))
+            .count();
+        (refused >= 1 && unreadable >= 1).then_some((refused, unreadable))
+    })
+    .await;
+    let refusals = match refusals {
+        Ok(counts) => counts,
+        Err(error) => {
+            // The Sensor's own first lines say why it refused or never saw
+            // anything, and a timeout on its own would send somebody to read this
+            // file instead of that log.
+            let log = sensor.logs().await.join("\n");
+            sensor.stop().await;
+            anyhow::bail!(
+                "the Sensor never refused both deliveries ({error}); its log was:\n{log}"
+            );
+        }
+    };
+    assert!(refusals.0 >= 1 && refusals.1 >= 1);
+
+    // And on /metrics, which is the only place an operator would ever see that
+    // somebody is trying: two refusals, both `not_encrypted`, and nothing held.
+    let body = wait_up_to(Duration::from_secs(30), || async {
+        let body = reqwest::get(&metrics_url).await.ok()?.text().await.ok()?;
+        body.contains("twalk_sensor_handovers_refused_total{why=\"not_encrypted\"} 2")
+            .then_some(body)
+    })
+    .await
+    .context("the two refusals are counted by why")?;
+    assert!(
+        body.contains("twalk_sensor_handovers_held_total 0"),
+        "nothing was held: {body}"
+    );
+    assert!(
+        body.contains("twalk_sensor_handovers_refused_total{why=\"unexpected_sender\"} 0"),
+        "and neither refusal was about the device: {body}"
+    );
+
+    // Nothing was written down, so nothing is acted through after a restart
+    // either.
+    assert!(
+        !state_dir.join("owner-device.json").exists(),
+        "no credential is on the volume in {}",
+        state_dir.display()
+    );
+
+    // And nothing was acknowledged in the room — in a room whose power levels
+    // grant the Sensor that one state event, so the absence is a decision and not
+    // a permission.
+    let acknowledgement = owner
+        .get_state_event(&room, "fr.linagora.twalk.owner_device.handover.held", "")
+        .await;
+    assert!(
+        acknowledgement.is_err(),
+        "the Sensor acknowledged a handover it refused: {acknowledgement:?}"
     );
 
     sensor.stop().await;

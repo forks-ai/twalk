@@ -217,6 +217,82 @@ impl Bot {
         extract_str(&response, "room_id", "createRoom")
     }
 
+    /// Creates the **handover room** as `companion/src/lib/matrix/handover.ts`
+    /// creates it (#226, #228): encrypted, marked not-a-conversation by its
+    /// `m.room.create` type, nobody able to post a message in it, and the one
+    /// power-level exception that lets the Sensor write the acknowledgement state
+    /// event and nothing else.
+    ///
+    /// The Companion is the authority on this shape; this is the harness's copy of
+    /// it, and it is the reason a test can tell "the Sensor refused the handover"
+    /// from "the Sensor could not have acknowledged it anyway".
+    pub async fn create_handover_room(&self, name: &str, sensor_user_id: &str) -> Result<String> {
+        let body = serde_json::json!({
+            "preset": "private_chat",
+            "visibility": "private",
+            "name": name,
+            "invite": [sensor_user_id],
+            "is_direct": false,
+            "creation_content": { "type": "fr.linagora.twalk.handover" },
+            "initial_state": [{
+                "type": "m.room.encryption",
+                "state_key": "",
+                "content": { "algorithm": "m.megolm.v1.aes-sha2" },
+            }],
+            "power_level_content_override": {
+                "events_default": 101,
+                "invite": 100,
+                "kick": 100,
+                "redact": 100,
+                "events": { "fr.linagora.twalk.owner_device.handover.held": 0 },
+            },
+        });
+        let response = self
+            .send_json(
+                reqwest::Method::POST,
+                "/_matrix/client/v3/createRoom",
+                Some(&body),
+                "createRoom (handover)",
+            )
+            .await?;
+        extract_str(&response, "room_id", "createRoom (handover)")
+    }
+
+    /// Sends a to-device event to **every** device of one account.
+    ///
+    /// `*` rather than a device id: what the sender is addressing is the account's
+    /// Sensor, whose device is minted by its own login and is not the test's to
+    /// know. The spec gives the wildcard for exactly this.
+    pub async fn send_to_device(
+        &self,
+        event_type: &str,
+        to_user_id: &str,
+        content: Value,
+    ) -> Result<()> {
+        let txn = format!(
+            "twalk-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        self.send_json(
+            reqwest::Method::PUT,
+            &format!(
+                "/_matrix/client/v3/sendToDevice/{}/{}",
+                esc(event_type),
+                esc(&txn)
+            ),
+            Some(&serde_json::json!({
+                "messages": { to_user_id: { "*": content } },
+            })),
+            "sendToDevice",
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn invite(&self, room_id: &str, invitee_user_id: &str) -> Result<()> {
         self.send_json(
             reqwest::Method::POST,
