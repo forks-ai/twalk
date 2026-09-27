@@ -26,7 +26,12 @@
 //! run fast. Set TWALK_DEPLOY_TEST_TEARDOWN=1 to drop both at the end of a
 //! passing run instead, leaving the Docker daemon as the test found it —
 //! by hand, `docker compose -p <stack> down -v` followed by
-//! `docker image rm twalk/sensor:<stack>`.
+//! `docker image rm twalk/sensor:<stack>`. All **four** locally built images
+//! the compose file has are tagged per stack — the Sensor's, the Gateway's, and
+//! since #163 the Hermes runtime's and the persona's — because this suite
+//! builds with no service names and so builds every one of them; under the
+//! compose file's own `:local` fallback it would have been overwriting the tags
+//! an operator's stack runs.
 //!
 //! The credentials below are throwaway constants for the local, ephemeral
 //! deploy-test stack (same category as the test-bot passwords) — the env
@@ -89,6 +94,69 @@ fn gateway_image() -> String {
     format!("twalk/companion-gateway:{}", deploy_stack())
 }
 
+/// [`sensor_image`] for the two images #158 added to the compose file: the
+/// Hermes runtime and the persona image its one-shot service builds (#163).
+///
+/// This suite runs `docker compose build` with no service names, so it builds
+/// **every** locally built image in that file — and until this ticket it built
+/// these two under the shared `:local` tags the compose file falls back to,
+/// which is what #38 exists to prevent. Two worktrees racing for one tag, and a
+/// run beside a live reference deployment rebuilding the image that
+/// deployment's Hermes will start the next time it restarts a persona.
+///
+/// `HERMES_PERSONAS` is unset here, so `hermes` idles and hosts nothing: the
+/// tags have to be this stack's, and nothing else has to be kept in step with
+/// them.
+fn hermes_image() -> String {
+    format!("twalk/hermes:{}", deploy_stack())
+}
+
+/// [`hermes_image`] for the persona image the stack's one-shot service builds.
+fn persona_image() -> String {
+    format!("twalk/persona-assistant:{}", deploy_stack())
+}
+
+/// The tags this suite builds under, asserted the cheap way the ticket asks for
+/// — by what the suite decides, never by inspecting the daemon (#163).
+///
+/// `:local` is the compose file's own fallback and what an **operator's** stack
+/// runs. A suite that built under it would overwrite the image that stack's
+/// Hermes starts the next time it restarts a persona, and two worktrees would
+/// race for one tag (#38).
+///
+/// The Sensor's and the Gateway's tags are overridable, as they are for an
+/// operator, so they are only asserted when nothing overrode them: a run that
+/// passed a tag in chose it, and this test has no business second-guessing it.
+/// The two added here take no override, so they are asserted unconditionally.
+#[test]
+fn every_image_this_suite_builds_is_tagged_per_stack_and_never_local() {
+    let stack = deploy_stack();
+    let per_stack = format!(":{stack}");
+
+    for image in [hermes_image(), persona_image()] {
+        assert!(
+            image.ends_with(&per_stack),
+            "{image} must carry this stack's tag, not the compose file's :local"
+        );
+    }
+
+    for (variable, image) in [
+        ("TWALK_SENSOR_IMAGE", sensor_image()),
+        ("TWALK_GATEWAY_IMAGE", gateway_image()),
+    ] {
+        if std::env::var(variable)
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        assert!(
+            image.ends_with(&per_stack),
+            "{image} must carry this stack's tag when {variable} did not choose one"
+        );
+    }
+}
+
 fn deploy_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../deploy/docker-compose")
 }
@@ -109,6 +177,8 @@ fn write_env_file() -> Result<PathBuf> {
     let sensor_image = sensor_image();
     let gateway_port = gateway_port();
     let gateway_image = gateway_image();
+    let hermes_image = hermes_image();
+    let persona_image = persona_image();
     let contents = format!(
         "MATRIX_DOMAIN={SERVER_NAME}\n\
          MATRIX_HTTP_PORT={synapse_port}\n\
@@ -123,7 +193,9 @@ fn write_env_file() -> Result<PathBuf> {
          NATS_PORT={nats_port}\n\
          TWALK_SENSOR_IMAGE={sensor_image}\n\
          GATEWAY_HTTP_PORT={gateway_port}\n\
-         TWALK_GATEWAY_IMAGE={gateway_image}\n"
+         TWALK_GATEWAY_IMAGE={gateway_image}\n\
+         TWALK_HERMES_IMAGE={hermes_image}\n\
+         TWALK_PERSONA_IMAGE={persona_image}\n"
     );
     std::fs::write(&path, contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
@@ -168,7 +240,12 @@ fn teardown_requested() -> bool {
 /// volumes, its per-stack images, and the generated env file.
 async fn teardown(env_file: &Path) -> Result<()> {
     compose(env_file, &["down", "-v"], "down").await?;
-    for image in [sensor_image(), gateway_image()] {
+    for image in [
+        sensor_image(),
+        gateway_image(),
+        hermes_image(),
+        persona_image(),
+    ] {
         let output = Command::new("docker")
             .args(["image", "rm", &image])
             .output()
