@@ -28,6 +28,7 @@ import { expect, test, type BrowserContext, type Page, type Request } from '@pla
 
 import { decodeRecoveryKey } from '../../src/lib/recovery/key';
 import { CRYPTO_STORE_NAME } from '../../src/lib/crypto/store';
+import { ACTING_DEVICE_NAME } from '../../src/lib/matrix/credential';
 import {
 	handoverAlias,
 	HANDOVER_ROOM_TYPE,
@@ -299,6 +300,21 @@ test.describe.serial('the bootstrap journey', () => {
 		const reported = page.getByTestId('handover');
 		await expect(reported).toHaveAttribute('data-kind', 'sensor-did-not-join');
 		await expect(page.getByTestId('handover-problem')).toBeVisible();
+
+		// And **no device was created for nothing** (#228). The credential step
+		// runs only on `ready`, because that outcome is the one that says this
+		// browser's machine can enumerate the Sensor's devices — without it the
+		// encrypted send goes out empty and resolves successfully, and the cost of
+		// finding that out later is a `twalk` device in the user's own device list
+		// that never worked and that only they can remove.
+		await expect(page.getByTestId('credential')).toHaveCount(0);
+		const devices = await fetch(`${stack.synapseUrl}/_matrix/client/v3/devices`, {
+			headers: { authorization: `Bearer ${await ownerToken()}` }
+		});
+		const named = ((await devices.json()) as {
+			devices: { display_name?: string }[];
+		}).devices.filter((device) => device.display_name === ACTING_DEVICE_NAME);
+		expect(named, 'no acting device exists on an account whose Sensor never joined').toEqual([]);
 	});
 
 	/**
