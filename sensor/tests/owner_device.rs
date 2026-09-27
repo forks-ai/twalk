@@ -1087,17 +1087,21 @@ async fn a_handover_makes_the_deployment_reply_as_the_owner_with_no_restart() ->
     // And it is a device the owner can see and revoke, under the name the
     // Companion gives it: that is ADR 0025's whole mitigation for a long-lived
     // credential at rest, and a mitigation nobody can find is not one.
+    // The device **this** run created, and not a count: the owner's account on a
+    // shared test homeserver carries every device every previous run minted, and
+    // "one device named twalk" is a property of a deployment rather than of this
+    // stack. (The same accumulation is what made `handover_rooms` read a stale
+    // offer.)
     let listed = acting.devices().await?;
-    let named: Vec<&Value> = listed
+    let named = listed
         .iter()
-        .filter(|device| device["display_name"].as_str() == Some("twalk"))
-        .collect();
+        .find(|device| device["device_id"].as_str() == Some(acting.device_id()))
+        .context("the device this run created is in the owner's device list")?;
     assert_eq!(
-        named.len(),
-        1,
-        "exactly one device named twalk is in the owner's device list: {listed:?}"
+        named["display_name"].as_str(),
+        Some("twalk"),
+        "under the name the Companion gives it, which is the name they revoke: {named}"
     );
-    assert_eq!(named[0]["device_id"].as_str(), Some(acting.device_id()));
 
     // It is on the volume, readable by nobody else, so the next restart still has
     // it — an acknowledgement for a credential held only in memory would be a
