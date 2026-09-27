@@ -1638,25 +1638,58 @@ async fn bring_up_owner_device(
         return Ok(None);
     };
     let (access_token, device_id) = credential;
-    let client = open_acting_device(
+    let handed_over = held.is_some();
+    let opened = open_acting_device(
         &config.homeserver_url,
         config.state_dir.as_deref(),
         owner.matrix_id(),
         access_token,
         device_id,
-        if held.is_some() {
+        if handed_over {
             "the credential the owner's browser handed over"
         } else {
             "SENSOR_OWNER_DEVICE_ACCESS_TOKEN"
         },
         false,
     )
-    .await?;
+    .await;
+    let client = match opened {
+        Ok(client) => client,
+        // A **configured** credential that cannot be used is fatal, as it has
+        // always been: it is an operator's to fix, and a Sensor that started
+        // anyway would act as nobody while its configuration says otherwise.
+        Err(error) if !handed_over => return Err(error),
+        // A **handed-over** one is not, and the reason is a deadlock. The owner
+        // revokes the device from their phone (which is ADR 0025's whole
+        // mitigation and #229's whole subject) and restarts the deployment: the
+        // credential is still on the volume, the homeserver no longer knows it,
+        // and a Sensor that refused to start over that could not be re-onboarded
+        // — the remedy needs a running Sensor to accept the new handover. So the
+        // deployment starts, observes and publishes exactly as it did, and says
+        // what is true: it was given a device and cannot act through it.
+        Err(error) => {
+            metrics.record_owner_device_present();
+            metrics.record_owner_device_credential_gone();
+            error!(
+                device_id,
+                %error,
+                "the device the owner's browser handed over cannot be used — revoked, or the \
+                 homeserver would not answer for it. This deployment observes and publishes as \
+                 before and posts approved replies as its own account, which a bridge does not \
+                 relay: twalk_sensor_owner_device_credential_gone is 1 and every reply to a \
+                 bridged conversation is refused rather than silently delivered to nobody. The \
+                 remedy is the owner's: onboard again in the Companion, which hands over a new \
+                 device without a restart. The credential is kept, in case the homeserver was \
+                 merely away"
+            );
+            return Ok(None);
+        }
+    };
     metrics.record_owner_device_present();
     info!(
         acting_as = owner.matrix_id(),
         device_id,
-        handed_over = held.is_some(),
+        handed_over,
         "holding a device of the owner's own account: approved replies are posted by it, so a \
          bridge relays them (ADR 0025). It observes nothing, publishes nothing, and reads no \
          history — no cross-signing and no recovery key (ADR 0034)"

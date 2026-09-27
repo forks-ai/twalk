@@ -1153,3 +1153,91 @@ async fn a_handover_makes_the_deployment_reply_as_the_owner_with_no_restart() ->
     sensor.stop().await;
     Ok(())
 }
+
+/// A handed-over credential the homeserver no longer knows does not stop the
+/// Sensor from starting — and the deadlock that would be if it did (#228, #229).
+///
+/// The owner revokes the device from their phone, which is ADR 0025's whole
+/// mitigation, and the deployment is restarted. The credential is still on the
+/// volume and the homeserver refuses it. A Sensor that treated that the way it
+/// treats a **configured** credential it cannot use — refusing to start — could
+/// never be re-onboarded, because the remedy needs a running Sensor to accept the
+/// new handover: the deployment would be down until somebody with shell access
+/// deleted a file.
+///
+/// So it starts, says what is true, and shows it on `/metrics` as the state #229
+/// named: a device was given and nothing can act through it.
+#[tokio::test]
+async fn a_handed_over_credential_the_homeserver_refuses_does_not_stop_the_sensor() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+
+    // A real device of the owner's, revoked the way the owner revokes one.
+    let revoked = Bot::login("owner").await?;
+    let device_id = revoked.device_id().to_owned();
+    let credential = json!({
+        "user_id": OWNER,
+        "device_id": device_id,
+        "access_token": revoked.access_token(),
+    });
+    revoked.revoke_this_device().await?;
+
+    let state_dir = fresh_state_dir("handover-revoked");
+    std::fs::create_dir_all(&state_dir)?;
+    std::fs::write(
+        state_dir.join("owner-device.json"),
+        serde_json::to_vec(&credential)?,
+    )?;
+    let metrics_addr = harness::free_loopback_addr()?;
+    let mut sensor = SensorProc::start(&sensor_env_with(&[
+        ("SENSOR_OWNER", OWNER),
+        ("SENSOR_BRIDGE_BOTS", BRIDGE_BOT),
+        ("SENSOR_STATE_DIR", &state_dir.to_string_lossy()),
+        ("SENSOR_METRICS_LISTEN", &metrics_addr),
+    ]))?;
+
+    poll_until(
+        || async {
+            let logs = sensor.logs().await;
+            (logs
+                .iter()
+                .any(|line| line.contains("cannot be used") && line.contains("onboard again"))
+                && logs.iter().any(|line| line.contains("sensor running")))
+            .then_some(())
+        },
+        "the Sensor naming the dead credential, the remedy, and running anyway",
+    )
+    .await?;
+    assert!(
+        sensor.is_running(),
+        "a revoked handover must not take the whole deployment down: it observes and publishes as \
+         before"
+    );
+
+    // And the gauge says which of the two situations this is: a device was given
+    // and cannot act, not a deployment that was never given one.
+    let body = wait_up_to(Duration::from_secs(30), || async {
+        let body = reqwest::get(format!("http://{metrics_addr}/metrics"))
+            .await
+            .ok()?
+            .text()
+            .await
+            .ok()?;
+        body.contains("twalk_sensor_owner_device_credential_gone 1")
+            .then_some(body)
+    })
+    .await
+    .context("the credential-gone gauge is 1")?;
+    assert!(
+        body.contains("twalk_sensor_handovers_held_total 0"),
+        "{body}"
+    );
+
+    // The credential is kept: the homeserver may have been merely away, and
+    // deleting the owner's credential over one failed request is not this
+    // process's decision to make.
+    assert!(state_dir.join("owner-device.json").exists());
+
+    sensor.stop().await;
+    Ok(())
+}
