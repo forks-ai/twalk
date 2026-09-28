@@ -132,50 +132,61 @@ impl StubGateway {
         format!("http://{}", self.addr)
     }
 
-    /// Replaces the document served from now on.
     /// The consent snapshot this Gateway serves from now on (#312): the persona
     /// entries the runtime reads its activation from, and the stream position they
     /// reflect.
     pub fn set_snapshot(&self, snapshot: Value) {
-        self.state
-            .lock()
-            .expect("the stub Gateway mutex is never poisoned")
-            .snapshot = Some(snapshot);
+        self.lock().snapshot = Some(snapshot);
     }
 
-    /// One snapshot document, in `openapi.yaml`'s shape: `entries` of
-    /// (subject, connection) with the state in force, and the JetStream sequence
-    /// they reflect.
+    /// One snapshot document, in `openapi.yaml`'s `ConsentSnapshot` shape — every
+    /// required member, `additionalProperties: false` respected — because a stub
+    /// serving a document the real Gateway could not serve proves nothing about the
+    /// runtime that reads it. In particular it carries **both** positions, so a
+    /// runtime that computed `stream_sequence + 1` instead of reading
+    /// `next_stream_sequence` would be caught by a test rather than by a deployment.
     ///
-    /// `granted` on each of `networks`, which is what an activation the owner took
-    /// months ago looks like once the decision itself has left the stream.
-    pub fn snapshot_document(persona_id: &str, networks: &[&str], stream_sequence: u64) -> Value {
+    /// `state` on each of `networks`, at the journal position `decided_at_sequence`:
+    /// what an activation the owner took months ago looks like once the decision
+    /// itself has left the stream.
+    pub fn snapshot_document(
+        persona_id: &str,
+        networks: &[(&str, &str)],
+        decided_at_sequence: u64,
+        stream_sequence: u64,
+    ) -> Value {
         json!({
+            "stream": "twalk",
+            "subject": "twalk.consent.state.changed.v1",
+            "stream_sequence": stream_sequence,
+            "next_stream_sequence": stream_sequence + 1,
+            "decision_sequence": decided_at_sequence,
+            "owner_identities": ["@michel:test.twalk"],
+            "connections": networks
+                .iter()
+                .map(|(network, _)| json!({ "id": network, "kind": network }))
+                .collect::<Vec<_>>(),
             "entries": networks
                 .iter()
-                .map(|network| json!({
+                .map(|(network, state)| json!({
                     "subject": { "type": "persona", "id": persona_id },
                     "connection": network,
                     "network": network,
-                    "state": "granted",
+                    "state": state,
                     "decided_at": "2026-01-05T09:00:00Z",
-                    "decision_sequence": 1
+                    "decision_sequence": decided_at_sequence
                 }))
                 .collect::<Vec<_>>(),
-            "owner_identities": [],
-            "stream_sequence": stream_sequence,
         })
     }
 
     /// How many authenticated reads of `/api/consent/snapshot` this Gateway has
     /// served (#312): one per runtime start, and never a poll.
     pub fn snapshot_reads(&self) -> usize {
-        self.state
-            .lock()
-            .expect("the stub Gateway mutex is never poisoned")
-            .snapshot_reads
+        self.lock().snapshot_reads
     }
 
+    /// Replaces the runtime-settings document served from now on.
     pub fn set_document(&self, document: Value) {
         self.lock().document = Some(document);
     }
