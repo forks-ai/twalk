@@ -719,8 +719,12 @@ async fn activating_a_persona_is_a_decision_on_this_same_write_path() -> Result<
     assert_eq!(entries.len(), 2, "one entry per network: {state}");
     assert!(entries.iter().all(|entry| entry["state"] == "granted"));
 
-    // And the consumer snapshot leaves it out: a persona is not consent state
-    // a Sensor labels senders by (ticket #50).
+    // And the consumer snapshot carries it (#312). It used to be excluded, on a
+    // premise that is still true — a persona is not consent state a Sensor labels
+    // senders by (ticket #50) — and the exclusion left the Hermes runtime reading
+    // its activations off a stream that forgets them after ninety days, so a
+    // runtime restarted later paused every persona in silence. The rule belongs to
+    // the consumer it is about: `twalk-consent-cache` refuses such an entry itself.
     let snapshot = reqwest::Client::new()
         .get(format!("{}/api/consent/snapshot", fixture.base))
         .header(
@@ -732,13 +736,23 @@ async fn activating_a_persona_is_a_decision_on_this_same_write_path() -> Result<
         .context("the snapshot did not answer")?
         .json::<Value>()
         .await?;
+    let in_snapshot: Vec<&Value> = snapshot["entries"]
+        .as_array()
+        .context("the snapshot names its entries")?
+        .iter()
+        .filter(|entry| entry["subject"]["id"].as_str() == Some(persona.as_str()))
+        .collect();
+    assert_eq!(
+        in_snapshot.len(),
+        2,
+        "one entry per network the activation named, as the state route reports them: {snapshot}"
+    );
+    assert!(in_snapshot
+        .iter()
+        .all(|entry| entry["subject"]["type"] == "persona" && entry["state"] == "granted"));
     assert!(
-        !snapshot["entries"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .any(|entry| entry["subject"]["type"] == "persona"),
-        "no persona reaches the snapshot: {snapshot}"
+        snapshot["stream_sequence"].as_u64().is_some(),
+        "and the position the runtime follows from: {snapshot}"
     );
 
     // Pausing it is the same call with `revoked`. It is starved, not stopped:

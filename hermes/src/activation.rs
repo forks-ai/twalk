@@ -4,12 +4,25 @@
 //!
 //! Two things follow from that ADR, and they are the whole of this module.
 //!
-//! **The runtime learns activation from the bus, not from an API.** It
-//! follows `consent.state.changed` from the beginning of the stream, keeps
-//! the last decision per (persona, network), and needs no snapshot: persona
-//! decisions are a handful over a deployment's life, unlike a contact's.
-//! Nothing is activated by default — a persona nobody decided about is
-//! paused, because activation never spreads on its own.
+//! **The runtime learns activation from the Companion Gateway's snapshot, then
+//! follows the bus.** It reads `GET /api/consent/snapshot` with its service
+//! token, applies the `persona` entries it carries, and follows
+//! `consent.state.changed` from the sequence that document names — the shape the
+//! Sensor has used for the same question since ADR 0010. Nothing is activated by
+//! default: a persona nobody decided about is paused, because activation never
+//! spreads on its own.
+//!
+//! It used to replay the stream from the beginning and read no snapshot, on the
+//! argument that persona decisions are a handful over a deployment's life. That
+//! argument was about *volume* and the defect was about *time* (#312): ADR 0037
+//! gave the stream a ninety-day retention, so an activation decided before that
+//! window is gone from the stream, and a runtime restarted afterwards saw no
+//! activation at all — every persona paused, and nothing saying why. A silence
+//! that looks like a working deployment is this project's signature failure, and
+//! here it was manufactured by a retention policy that is otherwise right. The
+//! replay is kept as the **fallback** for a Gateway that does not answer, which
+//! is the Sensor's shape too: a deployment with no Gateway configured has no
+//! snapshot to read and the stream is all there is.
 //!
 //! **A paused persona still runs, and receives nothing.** So the thing
 //! activation moves cannot be the process. It is the persona's durable
@@ -95,6 +108,70 @@ impl PersonaDecision {
     }
 }
 
+/// The persona decisions one Companion Gateway snapshot carries, and the stream
+/// position they reflect (#312).
+///
+/// The document's own shape is `companion-gateway/openapi.yaml`'s `ConsentState`
+/// plus a `stream_sequence`: one entry per (subject, connection), each carrying
+/// the connection's `network` and the state in force. A persona granted on two
+/// networks is therefore **two entries**, which is exactly what
+/// [`Activation::apply`] already folds — so each entry becomes one decision about
+/// one network and nothing here needs to group them.
+///
+/// Read here rather than through `twalk-consent-cache`, which parses the same
+/// document for the Sensor: that crate **refuses** a `persona` entry on purpose
+/// (`Unusable::NotAboutASender`), because its job is to label senders. Reading the
+/// entries it refuses through it would be reading against its grain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub decisions: Vec<PersonaDecision>,
+    /// The JetStream sequence the entries reflect. The stream is followed from
+    /// the one after it, so no decision is applied twice and none is missed.
+    pub stream_sequence: u64,
+}
+
+impl Snapshot {
+    /// Reads a snapshot document. Never fails: an entry this runtime cannot read
+    /// is left out and the rest is applied, because a document that lost one
+    /// member is not a reason to pause every persona — which is the defect this
+    /// whole path exists to close. `stream_sequence` absent reads as `0`, which
+    /// means "follow the whole stream" and is what a Gateway that has published
+    /// nothing yet answers.
+    pub fn read(document: &Value) -> Self {
+        let stream_sequence = document
+            .get("stream_sequence")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let decisions = document
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(|entries| entries.iter().filter_map(Self::decision).collect())
+            .unwrap_or_default();
+        Self {
+            decisions,
+            stream_sequence,
+        }
+    }
+
+    /// One `ConsentStateEntry` as a decision about one persona on one network, or
+    /// `None` when it is about anything else.
+    fn decision(entry: &Value) -> Option<PersonaDecision> {
+        let subject = entry.get("subject")?;
+        if subject.get("type").and_then(Value::as_str)? != "persona" {
+            return None;
+        }
+        let network = entry
+            .get("network")
+            .and_then(Value::as_str)
+            .filter(|network| !network.is_empty())?;
+        Some(PersonaDecision {
+            persona_id: subject.get("id").and_then(Value::as_str)?.to_owned(),
+            networks: vec![network.to_owned()],
+            new_state: entry.get("state").and_then(Value::as_str)?.to_owned(),
+        })
+    }
+}
+
 /// What the runtime has learned from the consent stream so far: the last
 /// decision per (persona, network).
 #[derive(Debug, Default, Clone)]
@@ -174,6 +251,111 @@ mod tests {
                 "occurred_at": "2026-09-17T10:05:00Z",
             }
         })
+    }
+
+    /// The snapshot document the runtime now starts from (#312).
+    #[test]
+    fn a_snapshot_is_read_as_one_decision_per_network_and_the_rest_is_left_out() {
+        let document = json!({
+            "stream_sequence": 4_812,
+            "owner_identities": ["@michel:example.com"],
+            "entries": [
+                // A persona granted on two networks: two entries, because the
+                // document is keyed by (subject, connection).
+                {
+                    "subject": { "type": "persona", "id": "assistant" },
+                    "connection": "whatsapp",
+                    "network": "whatsapp",
+                    "state": "granted",
+                    "decided_at": "2026-06-01T09:00:00Z",
+                    "decision_sequence": 12
+                },
+                {
+                    "subject": { "type": "persona", "id": "assistant" },
+                    "connection": "signal",
+                    "network": "signal",
+                    "state": "revoked",
+                    "decided_at": "2026-06-02T09:00:00Z",
+                    "decision_sequence": 13
+                },
+                // Everything else in the same document: a contact's decision and
+                // a network default, which are the Sensor's business and not this
+                // runtime's.
+                {
+                    "subject": { "type": "contact", "id": "@alice:example.org" },
+                    "connection": "whatsapp",
+                    "network": "whatsapp",
+                    "state": "granted",
+                    "decided_at": "2026-06-03T09:00:00Z",
+                    "decision_sequence": 14
+                },
+                {
+                    "subject": { "type": "network", "id": "signal" },
+                    "connection": "signal",
+                    "network": "signal",
+                    "state": "revoked",
+                    "decided_at": "2026-06-04T09:00:00Z",
+                    "decision_sequence": 15
+                },
+            ]
+        });
+
+        let snapshot = Snapshot::read(&document);
+
+        assert_eq!(snapshot.stream_sequence, 4_812);
+        assert_eq!(
+            snapshot.decisions,
+            vec![
+                PersonaDecision {
+                    persona_id: "assistant".to_owned(),
+                    networks: vec!["whatsapp".to_owned()],
+                    new_state: "granted".to_owned(),
+                },
+                PersonaDecision {
+                    persona_id: "assistant".to_owned(),
+                    networks: vec!["signal".to_owned()],
+                    new_state: "revoked".to_owned(),
+                },
+            ]
+        );
+
+        // And applied, they say what an activation decided months ago says: this
+        // persona reads WhatsApp and does not read Signal — which is the whole
+        // point, since the decisions themselves are long gone from the stream.
+        let mut activation = Activation::new();
+        for decision in &snapshot.decisions {
+            activation.apply(decision);
+        }
+        assert!(activation.is_active("assistant"));
+        assert_eq!(activation.granted_networks("assistant"), ["whatsapp"]);
+    }
+
+    /// A document that lost a member pauses nothing (#312).
+    #[test]
+    fn an_unreadable_entry_is_left_out_and_the_rest_is_applied() {
+        let snapshot = Snapshot::read(&json!({
+            "entries": [
+                { "subject": { "type": "persona" }, "network": "whatsapp", "state": "granted" },
+                { "subject": { "type": "persona", "id": "assistant" }, "state": "granted" },
+                { "subject": { "type": "persona", "id": "assistant" }, "network": "", "state": "granted" },
+                { "subject": { "type": "persona", "id": "scribe" }, "network": "signal", "state": "granted" },
+            ]
+        }));
+
+        assert_eq!(
+            snapshot.decisions,
+            vec![PersonaDecision {
+                persona_id: "scribe".to_owned(),
+                networks: vec!["signal".to_owned()],
+                new_state: "granted".to_owned(),
+            }],
+            "the readable entry is applied and the rest left out: pausing every \
+             persona over one missing member is the defect this path closes"
+        );
+        // No position named is "follow the whole stream", which is what a Gateway
+        // that has published nothing yet answers.
+        assert_eq!(snapshot.stream_sequence, 0);
+        assert_eq!(Snapshot::read(&json!({})).decisions, Vec::new());
     }
 
     #[test]

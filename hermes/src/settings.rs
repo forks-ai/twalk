@@ -84,6 +84,10 @@ use crate::config::{Config, LlmConfig, USER_LANGUAGES};
 /// table (`companion-gateway/src/settings_http.rs`).
 pub const RUNTIME_SETTINGS_PATH: &str = "/api/settings/runtime";
 
+/// The consent snapshot, read with the same service token (#312): where persona
+/// activation comes from, and the stream position to follow from afterwards.
+pub const CONSENT_SNAPSHOT_PATH: &str = "/api/consent/snapshot";
+
 /// How long one read is given. Short: a slow Gateway must not hold a
 /// deployment's startup, and the answer is a few hundred bytes from a service
 /// on the same host.
@@ -359,6 +363,9 @@ impl GatewayRuntimeSettings {
 pub struct GatewaySettings {
     client: reqwest::Client,
     url: String,
+    /// The consent snapshot's URL on the same origin (#312), built once for the
+    /// same reason the settings' is: what is logged is a URL and never a token.
+    snapshot_url: String,
     service_token: String,
 }
 
@@ -370,9 +377,11 @@ impl GatewaySettings {
             .timeout(FETCH_TIMEOUT)
             .build()
             .context("failed to build the Companion Gateway HTTP client")?;
+        let origin = base_url.trim_end_matches('/');
         Ok(Self {
             client,
-            url: format!("{}{RUNTIME_SETTINGS_PATH}", base_url.trim_end_matches('/')),
+            url: format!("{origin}{RUNTIME_SETTINGS_PATH}"),
+            snapshot_url: format!("{origin}{CONSENT_SNAPSHOT_PATH}"),
             service_token: service_token.to_owned(),
         })
     }
@@ -391,6 +400,48 @@ impl GatewaySettings {
     /// Where the settings are read from — safe to log, unlike the token.
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Where persona activation is read from — safe to log too.
+    pub fn snapshot_url(&self) -> &str {
+        &self.snapshot_url
+    }
+
+    /// The consent snapshot, as the document it is (#312).
+    ///
+    /// Parsed by the caller (`activation::Snapshot::read`), not here: this module
+    /// owns the credential and the transport, and what a snapshot means to this
+    /// runtime is activation's business. Every failure is an error with the URL and
+    /// the Gateway's own status in it and never the token — the caller falls back
+    /// to replaying the stream and says so, because a runtime that refused to start
+    /// over an unanswering Gateway would be a deployment down for a document it can
+    /// do without.
+    pub async fn fetch_consent_snapshot(&self) -> Result<Value> {
+        let response = self
+            .client
+            .get(&self.snapshot_url)
+            .bearer_auth(&self.service_token)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "the Companion Gateway at {} is unreachable",
+                    self.snapshot_url
+                )
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            let detail: String = detail.chars().take(500).collect();
+            anyhow::bail!(
+                "the Companion Gateway at {} answered {status} to the consent snapshot: {detail}",
+                self.snapshot_url
+            );
+        }
+        response
+            .json()
+            .await
+            .context("the Companion Gateway's consent snapshot is not JSON")
     }
 
     pub async fn fetch(&self) -> Result<GatewayRuntimeSettings> {
