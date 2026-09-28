@@ -70,6 +70,24 @@ impl Bus {
         Ok(())
     }
 
+    /// Purges a stream of everything published on it so far, keeping the stream
+    /// and its sequence numbering.
+    ///
+    /// What a retention policy does over time, in one call (#312): the events are
+    /// gone and the next one published keeps counting from where the last left off,
+    /// which is precisely the state ADR 0037's ninety days leave a stream in — and
+    /// the only way a test can reach it without waiting ninety days.
+    pub async fn purge_stream(&self, name: &str) -> Result<()> {
+        self.jetstream
+            .get_stream(name)
+            .await
+            .with_context(|| format!("failed to get the stream {name} to purge it"))?
+            .purge()
+            .await
+            .with_context(|| format!("failed to purge the stream {name}"))?;
+        Ok(())
+    }
+
     pub async fn publish(&self, subject: &str, payload: &Value) -> Result<()> {
         let ack = self
             .jetstream

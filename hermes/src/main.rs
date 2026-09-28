@@ -39,7 +39,8 @@ use futures::StreamExt;
 use tokio::sync::{watch, Mutex};
 use tracing::{error, info, warn};
 use twalk_hermes::activation::{
-    paused_subject, Activation, PersonaDecision, CONSENT_CHANGED_TYPE, MESSAGE_RECEIVED_TYPE,
+    paused_subject, Activation, PersonaDecision, ReadFrom, Snapshot, CONSENT_CHANGED_TYPE,
+    MESSAGE_RECEIVED_TYPE,
 };
 use twalk_hermes::config::{Config, PersonaSpec};
 use twalk_hermes::environment::{passthrough, persona_environment};
@@ -110,13 +111,24 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to ensure the stream {}", config.stream))?;
 
-    // Activation, from the beginning of the stream. This happens before any
-    // persona is started, so a paused persona is never briefly reading.
+    // Activation, from the Companion Gateway's snapshot and then from the stream
+    // after it (#312). This happens before any persona is started, so a paused
+    // persona is never briefly reading.
+    //
+    // The snapshot first because the stream forgets: ADR 0037 gives it ninety
+    // days, and an activation is decided once and then stands for as long as the
+    // owner leaves it. A runtime that replayed only the stream saw nothing at all
+    // after that window and paused every persona in silence.
+    let activation = Arc::new(Mutex::new(Activation::new()));
+    let from_snapshot = read_activation_snapshot(gateway.as_ref(), &activation).await;
     let consent_subject = config.subject(CONSENT_CHANGED_TYPE);
     let consent_consumer = stream
         .create_consumer(pull::Config {
             filter_subject: consent_subject.clone(),
-            deliver_policy: DeliverPolicy::All,
+            deliver_policy: match from_snapshot.follow_from() {
+                Some(start_sequence) => DeliverPolicy::ByStartSequence { start_sequence },
+                None => DeliverPolicy::All,
+            },
             ack_policy: AckPolicy::None,
             inactive_threshold: EPHEMERAL_INACTIVE_THRESHOLD,
             ..Default::default()
@@ -124,12 +136,14 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to follow {consent_subject}"))?;
 
-    let activation = Arc::new(Mutex::new(Activation::new()));
     let replayed = replay_activation(&consent_consumer, &activation).await?;
     info!(
-        decisions = replayed,
+        from_snapshot = from_snapshot.decisions(),
+        from_stream = replayed,
+        read_from = from_snapshot.source(),
+        following = from_snapshot.following_from(),
         subject = %consent_subject,
-        "persona activation replayed from the beginning of the stream"
+        "persona activation read"
     );
 
     let inbound_subject = config.subject(MESSAGE_RECEIVED_TYPE);
@@ -143,21 +157,47 @@ async fn main() -> Result<()> {
     let (settings_tx, settings_rx) = watch::channel(resolution.settings.clone().map(Arc::new));
     let mut supervisors = Vec::with_capacity(config.personas.len());
     for persona in &config.personas {
-        let (active, networks) = {
+        let (active, decided, networks) = {
             let activation = activation.lock().await;
             (
                 activation.is_active(&persona.id),
+                activation.decided_about(&persona.id),
                 activation.granted_networks(&persona.id),
             )
         };
         ensure_persona_consumer(&stream, &config, persona, active).await?;
-        info!(
-            persona = %persona.id,
-            active,
-            ?networks,
-            consumer = %persona.consumer_name(),
-            "persona activation"
-        );
+        if active {
+            info!(
+                persona = %persona.id,
+                ?networks,
+                consumer = %persona.consumer_name(),
+                "persona activation"
+            );
+        } else if decided {
+            // Paused because the owner paused it, which is a decision and not an
+            // absence (ADR 0010). Telling them to activate it here would be
+            // telling them to undo what they just did.
+            info!(
+                persona = %persona.id,
+                consumer = %persona.consumer_name(),
+                read_from = from_snapshot.source(),
+                "persona paused: the owner revoked it on every network it was activated on. \
+                 Activating it again in the Companion is what starts it reading"
+            );
+        } else {
+            // Why, and not only that it is paused (#312). A persona nobody decided
+            // about and a persona whose activation this runtime failed to find are
+            // the same silence from the outside, and they were the same line.
+            info!(
+                persona = %persona.id,
+                consumer = %persona.consumer_name(),
+                read_from = from_snapshot.source(),
+                "persona paused: no decision about it in {}, and none on the stream from {}. \
+                 Activate it in the Companion; nothing is activated by default (ADR 0013)",
+                from_snapshot.source(),
+                from_snapshot.following_from()
+            );
+        }
         supervisors.push(tokio::spawn(supervise(
             persona.clone(),
             Arc::clone(&config),
@@ -433,6 +473,67 @@ async fn ensure_persona_consumer(
         .await
         .with_context(|| format!("failed to ensure the consumer {name} on {filter_subject}"))?;
     Ok(())
+}
+
+/// Reads persona activation from the Companion Gateway's consent snapshot, the way
+/// the Sensor reads consent state (ADR 0010, #312).
+///
+/// Never fails the startup. A Gateway that does not answer — or a deployment that
+/// configured none — leaves the runtime replaying the stream from the beginning,
+/// which is what it always did, with a `warn` naming the URL and what it fell back
+/// to. That is the Sensor's own shape, and the reason is the same: a runtime that
+/// refused to start over a document it can do without would be a deployment down
+/// for a Gateway restart.
+async fn read_activation_snapshot(
+    gateway: Option<&GatewaySettings>,
+    activation: &Arc<Mutex<Activation>>,
+) -> ReadFrom {
+    let Some(gateway) = gateway else {
+        warn!(
+            "no Companion Gateway configured (HERMES_GATEWAY_URL): persona activation is replayed \
+             from the stream alone, so an activation older than the bus's retention (ADR 0037) is \
+             not seen and its persona runs paused (#312)"
+        );
+        return ReadFrom::TheStreamAlone;
+    };
+    let document = match gateway.fetch_consent_snapshot().await {
+        Ok(document) => document,
+        Err(error) => {
+            warn!(
+                url = gateway.snapshot_url(),
+                error = format!("{error:#}"),
+                "the Companion Gateway's consent snapshot could not be read: replaying persona \
+                 activation from the stream alone instead, so an activation older than the bus's \
+                 retention (ADR 0037) is not seen and its persona runs paused (#312)"
+            );
+            return ReadFrom::TheStreamAlone;
+        }
+    };
+    let Some(snapshot) = Snapshot::read(&document) else {
+        warn!(
+            url = gateway.snapshot_url(),
+            "the Companion Gateway's consent snapshot names no next_stream_sequence: replaying \
+             persona activation from the stream alone instead. Reading it without that position \
+             would mean applying every decision the stream still holds on top of entries that \
+             already reflect them, which is the double-apply the contract spells the field out to \
+             prevent"
+        );
+        return ReadFrom::TheStreamAlone;
+    };
+    let mut held = activation.lock().await;
+    for decision in &snapshot.decisions {
+        held.apply(decision);
+    }
+    info!(
+        url = gateway.snapshot_url(),
+        decisions = snapshot.decisions.len(),
+        follow_from = snapshot.follow_from,
+        "read persona activation from the Companion Gateway's consent snapshot"
+    );
+    ReadFrom::Snapshot {
+        decisions: snapshot.decisions.len(),
+        follow_from: snapshot.follow_from,
+    }
 }
 
 /// Drains the consent subject to the end of the stream, applying every

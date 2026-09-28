@@ -990,10 +990,14 @@ paths:
         names no stream position. It **includes** `persona` subjects, which is
         how the dashboard knows which personas the user activated and on which
         networks. The snapshot a cold consumer reads is
-        `GET /api/consent/snapshot`: the same entries plus the JetStream
-        sequence they reflect, authenticated by the Sensor's service token,
-        and with `persona` subjects excluded — a persona is not consent state
-        a Sensor labels senders by. Neither is paginated.
+        `GET /api/consent/snapshot`: the same entries — `persona` subjects
+        included since #312, because the Hermes runtime reads its activations
+        there rather than replaying a stream that forgets them after ninety
+        days (ADR 0037) — plus the JetStream sequence they reflect,
+        authenticated by the Sensor's service token. A persona is still not
+        consent state a Sensor labels senders by, and the consumer that labels
+        senders is where that rule lives: `twalk-consent-cache` refuses such an
+        entry and counts it as well-formed. Neither is paginated.
       security:
         - deviceToken: []
       responses:
@@ -1130,9 +1134,16 @@ paths:
         with the precedence resolved by `GET /api/consent/effective`.
         Revocations are as explicit as grants — an absent subject means
         "never decided", never "revoked", which is the distinction the shape
-        exists to keep. `persona` subjects are excluded: activating a persona
-        is a consent decision (ADR 0013), but it is not state a consumer
-        labels senders by.
+        exists to keep. `persona` subjects are **included** (#312): activating a
+        persona is a consent decision (ADR 0013) and not state a consumer
+        labels senders by, and the consumer that labels senders is what
+        enforces that — `twalk-consent-cache` refuses such an entry and counts
+        it as well-formed, not as a defect. They are here because the Hermes
+        runtime reads its activations from this document instead of replaying
+        `consent.state.changed` from the beginning of a stream that forgets a
+        decision after ninety days (ADR 0037), which paused every persona in
+        silence on a runtime restarted long enough after the owner activated
+        one.
 
         **The owner is not in `entries`, and is named in
         `owner_identities`.** The owner is never a contact and never has a

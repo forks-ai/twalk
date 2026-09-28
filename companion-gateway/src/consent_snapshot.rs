@@ -48,8 +48,8 @@
 //! whole cold cache from — a row about the owner here is the defect, because a
 //! consumer without the Sensor's own filter (#147) applies it, and a `revoked`
 //! on an owner ghost silences the user's own traffic with nothing to say why.
-//! The exclusion is in [`crate::store::Store::snapshot`]'s SQL, beside the
-//! `persona` one, and it covers a row recorded before this was enforced — a
+//! The exclusion is in [`crate::store::Store::snapshot`]'s SQL, and it covers a
+//! row recorded before this was enforced — a
 //! deployment upgraded across #109 can hold one, since the user's own messages
 //! used to be published as a contact's. Such a row is withheld and *counted*,
 //! never deleted: the journal is append-only, so the honest treatment is to
@@ -59,6 +59,18 @@
 //! And because the set of the owner's identities cannot be derived from a
 //! bridge, the answer **carries** it: `owner_identities`, so that a consumer
 //! applying the same rule reads it from the single writer of consent state.
+//!
+//! # Who is in it that a Sensor does not read
+//!
+//! Every `persona` subject (#312). They were excluded, on a premise that is still
+//! true — a persona activation is a consent decision (ADR 0013) and *not* consent
+//! state a consumer labels senders by — and the exclusion made a second thing true
+//! that nobody wanted: the Hermes runtime had nowhere to read its activations from,
+//! so it replayed `consent.state.changed` from the beginning of the stream, and ADR
+//! 0037's ninety-day retention meant a runtime restarted long after an activation
+//! saw none at all, paused every persona, and said nothing. The rule belongs to the
+//! consumer it is about: `twalk-consent-cache` refuses a `persona` entry and says
+//! so, counted as well-formed and not as a defect.
 //!
 //! # What the answer deliberately does not carry
 //!

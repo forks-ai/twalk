@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 18] = [
+pub const MIGRATIONS: [&str; 19] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -894,6 +894,54 @@ pub const MIGRATIONS: [&str; 18] = [
     r#"
     ALTER TABLE hermes_read ADD COLUMN made_by TEXT;
     "#,
+    // v19 (#312): the snapshot carries `persona` subjects again.
+    //
+    // They were excluded on a true premise — "a persona is not part of the
+    // consent state a Sensor labels senders by" — and the exclusion then made a
+    // second thing true that nobody wanted. The Hermes runtime learns which
+    // personas the owner activated by **replaying** `consent.state.changed` from
+    // the beginning of the stream (ADR 0013), and ADR 0037 gave the stream a
+    // retention of ninety days: an activation decided before that window is gone
+    // from the stream, so a runtime restarted afterwards sees no activation at
+    // all, every persona is paused, and nothing says why. That is this project's
+    // signature defect — a silence that looks like a working deployment —
+    // manufactured by a retention policy that is otherwise right.
+    //
+    // The runtime already holds the service token this snapshot is read with and
+    // already calls the Gateway at startup, so the fix is the one the Sensor
+    // already uses for the same question (ADR 0010): read the snapshot, then
+    // follow the stream from the sequence it names. What that needs is the
+    // persona rows.
+    //
+    // Nothing that reads this document today is disturbed. `twalk-consent-cache`
+    // refuses a `persona` entry **by design** and says so
+    // (`Unusable::NotAboutASender`, "well-formed, not a defect, not counted"), so
+    // the Sensor and the collector go on labelling senders exactly as before: the
+    // rule "a persona decision never labels a sender" stays theirs, where it
+    // belongs, rather than being enforced by the absence of a row.
+    //
+    // A view is replaced by dropping and recreating it: the definition is the
+    // whole of it, there is no data to migrate, and every other clause below is
+    // the v8 view's, unchanged.
+    r#"
+    DROP VIEW consent_snapshot;
+    CREATE VIEW consent_snapshot AS
+    SELECT subject_type, subject_id, connection, network, state, decided_at, decision_sequence
+    FROM (
+        SELECT d.subject_type, d.subject_id, c.connection, k.kind AS network,
+               d.new_state AS state, d.occurred_at AS decided_at,
+               d.sequence AS decision_sequence,
+               ROW_NUMBER() OVER (
+                   PARTITION BY d.subject_type, d.subject_id, c.connection
+                   ORDER BY d.sequence DESC
+               ) AS recency
+        FROM consent_decision d
+        JOIN consent_decision_connection c ON c.sequence = d.sequence
+        JOIN connection k ON k.id = c.connection
+        WHERE d.sequence <= (SELECT decision_sequence FROM consent_snapshot_horizon)
+    )
+    WHERE recency = 1;
+    "#,
 ];
 
 /// One thing a draft did before it was written (#367).
@@ -1131,7 +1179,11 @@ pub struct Unpublished {
 /// [`Store::snapshot`].
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    /// One entry per (subject, network), `persona` subjects excluded.
+    /// One entry per (subject, connection) — `persona` subjects included since
+    /// #312, because the Hermes runtime reads its activations from here rather
+    /// than replaying a stream that forgets them after ninety days; a consumer
+    /// that labels senders refuses them itself, which is its rule and not this
+    /// document's.
     pub entries: Vec<Entry>,
     /// The journal position the snapshot reflects — the end of the published
     /// prefix. `0` when no decision has reached the bus yet.
@@ -1589,11 +1641,14 @@ impl Store {
             .context("failed to read the snapshot's stream position")
             .map_err(SnapshotRefusal::Store)?;
 
-        // The owner's own rows are excluded here, in the snapshot's own SQL
-        // and before the cap, exactly as `persona` rows are excluded in the
-        // view (ticket #149): this is the projection a consumer's whole cold
-        // start rests on, and the invariant is that it never *reads* a row
-        // about the owner rather than that it remembers to drop one.
+        // The owner's own rows are excluded here, in the snapshot's own SQL and
+        // before the cap (ticket #149): this is the projection a consumer's whole
+        // cold start rests on, and the invariant is that it never *reads* a row
+        // about the owner rather than that it remembers to drop one. It is the
+        // only exclusion left — `persona` rows were the other, and #312 put them
+        // back, because a document that omitted them made the Hermes runtime
+        // depend on a stream with a ninety-day retention for a decision taken
+        // once.
         let (exclusion, identities) = self.owner_exclusion();
         let mut statement = transaction
             .prepare(&format!(
@@ -4154,8 +4209,19 @@ mod tests {
         let _ = second;
     }
 
+    /// A persona activation is in the snapshot, and its network is the
+    /// connection's kind (#312).
+    ///
+    /// It used to be excluded in SQL, on a premise that is still true — a persona
+    /// is not consent state a consumer labels senders by — which made a second
+    /// thing true that nobody wanted: the Hermes runtime had no document to read
+    /// its activations from, so it replayed a stream that forgets them after
+    /// ninety days (ADR 0037) and a runtime restarted afterwards paused every
+    /// persona in silence. The rule "a persona decision never labels a sender"
+    /// belongs to the consumer that labels senders, and `twalk-consent-cache`
+    /// enforces it there.
     #[test]
-    fn a_persona_decision_is_kept_in_the_journal_and_left_out_of_the_snapshot() {
+    fn a_persona_activation_is_in_the_snapshot_beside_the_contacts() {
         let store = store("snapshot-persona");
         let contact = record(
             &store,
@@ -4168,42 +4234,51 @@ mod tests {
             "2026-09-17T10:00:00.000Z",
         );
         publish(&store, contact.sequence, 5);
-        // A persona activation, written straight into the journal: the write
-        // API refuses `persona` until #60 opens it (ADR 0013), and this test
-        // is what says the snapshot is ready for it — the exclusion is in
-        // SQL, so the snapshot never even reads the row.
-        {
-            let connection = store.connection();
-            connection
-                .execute(
-                    "INSERT INTO consent_decision \
-                     (event_id, subject_type, subject_id, old_state, new_state, scope_key, \
-                      occurred_at, actor, reason, envelope, published_at, stream_sequence) \
-                     VALUES ('f0'||hex(randomblob(31)), 'persona', 'assistant', 'unset', \
-                             'granted', 'whatsapp', '2026-09-17T10:03:00.000Z', ?1, NULL, '{}', \
-                             '2026-09-17T11:00:00.000Z', 6)",
-                    [OWNER],
-                )
-                .expect("a persona decision is appended");
-            let sequence = connection.last_insert_rowid();
-            connection
-                .execute(
-                    "INSERT INTO consent_decision_network (sequence, network) VALUES (?1, 'whatsapp')",
-                    [sequence],
-                )
-                .expect("its scope is appended");
-        }
+        // The activation, through the same writer as any decision: its scope is
+        // networks (ADR 0013) and the journal keeps it as the connections they
+        // name, which is what makes the entry's `network` the connection's kind.
+        let activation = record(
+            &store,
+            &decision(
+                SubjectType::Persona,
+                "assistant",
+                State::Granted,
+                &[Network::Whatsapp, Network::Signal],
+            ),
+            "2026-09-17T10:03:00.000Z",
+        );
+        publish(&store, activation.sequence, 6);
 
         let snapshot = store.snapshot(100).unwrap();
+
+        let persona: Vec<_> = snapshot
+            .entries
+            .iter()
+            .filter(|entry| entry.subject.kind == SubjectType::Persona)
+            .collect();
         assert_eq!(
-            snapshot.entries.len(),
-            1,
-            "the persona is not consent state a consumer labels senders by: {:?}",
+            persona.len(),
+            2,
+            "one entry per connection the activation named: {:?}",
             snapshot.entries
         );
-        assert_eq!(snapshot.entries[0].subject.kind, SubjectType::Contact);
-        // Its position still counts: the persona decision is on the bus, so
-        // a consumer starting after it is not told about it twice.
+        assert!(persona.iter().all(|entry| entry.subject.id == "assistant"
+            && entry.state == State::Granted));
+        let mut networks: Vec<&str> = persona
+            .iter()
+            .map(|entry| entry.network.as_str())
+            .collect();
+        networks.sort_unstable();
+        assert_eq!(networks, ["signal", "whatsapp"]);
+
+        // And the contact is there exactly as before: what a consumer that
+        // labels senders reads is unchanged, and refusing the persona rows is
+        // its own rule.
+        assert!(snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.subject.kind == SubjectType::Contact
+                && entry.subject.id == "@a:example.com"));
         assert_eq!(snapshot.stream_sequence, 6);
     }
 

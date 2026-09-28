@@ -252,6 +252,24 @@ impl RuntimeRun {
         Self::start_with(test_name, personas, &activated, Some(canned_reply)).await
     }
 
+    /// Starts the runtime on a stream the decisions have **left** (#312).
+    ///
+    /// The personas are activated the way `start_activated` activates them — the
+    /// user's decision published onto the bus before Hermes boots — and then the
+    /// stream is purged, which is the state ADR 0037's ninety-day retention leaves
+    /// a stream in once an activation is older than that. A runtime that learned
+    /// activation by replaying the stream sees nothing at all from here; one that
+    /// reads the Companion Gateway's snapshot sees what the owner decided.
+    pub async fn start_with_forgotten_decisions(
+        test_name: &str,
+        personas: Vec<PersonaFixture>,
+        activated: &[&str],
+        llm: StubLlm,
+        host: HostEnvironment,
+    ) -> Result<Self> {
+        Self::bring_up_forgetting(test_name, personas, activated, llm, host, true).await
+    }
+
     async fn start_with(
         test_name: &str,
         personas: Vec<PersonaFixture>,
@@ -271,6 +289,17 @@ impl RuntimeRun {
         activated: &[&str],
         llm: StubLlm,
         host: HostEnvironment,
+    ) -> Result<Self> {
+        Self::bring_up_forgetting(test_name, personas, activated, llm, host, false).await
+    }
+
+    async fn bring_up_forgetting(
+        test_name: &str,
+        personas: Vec<PersonaFixture>,
+        activated: &[&str],
+        llm: StubLlm,
+        host: HostEnvironment,
+        forget_the_decisions: bool,
     ) -> Result<Self> {
         ensure_stack().await?;
         if personas.iter().any(|p| p.image == PERSONA_IMAGE) {
@@ -295,6 +324,9 @@ impl RuntimeRun {
         };
         for persona_id in activated {
             run.decide(persona_id, "granted", &["whatsapp"]).await?;
+        }
+        if forget_the_decisions {
+            run.bus.purge_stream(&run.stream).await?;
         }
         run.spawn_runtime().await?;
         Ok(run)
