@@ -16,14 +16,26 @@ const OWNER: &str = "michel@example.com";
 struct Setup {
     sso: FakeSso,
     dir: tempfile::TempDir,
+    /// `COLLECTOR_OWNER_ALIASES`: the other addresses this deployment declares
+    /// as the owner's (#322). Empty unless a test is about one.
+    aliases: String,
 }
 
 impl Setup {
     async fn new(account: &str) -> Result<Self> {
+        Self::new_holding(account, "").await
+    }
+
+    /// A deployment that declares `aliases` as further addresses of the owner's.
+    async fn new_holding(account: &str, aliases: &str) -> Result<Self> {
         let sso = FakeSso::start(account).await?;
         let dir = tempfile::tempdir()?;
         write_client_secret(dir.path())?;
-        Ok(Self { sso, dir })
+        Ok(Self {
+            sso,
+            dir,
+            aliases: aliases.to_owned(),
+        })
     }
 
     fn grant_path(&self) -> std::path::PathBuf {
@@ -45,6 +57,7 @@ impl Setup {
             .env("COLLECTOR_JMAP_SESSION_URL", self.sso.jmap_session_url())
             .env("COLLECTOR_CALDAV_URL", self.sso.caldav_url())
             .env("COLLECTOR_OWNER_EMAIL", OWNER)
+            .env("COLLECTOR_OWNER_ALIASES", self.aliases.clone())
             .env("COLLECTOR_MAIL_CONNECTION", "mail-test")
             .env("COLLECTOR_CALENDAR_CONNECTION", "calendar-test")
             .env("COLLECTOR_NATS_URL", "nats://localhost:1")
@@ -155,6 +168,49 @@ async fn a_grant_for_another_account_is_refused_and_not_kept() -> Result<()> {
         "a stranger's grant left on disk would be protected by the next run's idempotence"
     );
     assert_no_token(&printed);
+    Ok(())
+}
+
+/// A grant whose service answers **another address the owner holds** is the
+/// owner's, and the line says which address answered (#322).
+///
+/// This is the run that cost the reference deployment its first production
+/// authorization: the mailbox answers `mmaudet@`, the operator had configured the
+/// address on their business card, and a grant for one person was refused. The
+/// check is still against what the service says — that is the point of #274 — and
+/// what changed is that the answer may be any address the operator declared.
+#[tokio::test]
+async fn a_grant_whose_service_answers_another_address_of_the_owners_is_accepted() -> Result<()> {
+    const AT_THE_SERVICE: &str = "mmaudet@example.com";
+    let setup = Setup::new_holding(AT_THE_SERVICE, AT_THE_SERVICE).await?;
+
+    let (status, printed) = setup.authorize(false).await?;
+
+    assert!(
+        status.success(),
+        "the grant is the owner's: they hold that address. {printed}"
+    );
+    assert!(
+        setup.grant_path().exists(),
+        "and it is kept: {}",
+        setup.grant_path().display()
+    );
+    assert!(
+        printed.contains(&format!("jmap as {AT_THE_SERVICE}")),
+        "the line says which address answered, not merely that nothing mismatched: {printed}"
+    );
+    assert!(
+        !printed.contains("publish nothing"),
+        "nothing was refused: {printed}"
+    );
+    assert_no_token(&printed);
+
+    // And undeclared, the same grant is refused exactly as it was — which is what
+    // the variable buys and what its absence costs.
+    let strict = Setup::new_holding(AT_THE_SERVICE, "").await?;
+    let (status, printed) = strict.authorize(false).await?;
+    assert!(!status.success(), "{printed}");
+    assert!(printed.contains("publish nothing"), "{printed}");
     Ok(())
 }
 

@@ -28,7 +28,9 @@ use crate::side::{self, SideError};
 /// needs.
 pub struct Mailbox {
     pub connection: String,
-    pub owner_email: String,
+    /// Every address the owner holds (#322), which is what the frontier, the
+    /// audience and the reply path each ask about.
+    pub owner: crate::owner::Owner,
     pub session_url: String,
     pub state_dir: PathBuf,
     pub consent: ConsentCache,
@@ -112,14 +114,14 @@ pub struct MailPoll {
 impl Mailbox {
     pub fn new(
         connection: &str,
-        owner_email: &str,
+        owner: &crate::owner::Owner,
         session_url: &str,
         state_dir: &std::path::Path,
         consent: ConsentCache,
     ) -> Result<Self> {
         Ok(Self {
             connection: connection.to_owned(),
-            owner_email: owner_email.to_owned(),
+            owner: owner.clone(),
             session_url: session_url.to_owned(),
             state_dir: state_dir.to_owned(),
             consent,
@@ -343,7 +345,7 @@ impl Mailbox {
             &self.host(),
             account,
             &previous.inbox_id,
-            &self.owner_email,
+            &self.owner,
         );
         if !in_inbox.is_empty() {
             let response = self
@@ -370,7 +372,7 @@ impl Mailbox {
                 // Remembered whatever the frontier says, so a recovery
                 // never re-reads it either.
                 next.remember(&mail.id);
-                match jmap::frontier(&mail, &self.owner_email) {
+                match jmap::frontier(&mail, &self.owner) {
                     Ok(()) => {
                         let consent = self.consent.state(&mail.from.mailto(), &self.connection);
                         poll.envelopes
@@ -444,15 +446,30 @@ impl Mailbox {
             .already_answered(&session, credential, account, &sent_id, &reply.event_id)
             .await?
         {
-            return Ok(Sent { already_sent: true });
+            return Ok(Sent {
+                already_sent: true,
+                posted_as: None,
+            });
         }
-        let identity_id = jmap::identity_for(&response.result(1)?, &self.owner_email)
-            .ok_or_else(|| {
-                SendError::Permanent(format!(
-                    "the JMAP server offers no sending identity for {}: the reply cannot leave as the owner",
-                    self.owner_email
-                ))
-            })?;
+        let sending = jmap::identity_for(&response.result(1)?, &self.owner).ok_or_else(|| {
+            SendError::Permanent(format!(
+                "the JMAP server offers no sending identity for any address of the owner's ({}): \
+                 the reply cannot leave as them",
+                self.owner.addresses().collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+        if sending.email != self.owner.primary() {
+            // Said once per reply and worth it: the reply leaves as an address
+            // the owner holds and not the one they are named by, which is what
+            // the contact will see and what an operator would otherwise have to
+            // deduce from the mailbox.
+            tracing::info!(
+                identity = %sending.email,
+                primary = self.owner.primary(),
+                "the mailbox cannot send as the owner's primary address; the reply leaves as this \
+                 address of theirs (#322)"
+            );
+        }
         // The mail the reply answers, by the Message-ID as written and by
         // the same without its brackets (#331). A server that indexes one
         // form answers nothing to the other, and answers it with an empty
@@ -511,10 +528,10 @@ impl Mailbox {
                 SendError::Permanent("the mail answered could not be read back".to_owned())
             })?;
         outbound::original_is_from_recipient(reply, &original).map_err(SendError::Permanent)?;
+        let posted_as = sending.email.clone();
         let sender = outbound::Sender {
             account_id: account.to_owned(),
-            identity_id,
-            owner_email: self.owner_email.clone(),
+            sending,
             drafts_id,
             sent_id,
         };
@@ -540,6 +557,7 @@ impl Mailbox {
         if submitted.pointer("/created/submission").is_some() {
             return Ok(Sent {
                 already_sent: false,
+                posted_as: Some(posted_as),
             });
         }
         // The submission was refused: the draft is not left behind, and the
@@ -732,11 +750,16 @@ async fn json_of(response: reqwest::Response) -> Result<Value, SideError> {
 }
 
 /// What `send_reply` came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sent {
     /// The mailbox already held a reply for this approval: nothing was sent
     /// again, and the report says it reached the contact all the same.
     pub already_sent: bool,
+    /// The address the reply actually left as, when this run is what sent it
+    /// (#322). `None` for a reply already in Sent: this run chose no identity,
+    /// and the report then names the address the owner is known by rather than
+    /// guessing at what an earlier run used.
+    pub posted_as: Option<String>,
 }
 
 /// `EmailSubmission/set` refusal types (RFC 8621 §7.5) a retry cannot

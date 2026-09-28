@@ -772,14 +772,17 @@ pub enum Location {
 /// reduced by nothing — is what such a closure answers.
 pub fn reduce(
     event: &Vevent,
-    owner: &str,
+    owner: &crate::owner::Owner,
     location: Location,
     decide: impl Fn(&str) -> Consent,
 ) -> Value {
-    let owner = owner_mailto(owner);
     let mut withheld = 0u64;
     let mut withhold = |identity: &str| -> bool {
-        if identity == owner {
+        // Every address the owner holds, not the one they are named by (#322): an
+        // event the owner attends under their other address would otherwise have
+        // that address withheld or counted like a third party's. The question is
+        // `owner.rs`'s, here as everywhere.
+        if owner.holds_mailto(identity) {
             return false;
         }
         let withheld_one = decide(identity).reduces_publication();
@@ -943,10 +946,18 @@ pub struct Envelopes {
 }
 
 impl Envelopes {
-    pub fn new(connection: &str, owner_email: &str, side_host: &str, collection: &str) -> Self {
+    pub fn new(
+        connection: &str,
+        owner: &crate::owner::Owner,
+        side_host: &str,
+        collection: &str,
+    ) -> Self {
         Self {
             connection: connection.to_owned(),
-            owner: owner_mailto(owner_email),
+            // The subject of every event is the address the owner is **named**
+            // by, whichever of theirs the calendar spells them with: one owner,
+            // one subject, as ADR 0021 has it.
+            owner: owner_mailto(owner.primary()),
             source: format!("caldav://{side_host}{collection}"),
         }
     }
@@ -1239,7 +1250,12 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             // is never asked, and this answer would be wrong to use.
             _ => Consent::Revoked,
         };
-        let published = reduce(&event, "Michel@example.com", Location::Withheld, decide);
+        let published = reduce(
+            &event,
+            &crate::owner::Owner::named("Michel@example.com"),
+            Location::Withheld,
+            decide,
+        );
         let participants = published["participants"].as_array().unwrap();
         assert_eq!(participants.len(), 2);
         assert!(participants
@@ -1258,9 +1274,12 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         assert!(!text.contains("bob"), "{text}");
 
         // Nobody decided: nobody withheld, pending is not a reduction.
-        let untouched = reduce(&event, "michel@example.com", Location::Withheld, |_| {
-            Consent::Pending
-        });
+        let untouched = reduce(
+            &event,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |_| Consent::Pending,
+        );
         assert_eq!(untouched["participants"].as_array().unwrap().len(), 3);
         assert_eq!(untouched["participants_withheld"], 0);
         // A revoked organizer who is not the owner: null, and counted.
@@ -1269,13 +1288,70 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             identity: "mailto:carol@example.org".to_owned(),
             name: None,
         });
-        let reduced = reduce(&foreign, "michel@example.com", Location::Withheld, |_| {
-            Consent::Revoked
-        });
+        let reduced = reduce(
+            &foreign,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |_| Consent::Revoked,
+        );
         assert!(reduced["organizer"].is_null());
         assert_eq!(
             reduced["participants_withheld"], 3,
             "two attendees and the organizer"
+        );
+    }
+
+    /// An event the owner attends under another address of theirs withholds none
+    /// of them (#322).
+    #[test]
+    fn no_address_of_the_owners_is_withheld_or_counted_as_a_third_partys() {
+        const PRIMARY: &str = "mmaudet@linagora.com";
+        const ALIAS: &str = "michel.maudet@linagora.com";
+        let owner = crate::owner::Owner::new(PRIMARY, [ALIAS]);
+        // One event the owner both organises and attends under their **other**
+        // address, as a calendar written by a client configured with it does.
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:alias-event\r\n\
+             SUMMARY:Point\r\nDTSTART:20261005T090000Z\r\nDTEND:20261005T093000Z\r\n\
+             ORGANIZER;CN=Michel Maudet:mailto:{ALIAS}\r\n\
+             ATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:{ALIAS}\r\n\
+             ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\n\
+             END:VEVENT\r\nEND:VCALENDAR\r\n"
+        );
+        let event = parse_vevent(&ics).unwrap();
+
+        // Everybody revoked, which is the sharpest probe: the owner is withheld by
+        // nothing, whichever of their addresses the calendar spells them with.
+        let published = reduce(&event, &owner, Location::Withheld, |_| Consent::Revoked);
+        let participants = published["participants"].as_array().unwrap();
+        assert_eq!(
+            participants.len(),
+            1,
+            "the owner stays under their other address: {published}"
+        );
+        assert_eq!(participants[0]["identity"], format!("mailto:{ALIAS}"));
+        assert_eq!(
+            published["organizer"]["identity"],
+            format!("mailto:{ALIAS}")
+        );
+        assert_eq!(
+            published["participants_withheld"], 1,
+            "Bob alone, not the owner"
+        );
+
+        // And with the alias undeclared, the owner is a third party in their own
+        // meeting — which is what this ticket found.
+        let mistaken = reduce(
+            &event,
+            &crate::owner::Owner::named(PRIMARY),
+            Location::Withheld,
+            |_| Consent::Revoked,
+        );
+        assert!(mistaken["participants"].as_array().unwrap().is_empty());
+        assert!(mistaken["organizer"].is_null());
+        assert_eq!(
+            mistaken["participants_withheld"], 3,
+            "the owner as organizer, the owner as attendee, and Bob"
         );
     }
 
@@ -1287,9 +1363,12 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // location nobody touched — because the older copy has no such key
         // and the new one has `null`.
         let event = parse_vevent(WEEKLY).unwrap();
-        let after = reduce(&event, "michel@example.com", Location::Withheld, |_| {
-            Consent::Granted
-        });
+        let after = reduce(
+            &event,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |_| Consent::Granted,
+        );
         let mut before = after.clone();
         before
             .as_object_mut()
@@ -1303,9 +1382,12 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // And the other direction, which is the same statement: a member
         // that goes from a value to absent is a change, and to null is the
         // same change.
-        let carried = reduce(&event, "michel@example.com", Location::Carried, |_| {
-            Consent::Granted
-        });
+        let carried = reduce(
+            &event,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Carried,
+            |_| Consent::Granted,
+        );
         assert_eq!(changed_fields(&before, &carried), vec!["location"]);
         assert_eq!(changed_fields(&after, &carried), vec!["location"]);
     }
@@ -1380,17 +1462,23 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         let event = parse_vevent(WEEKLY).unwrap();
         assert_eq!(event.location.as_deref(), Some("Salle B, 4e étage"));
 
-        let shut = reduce(&event, "michel@example.com", Location::Withheld, |_| {
-            Consent::Granted
-        });
+        let shut = reduce(
+            &event,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |_| Consent::Granted,
+        );
         assert_eq!(
             shut["location"],
             Value::Null,
             "a deployment ships with the switch off, and an off switch sends no place"
         );
-        let open = reduce(&event, "michel@example.com", Location::Carried, |_| {
-            Consent::Granted
-        });
+        let open = reduce(
+            &event,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Carried,
+            |_| Consent::Granted,
+        );
         assert_eq!(
             open["location"], "Salle B, 4e étage",
             "opened, it carries the place as the calendar holds it — unescaped, not parsed"
@@ -1402,9 +1490,12 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         let foreign =
             parse_vevent(&WEEKLY.replace("mailto:Michel@Example.com", "mailto:zoe@example.org"))
                 .unwrap();
-        let withheld = reduce(&foreign, "michel@example.com", Location::Carried, |_| {
-            Consent::Revoked
-        });
+        let withheld = reduce(
+            &foreign,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Carried,
+            |_| Consent::Revoked,
+        );
         assert_eq!(withheld["title"], "");
         assert_eq!(
             withheld["location"],
@@ -1428,44 +1519,61 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // event changed".
         let mut moved = event.clone();
         moved.location = Some("Salle A".to_owned());
-        let after = reduce(&moved, "michel@example.com", Location::Carried, |_| {
-            Consent::Granted
-        });
+        let after = reduce(
+            &moved,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Carried,
+            |_| Consent::Granted,
+        );
         assert_eq!(changed_fields(&open, &after), vec!["location"]);
         // With the switch shut, nothing moved, because nothing was said.
-        let after_shut = reduce(&moved, "michel@example.com", Location::Withheld, |_| {
-            Consent::Granted
-        });
+        let after_shut = reduce(
+            &moved,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |_| Consent::Granted,
+        );
         assert!(changed_fields(&shut, &after_shut).is_empty());
     }
 
     #[test]
     fn changed_fields_name_what_moved_and_the_envelopes_carry_the_contracts_ids() {
         let event = parse_vevent(WEEKLY).unwrap();
-        let before = reduce(&event, "michel@example.com", Location::Withheld, |_| {
-            Consent::Pending
-        });
+        let before = reduce(
+            &event,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |_| Consent::Pending,
+        );
         let mut moved = event.clone();
         moved.start = "2026-10-05T10:00:00+02:00".to_owned();
         moved.end = "2026-10-05T10:30:00+02:00".to_owned();
-        let after = reduce(&moved, "michel@example.com", Location::Withheld, |_| {
-            Consent::Pending
-        });
+        let after = reduce(
+            &moved,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |_| Consent::Pending,
+        );
         assert_eq!(changed_fields(&before, &after), ["start", "end"]);
         assert!(changed_fields(&before, &before).is_empty());
         // A participant newly revoked moves the count and nothing named.
-        let fewer = reduce(&event, "michel@example.com", Location::Withheld, |id| {
-            if id == "mailto:bob@example.org" {
-                Consent::Revoked
-            } else {
-                Consent::Pending
-            }
-        });
+        let fewer = reduce(
+            &event,
+            &crate::owner::Owner::named("michel@example.com"),
+            Location::Withheld,
+            |id| {
+                if id == "mailto:bob@example.org" {
+                    Consent::Revoked
+                } else {
+                    Consent::Pending
+                }
+            },
+        );
         assert_eq!(changed_fields(&before, &fewer), ["participants"]);
 
         let envelopes = Envelopes::new(
             "agenda-linagora",
-            "Michel@example.com",
+            &crate::owner::Owner::named("Michel@example.com"),
             "calendar.example.com",
             "/dav/calendars/64f1c0a2e9b1d3f4a5b6c7d8/64f1c0a2e9b1d3f4a5b6c7d8/",
         );

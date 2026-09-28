@@ -11,7 +11,7 @@ mod support;
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use support::{sha256_hex, Run, OWNER};
+use support::{sha256_hex, Run, OWNER, OWNER_ALIAS};
 use twalk_test_harness::jmap_fake::{Address, FakeMail, ACCOUNT_ID, ARCHIVE_ID, INBOX_ID, SENT_ID};
 use twalk_test_harness::{ensure_stack, validate_against_contract, Bus};
 
@@ -135,6 +135,16 @@ async fn a_mail_delivered_after_the_start_is_the_message_and_what_was_there_befo
         "Note to self",
         "Buy milk",
     ));
+    // And the same, sent from the **other address the owner holds** (#322). It
+    // used to pass the frontier and put the owner in their own Companion as
+    // somebody to decide about, which is ADR 0018's point inverted.
+    run.sso.deliver(FakeMail::from_person(
+        "Michel Maudet",
+        OWNER_ALIAS,
+        OWNER,
+        "Note to self, from the other address",
+        "Ne pas oublier le pain",
+    ));
     // And two mails the collector must not read at all.
     let sent = run.sso.deliver_to(
         SENT_ID,
@@ -158,7 +168,9 @@ async fn a_mail_delivered_after_the_start_is_the_message_and_what_was_there_befo
     );
     collector.wait_logged("\"non_human_sender\"", 1).await?;
     collector.wait_logged("\"calendar_invitation\"", 1).await?;
-    collector.wait_logged("\"owner\"", 1).await?;
+    // Twice: the mail from the address they are named by, and the one from the
+    // address they also hold.
+    collector.wait_logged("\"owner\"", 2).await?;
     // A cc'd mail is a group's.
     let mut group = FakeMail::from_person("Bob", "bob@example.org", OWNER, "Team", "All,");
     group.cc.push(Address::new(None, "alice@example.org"));
@@ -168,7 +180,8 @@ async fn a_mail_delivered_after_the_start_is_the_message_and_what_was_there_befo
     assert_eq!(
         messages.len(),
         2,
-        "the newsletter, the invitation, the owner's note, Sent and Archive published nothing: {messages:?}"
+        "the newsletter, the invitation, the owner's two notes, Sent and Archive published \
+         nothing: {messages:?}"
     );
     let read = run.sso.mails_read();
     assert!(read.contains(&id), "Alice's mail was read: {read:?}");
@@ -185,6 +198,7 @@ async fn a_mail_delivered_after_the_start_is_the_message_and_what_was_there_befo
             "On se voit toujours lundi",
             "Unsubscribe below",
             "Buy milk",
+            "Ne pas oublier le pain",
             "Point hebdo",
         ])
         .await;

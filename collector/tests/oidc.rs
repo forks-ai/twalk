@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Result;
 use twalk_collector::oidc::{Client, Grant, Renewal, Settings};
+use twalk_collector::owner::Owner;
 use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
 use twalk_test_harness::FakeSso;
 
@@ -234,7 +235,12 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
         "and it is not reported either"
     );
     assert!(!identities.unauthenticated());
-    assert!(identities.owner_mismatch("somebody@example.com").len() == 1);
+    assert!(
+        identities
+            .owner_mismatch(&Owner::new("somebody@example.com", Vec::<String>::new()))
+            .len()
+            == 1
+    );
 
     // A token for another account is nothing to publish from.
     let other = FakeSso::start("somebody@example.com").await?;
@@ -250,7 +256,7 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
     };
     let identities = other_services.whoami(&bearer).await?;
     assert_eq!(
-        identities.owner_mismatch(OWNER),
+        identities.owner_mismatch(&Owner::new(OWNER, Vec::<String>::new())),
         vec![
             ("jmap", "somebody@example.com".to_owned()),
             ("caldav", "somebody@example.com".to_owned())

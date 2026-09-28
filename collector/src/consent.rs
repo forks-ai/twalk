@@ -16,25 +16,37 @@ use serde_json::Value;
 use tracing::{info, warn};
 use twalk_consent_cache::{ConsentCache, ConsentChange, Snapshot, CONSENT_CHANGED_TYPE};
 
+/// The cache this collector reads, knowing the owner by **every address they
+/// hold** (#322).
+///
+/// The owner has no consent state (ADR 0021): a decision about one of their own
+/// addresses — from the snapshot or from the stream — never enters the cache, and
+/// the cache is what enforces that, from the identities it is given. Given one
+/// address, a decision about the owner's alias was recorded like a contact's, and
+/// the participant rule would then have withheld the owner from their own meeting.
+///
+/// Their identities here are `mailto:` subjects, because that is how every mail and
+/// every calendar event spells them and the collector has no Matrix ID to name them
+/// by.
+pub fn cache_for(owner: &crate::owner::Owner) -> ConsentCache {
+    let mut theirs = owner.mailtos();
+    let primary = theirs
+        .next()
+        .expect("an owner always has the address they are named by");
+    ConsentCache::for_people_only(
+        Some(twalk_consent_cache::owner::Owner::new(primary, theirs)),
+        twalk_consent_cache::bridge_bot::BridgeBots::default(),
+    )
+}
+
 /// The cache, filled from the Companion Gateway's snapshot document (the same one the
 /// registry is read off), and a task that keeps it current off the bus.
 pub async fn follow(
     jetstream: async_nats::jetstream::Context,
     snapshot_document: Option<&Value>,
-    owner_email: &str,
+    owner: &crate::owner::Owner,
 ) -> Result<ConsentCache> {
-    // The owner has no consent state (ADR 0021): a decision about their own
-    // address — from the snapshot or the stream — never enters the cache.
-    // Their identity here is the `mailto:` every mail and calendar event
-    // spells them by; the collector has no Matrix ID to name them by.
-    let owner = twalk_consent_cache::owner::Owner::new(
-        crate::side::owner_mailto(owner_email),
-        std::iter::empty(),
-    );
-    let cache = ConsentCache::for_people_only(
-        Some(owner),
-        twalk_consent_cache::bridge_bot::BridgeBots::default(),
-    );
+    let cache = cache_for(owner);
     let Some(document) = snapshot_document else {
         info!("no Companion Gateway: no consent decisions, nobody withheld");
         return Ok(cache);
@@ -115,4 +127,57 @@ async fn consume(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PRIMARY: &str = "mmaudet@linagora.com";
+    const ALIAS: &str = "michel.maudet@linagora.com";
+    const CONNECTION: &str = "mail-linagora";
+
+    /// A decision about an address of the owner's is refused the way a decision
+    /// about the owner is — for every address they hold (#322).
+    #[test]
+    fn no_decision_about_the_owner_enters_the_cache_whichever_address_it_names() {
+        let revoking = |subject: &str| {
+            serde_json::json!({
+                "specversion": "1.0",
+                "type": CONSENT_CHANGED_TYPE,
+                "source": "https://gateway.example/",
+                "id": "decision-1",
+                "subject": subject,
+                "time": "2026-09-27T20:00:00Z",
+                "data": {
+                    "subject": { "type": "contact", "id": subject },
+                    "new_state": "revoked",
+                    "scope": { "connections": [CONNECTION] },
+                },
+            })
+        };
+        let cache = cache_for(&crate::owner::Owner::new(PRIMARY, [ALIAS]));
+
+        for address in [PRIMARY, ALIAS] {
+            let subject = format!("mailto:{address}");
+            let change = ConsentChange::parse(&revoking(&subject))
+                .expect("the fixture is a consent decision");
+            cache.apply(&change);
+            assert_eq!(
+                cache.state(&subject, CONNECTION),
+                twalk_consent_cache::Consent::Pending,
+                "a decision about {address} is the owner's own and is refused: with it recorded, \
+                 the participant rule would withhold the owner from their own meeting"
+            );
+        }
+
+        // And a contact is decided about exactly as before.
+        let subject = "mailto:alice@example.org";
+        let change = ConsentChange::parse(&revoking(subject)).expect("a decision");
+        cache.apply(&change);
+        assert_eq!(
+            cache.state(subject, CONNECTION),
+            twalk_consent_cache::Consent::Revoked
+        );
+    }
 }
