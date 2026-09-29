@@ -322,6 +322,141 @@ pub fn handover_in(
     Ok(handover)
 }
 
+/// Whether this deployment holds a usable device of the owner's account, as the
+/// bus carries it (`owner.device.state.changed.v1`, ADR 0041, #404).
+///
+/// # Why this is on the bus at all
+///
+/// #229 made a revoked device visible **after** the fact: the refusal
+/// dead-letters with its reason and the approval screen reads that (#311). What
+/// #229's own words asked for and its criteria did not is that *"the Companion
+/// stops offering a delivery it can no longer perform"* — and that needs the fact
+/// to cross from the Sensor, which is the only process that knows, to the
+/// Companion Gateway, which draws the screen. The alternative was the Gateway
+/// reading this Sensor's `/metrics`, where the gauge already renders;
+/// `SENSOR_METRICS_LISTEN` is optional, a Prometheus exposition is not a contract,
+/// and it would be the first dependency between these two components that does not
+/// go through the bus. ADR 0041 argues it at length.
+///
+/// # Three states, and the third is not a fault
+///
+/// `Present` is a deployment that can act as the owner. `CredentialGone` is #229's
+/// subject: the homeserver refuses the token, and every reply to a bridged
+/// conversation is refused rather than delivered to nobody. `NotConfigured` is
+/// every deployment before #123 — replies go out as `@sensor:`, which a mautrix
+/// bridge does not relay — and it is published rather than left silent because a
+/// Gateway that heard nothing and a Gateway told "there is no device" are two
+/// different things to draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceState {
+    Present,
+    CredentialGone,
+    NotConfigured,
+}
+
+impl DeviceState {
+    /// The contract's own word for it (`data.to_state`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::CredentialGone => "credential_gone",
+            Self::NotConfigured => "not_configured",
+        }
+    }
+
+    /// What puts it back, in one sentence, for every state but `Present` — the
+    /// `remedy` the event carries.
+    ///
+    /// Two audiences, two remedies, and the sentence names both: since #228 the
+    /// **owner** hands over a new device by onboarding again in the Companion, with
+    /// nothing restarted, while an **operator** runs the provisioning script and
+    /// restarts the Sensor. A sentence that named only one would tell one of them
+    /// to wait for the other.
+    pub fn remedy(self) -> Option<&'static str> {
+        match self {
+            Self::Present => None,
+            Self::CredentialGone => Some(REVOKED_REMEDY),
+            Self::NotConfigured => Some(NEVER_CONFIGURED_REMEDY),
+        }
+    }
+}
+
+/// The contract type the state travels as, and its schema.
+pub const STATE_CHANGED_TYPE: &str = "fr.linagora.twalk.owner.device.state.changed.v1";
+pub const STATE_CHANGED_DATASCHEMA: &str =
+    "https://schemas.twalk.dev/cloudevents/v1/owner.device.state.changed.schema.json";
+
+/// The event's `subject`: the device, not the person.
+///
+/// A subject matching `^@…` is how the contract says *this type is about a person*
+/// (ADR 0018), and every such type owes the owner an answer; the owner is not the
+/// subject of their own device's state. Their Matrix ID travels in `data.owner`.
+pub const STATE_CHANGED_SUBJECT: &str = "owner-device";
+
+/// What is done when no device was ever given (#123).
+pub const NEVER_CONFIGURED_REMEDY: &str = concat!(
+    "No device of the owner's account is configured (SENSOR_OWNER_DEVICE_ACCESS_TOKEN) and none ",
+    "has been handed over: an approved reply to a bridged conversation is posted by the Sensor's ",
+    "own account, which a mautrix bridge does not relay, so the contact receives nothing. The ",
+    "owner can hand one over by onboarding again in the Companion; an operator can run ",
+    "docker-compose/provision-owner-device.sh and restart the Sensor."
+);
+
+/// The envelope for one transition, as the contract defines it.
+///
+/// Pure, and the whole of what this event is: `main.rs` decides *when* a transition
+/// happened and this decides what one looks like. `from` is `None` on the first
+/// publication of a run — the contract's `unknown` — because what came before is
+/// not this process's to remember, and a consumer reads a run's first event as the
+/// state rather than as a change.
+pub fn state_changed(
+    server_name: &str,
+    owner: &str,
+    device_id: Option<&str>,
+    from: Option<DeviceState>,
+    to: DeviceState,
+    occurred_at: &str,
+) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "owner": owner,
+        "from_state": from.map_or("unknown", DeviceState::as_str),
+        "to_state": to.as_str(),
+        "occurred_at": occurred_at,
+    });
+    if let Some(device_id) = device_id {
+        data["device_id"] = serde_json::json!(device_id);
+    }
+    if let Some(remedy) = to.remedy() {
+        data["remedy"] = serde_json::json!(remedy);
+    }
+    serde_json::json!({
+        "specversion": "1.0",
+        "id": state_changed_id(owner, to, occurred_at),
+        "source": format!("matrix://{server_name}/owner-device"),
+        "type": STATE_CHANGED_TYPE,
+        "time": occurred_at,
+        "subject": STATE_CHANGED_SUBJECT,
+        "datacontenttype": "application/json",
+        "dataschema": STATE_CHANGED_DATASCHEMA,
+        "data": data,
+    })
+}
+
+/// The contract's natural key: `sha256(owner + ':' + to_state + ':' + occurred_at)`.
+///
+/// So that a Sensor restarted twice inside the bus's duplicate window, observing
+/// the same state at the same instant, adds one event and not two.
+pub fn state_changed_id(owner: &str, to: DeviceState, occurred_at: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(owner.as_bytes());
+    hasher.update(b":");
+    hasher.update(to.as_str().as_bytes());
+    hasher.update(b":");
+    hasher.update(occurred_at.as_bytes());
+    crate::normalize::hex_encode(hasher.finalize())
+}
+
 /// What the owner's device may do with one pending invitation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Invitation {
@@ -598,18 +733,48 @@ pub fn after_refusal(errcode: Option<&str>) -> AfterRefusal {
     }
 }
 
+/// [`after_refusal`] for a **send**, where *which identity sent it* decides as
+/// much as the error code does (#404).
+///
+/// A reply into a room no bridge marked goes out as the Sensor's own account and
+/// always has (ADR 0009). An `M_UNKNOWN_TOKEN` there is about the *Sensor's*
+/// session: a different credential, a different remedy, and nothing to do with
+/// the owner's device list. Reading it as the owner device's would raise the
+/// gauge an operator alerts on, publish `credential_gone` on the bus, and make
+/// the approval screen refuse every **bridged** conversation's reply — because a
+/// room with no bridge in it answered badly. Two situations behind one signal is
+/// the defect class this deployment keeps closing, and this is the same shape as
+/// [`reach`]: what the identity was is part of what the outcome means.
+pub fn after_a_send_refusal(errcode: Option<&str>, by_the_owners_device: bool) -> AfterRefusal {
+    if by_the_owners_device {
+        after_refusal(errcode)
+    } else {
+        AfterRefusal::Retry
+    }
+}
+
 /// The one sentence an operator needs when the acting credential is gone: which
 /// credential, and what puts it back.
 ///
-/// Here rather than inline at the log site so that the log and the reply's
-/// dead-letter reason say the same thing — the owner reads one on the approval
-/// screen and the operator reads the other in `docker logs`, and two different
-/// accounts of one situation is how a deployment gets debugged twice.
+/// Here rather than inline at the log site so that the log, the reply's
+/// dead-letter reason and the event the bus carries (#404) say the same thing — the
+/// owner reads one on the approval screen and the operator reads the other in
+/// `docker logs`, and two different accounts of one situation is how a deployment
+/// gets debugged twice.
+///
+/// It names **both** remedies since #228, and that is the correction this sentence
+/// needed: it used to name only the operator's, so an owner reading it on the
+/// approval screen was told to run a shell script on a host they may not have. The
+/// owner hands a device over by onboarding again in the Companion, with nothing
+/// restarted; the operator provisions one and restarts the Sensor.
 pub const REVOKED_REMEDY: &str = concat!(
-    "SENSOR_OWNER_DEVICE_ACCESS_TOKEN names a device the homeserver no longer knows: the owner ",
-    "revoked it, or an admin did. Replies cannot be sent as the owner until a new device is ",
-    "provisioned: run docker-compose/provision-owner-device.sh, then restart the Sensor. This ",
-    "is not a homeserver that is unreachable — that answers differently and is retried."
+    "The homeserver no longer knows the device Twalk acts through: the owner revoked it, or an ",
+    "admin did. Nothing can be sent as the owner until another is held, so every reply to a ",
+    "bridged conversation is refused rather than posted to nobody. The owner can hand one over by ",
+    "onboarding again in the Companion, with nothing to restart (#228); an operator can replace ",
+    "SENSOR_OWNER_DEVICE_ACCESS_TOKEN by running docker-compose/provision-owner-device.sh and ",
+    "restarting the Sensor. This is not a homeserver that is unreachable — that answers ",
+    "differently and is retried."
 );
 
 #[cfg(test)]
@@ -767,12 +932,63 @@ mod tests {
 
     #[test]
     fn the_remedy_names_the_credential_and_the_distinction() {
-        assert!(REVOKED_REMEDY.contains("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"));
         assert!(
             REVOKED_REMEDY.contains("unreachable"),
             "a revoked device and a homeserver that is away must not share one \
              signal, so the message that names one says it is not the other"
         );
+        // Both remedies, because both readers see this sentence (#404): the owner on
+        // the approval screen, the operator in the log. It named only the
+        // operator's, so an owner was told to run a shell script on a host they may
+        // not have — and since #228 theirs needs no restart at all.
+        assert!(
+            REVOKED_REMEDY.contains("onboarding again in the Companion"),
+            "the owner's remedy: {REVOKED_REMEDY}"
+        );
+        assert!(
+            REVOKED_REMEDY.contains("provision-owner-device.sh"),
+            "and the operator's: {REVOKED_REMEDY}"
+        );
+        // Which names the credential, because #229's promise to an operator is
+        // one ERROR naming the variable they have to replace — and the
+        // integration suite reads that line.
+        assert!(
+            REVOKED_REMEDY.contains("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"),
+            "and the variable it lives in: {REVOKED_REMEDY}"
+        );
+        // And the one for a deployment that was never given a device says what it
+        // costs rather than only what is missing.
+        assert!(NEVER_CONFIGURED_REMEDY.contains("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"));
+        assert!(NEVER_CONFIGURED_REMEDY.contains("does not relay"));
+    }
+
+    /// The identity that sent decides as much as the code does: a native Matrix
+    /// reply goes out as `@sensor:`, so a token the homeserver forgot there is
+    /// the Sensor's own session and not the owner's device — and reading it as
+    /// the owner's would refuse every bridged conversation's reply on the
+    /// approval screen (#404) because a room with no bridge in it answered badly.
+    #[test]
+    fn a_send_refused_under_the_sensors_own_token_is_never_the_owners_device() {
+        assert_eq!(
+            after_a_send_refusal(Some("M_UNKNOWN_TOKEN"), true),
+            AfterRefusal::CredentialGone,
+            "the owner's device, refused: the whole of #229's send-path window"
+        );
+        assert_eq!(
+            after_a_send_refusal(Some("M_UNKNOWN_TOKEN"), false),
+            AfterRefusal::Retry,
+            "the Sensor's own account, refused: a different credential entirely"
+        );
+        // And nothing else is a revocation on either path.
+        for by_the_owner in [true, false] {
+            for errcode in [None, Some("M_MISSING_TOKEN"), Some("M_FORBIDDEN")] {
+                assert_eq!(
+                    after_a_send_refusal(errcode, by_the_owner),
+                    AfterRefusal::Retry,
+                    "{errcode:?} as {by_the_owner}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -797,6 +1013,73 @@ mod tests {
             reach(false, true).as_str() == "nobody" && !reach(false, true).reaches_the_contact()
         );
     }
+    /// What the bus carries about the device Twalk acts through (#404, ADR 0041),
+    /// and the two things that must not be in it.
+    #[test]
+    fn the_state_on_the_bus_names_the_device_the_remedy_and_never_a_token() {
+        const SERVER: &str = "twalk.example.com";
+        const WHEN: &str = "2026-09-28T09:15:00Z";
+
+        let gone = state_changed(
+            SERVER,
+            OWNER,
+            Some("PZJQUQQFOD"),
+            Some(DeviceState::Present),
+            DeviceState::CredentialGone,
+            WHEN,
+        );
+        assert_eq!(gone["type"], STATE_CHANGED_TYPE);
+        assert_eq!(
+            gone["subject"], STATE_CHANGED_SUBJECT,
+            "the subject is the device, not the owner: a subject matching ^@ is how this contract \
+             says a type is about a person, and every such type owes the owner an answer"
+        );
+        assert_eq!(gone["source"], format!("matrix://{SERVER}/owner-device"));
+        assert_eq!(gone["data"]["owner"], OWNER);
+        assert_eq!(gone["data"]["device_id"], "PZJQUQQFOD");
+        assert_eq!(gone["data"]["from_state"], "present");
+        assert_eq!(gone["data"]["to_state"], "credential_gone");
+        assert_eq!(gone["data"]["remedy"], REVOKED_REMEDY);
+        assert!(
+            !gone.to_string().contains("syt_"),
+            "the credential itself never appears on the bus: {gone}"
+        );
+        assert!(
+            gone.get("consent").is_none() && gone.get("network").is_none(),
+            "an event about no contact carries neither extension, so no persona is woken by it"
+        );
+
+        // The first event of a run is the state and not a change, which is the rule
+        // `connection.status.changed` already follows.
+        let first = state_changed(SERVER, OWNER, None, None, DeviceState::NotConfigured, WHEN);
+        assert_eq!(first["data"]["from_state"], "unknown");
+        assert_eq!(first["data"]["to_state"], "not_configured");
+        assert!(
+            first["data"].get("device_id").is_none(),
+            "there is no device to name: {first}"
+        );
+        assert_eq!(first["data"]["remedy"], NEVER_CONFIGURED_REMEDY);
+
+        // `present` needs no remedy: nothing is wrong.
+        let present = state_changed(
+            SERVER,
+            OWNER,
+            Some("PZJQUQQFOD"),
+            Some(DeviceState::CredentialGone),
+            DeviceState::Present,
+            WHEN,
+        );
+        assert!(present["data"].get("remedy").is_none(), "{present}");
+
+        // The id is the natural key, so the same observed state at the same instant
+        // is one event on the bus and not two.
+        assert_eq!(
+            gone["id"],
+            state_changed_id(OWNER, DeviceState::CredentialGone, WHEN)
+        );
+        assert_ne!(gone["id"], present["id"]);
+    }
+
     /// The credential is written down in exactly the shape it arrived in, and
     /// nothing that logs it can print it (#228).
     #[test]

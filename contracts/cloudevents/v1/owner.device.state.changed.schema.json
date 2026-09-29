@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/owner.device.state.changed.schema.json",
+  "title": "fr.linagora.twalk.owner.device.state.changed.v1",
+  "description": "Whether this deployment holds a usable device of the owner's own account — the identity Twalk *acts* as (ADR 0025, ADR 0041, #404). Produced by the Sensor, which is the only process that knows: it holds the credential and it is what the homeserver refuses. The Companion Gateway follows it so that the approval screen stops offering a delivery this deployment can no longer perform, instead of the owner finding out by pressing the button and waiting for a retry schedule to give up (#229, #216). An operational event about the deployment itself: it names no contact, carries no `consent` extension and no `network`, and is therefore never a persona's trigger (the SDK's allowlist). The first event of every run carries the state the Sensor starts in, so a consumer reads it as the state and not as a change — the rule `connection.status.changed.v1` already follows.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Identifier computed as sha256(owner + ':' + to_state + ':' + occurred_at). Two observations of one state at one instant are one event, and the bus deduplicates on it. It is deliberately **not** stable across runs: `occurred_at` is when the producer observed the state, not a recorded transition time, so a Sensor restarted an hour later publishes a second `present` — which is what a consumer wants, because a run's first event is that run's own word on what it holds, and nothing here persists a transition to re-emit."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^matrix://[^/]+/owner-device$",
+      "description": "Where the device lives: matrix://<homeserver>/owner-device, the homeserver this deployment operates. Not a room, because what changed is a credential this deployment holds and not anything inside a conversation; not the account either, which `data.owner` names.",
+      "examples": [
+        "matrix://twalk.example.com/owner-device"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.owner.device.state.changed.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the event was produced (RFC 3339, UTC)."
+    },
+    "subject": {
+      "type": "string",
+      "const": "owner-device",
+      "description": "What the event is about, and it is a **credential rather than a person**: the one device of the owner's account this deployment acts through. A constant, as a connection event's subject is its connection id, because a deployment holds one. Deliberately not the owner's Matrix ID: a subject matching `^@…` is how this contract says *this type is about a person* (`contract_types_about_a_person`, ADR 0018), every such type owes the owner an answer, and the answer here would be a category error — the owner is not the subject of their own device's state. Their Matrix ID is in `data.owner`, where a consumer checks it is the account it was configured with."
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json"
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/owner.device.state.changed.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header."
+    },
+    "data": {
+      "type": "object",
+      "required": [
+        "owner",
+        "from_state",
+        "to_state",
+        "occurred_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "type": "string",
+          "pattern": "^@[^:]+:[^:]+$",
+          "description": "The owner's Matrix ID: the account the device belongs to, and what a consumer checks against the account it was configured with. Not in the subject, which names the device — see `subject`."
+        },
+        "device_id": {
+          "type": "string",
+          "maxLength": 255,
+          "description": "The device the state is about, for an operator comparing it with the owner's device list. Absent on `not_configured`, since there is none. Never a token: a device id is a public name and the credential it belongs to never appears on the bus.",
+          "examples": [
+            "PZJQUQQFOD"
+          ]
+        },
+        "from_state": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "present",
+            "credential_gone",
+            "not_configured"
+          ],
+          "description": "The state before the transition. `unknown` on the first publication of a run: what came before is not this process's to remember, and a consumer reads a run's first event as the state rather than as a change."
+        },
+        "to_state": {
+          "type": "string",
+          "enum": [
+            "present",
+            "credential_gone",
+            "not_configured"
+          ],
+          "description": "The state after the transition. `present`: this deployment holds a device of the owner's account and an approved reply to a bridged conversation goes out as them (ADR 0025). `credential_gone`: the homeserver no longer knows its token — the owner revoked the device, or an admin did (#229) — so no reply can be sent as them until another is provisioned or handed over (#228), and every reply to a bridged conversation is refused rather than posted to nobody. `not_configured`: none was ever given, which is every deployment before #123 and a supported state rather than a fault — replies are posted by the Sensor's own account, which a mautrix bridge does not relay.",
+          "examples": [
+            "credential_gone"
+          ]
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 timestamp of when the state was observed. Part of the id's natural key."
+        },
+        "remedy": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "What puts it back, in one sentence, for every state but `present` — the Sensor's own words on the bus, so that a dashboard, an operator and the approval screen are told one situation one way. Two audiences have two remedies and the sentence names both: an operator provisions a device and restarts the Sensor, the owner onboards again in the Companion and nothing is restarted (#228). Never a token."
+        }
+      }
+    }
+  }
+}

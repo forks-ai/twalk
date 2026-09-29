@@ -174,8 +174,8 @@ async fn every_contract_fixture_validates_against_its_schema() -> Result<()> {
     let types = contract_fixture_types()?;
     assert_eq!(
         types.len(),
-        14,
-        "the v1 contract defines exactly 14 fixture types; found {types:?}"
+        15,
+        "the v1 contract defines exactly 15 fixture types; found {types:?}"
     );
     // And every schema has one. The count above is a tripwire for a fixture
     // added or lost; this is the tripwire for a *schema* added without the
@@ -218,10 +218,10 @@ async fn every_contract_variant_fixture_validates_against_its_type() -> Result<(
 /// `persona.*` message-flow types require the extension, and so do
 /// `connection.status.changed` (#274), whose subject is the connection
 /// itself, and the three `calendar.*` types (#280), the owner's own
-/// calendar on the calendar connection; the two status types about a
-/// bridge and about a decision do not carry it. Both halves are asserted,
-/// so a type moved from one list to the other is a change somebody made on
-/// purpose.
+/// calendar on the calendar connection; the three types about no message at
+/// all — a bridge's status, a consent decision, and the owner device's own
+/// state (#404) — do not carry it. Both halves are asserted, so a type moved
+/// from one list to the other is a change somebody made on purpose.
 #[tokio::test]
 async fn an_event_about_a_connection_without_the_connection_is_invalid() -> Result<()> {
     ensure_stack().await?;
