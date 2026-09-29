@@ -304,6 +304,32 @@ describe('published is not delivered (#216)', () => {
 		});
 	});
 
+	it('tells a revoked acting device apart from an account not in the room (#404)', () => {
+		// Two obstacles, two sentences, because the older one states the wrong
+		// situation as a fact: here the owner's account may well be in the
+		// conversation, and what is gone is the device Twalk posts as — so the
+		// remedy is handing over another one (#228) and not joining a room.
+		const gone = toRow(
+			suggestion({
+				delivery: { reach: 'cannot_reach', detail: 'owner_device_credential_gone' }
+			})
+		);
+		expect(deliveryCopy(gone.delivery)).toEqual({
+			key: 'approvals.delivery.cannotReachNoOwnerDevice',
+			warns: true
+		});
+		expect(deliveryDetailKey(gone.delivery)).toBe(
+			'approvals.delivery.detail.owner_device_credential_gone'
+		);
+		// The button stays here too: this Gateway is the authority on
+		// refusing, and a screen that hid it would be a second, disagreeing
+		// one.
+		expect(gone.actions).toContain('approve');
+		// And the sentence after the approval is the same one, not the
+		// account-not-in-the-room sentence.
+		expect(postedCopy(gone)).toBe('approvals.delivery.cannotReachNoOwnerDevice');
+	});
+
 	it('says a reply did not go out, even when something else was reported', () => {
 		// #311: three states, not two. A reply given up on used to read as
 		// "published" for ever, and an owner was told "sent" for a message

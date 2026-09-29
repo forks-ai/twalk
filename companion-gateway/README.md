@@ -354,6 +354,35 @@ so the Sensor posts it into the portal room without threading it under the origi
 inbound event carries no Matrix event ID of its own to thread under, and inventing one would be
 worse than the gap.
 
+### Whether a reply can reach the contact at all (tickets #216, #404)
+
+A suggestion is listed with a `delivery`, decided **before** the approval and never derived from
+it: `{ "reach": "can_reach" | "cannot_reach" | "unknown", "detail": "…" }`. `cannot_reach` is a
+certainty, and it has two obstacles, because a bridge needs two things at once.
+
+The first is the owner's account being **in** the conversation ([#216](https://github.com/linagora/twalk/issues/216)):
+a mautrix bridge relays only what the logged-in user's own account sends, so a reply into a portal
+their account is not joined to is accepted by the homeserver, given an event id, and relayed to
+nobody. That is read live per room, as the bridge's own bot, and it is `owner_invited` or
+`owner_absent`.
+
+The second is this deployment holding a **device** of that account to post as
+([#404](https://github.com/linagora/twalk/issues/404),
+[ADR 0041](../docs/architecture/adr/0041-the-owner-device-says-on-the-bus-whether-it-can-act.md)).
+Only the Sensor knows: it holds the credential and it is what the homeserver refuses. So it says so
+on the bus — `owner.device.state.changed.v1`, at the start of every run and at each transition —
+and this Gateway follows that one subject from its last event, keeps the state **in memory** and
+nothing else, and answers `owner_device_credential_gone` for a bridged conversation while the
+credential is gone. It is reported ahead of a missing membership, because the remedy for that one
+is a device accepting an invitation. A **native** Matrix conversation never reaches this question
+and says nothing about it: no bridge stands between that room and its reader.
+
+`unknown` is a room no bridge bot of this deployment can read, and it is the answer a Gateway that
+has heard nothing about the owner device keeps giving: an absence must not read as a revocation.
+Re-provisioning or a handover ([#228](https://github.com/linagora/twalk/issues/228)) makes the
+Sensor publish `present`, and the next read of the listing offers the reply again — nothing is
+restarted here and nothing is reloaded in the Companion.
+
 ## The disclosure (ticket #121)
 
 Every reply a persona drafted reaches the contact with one sentence after it, on a line of its

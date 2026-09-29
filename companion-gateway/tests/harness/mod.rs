@@ -27,8 +27,8 @@ pub use stub_bridge::{StubBridge, STUB_AS_TOKEN, STUB_PROVISIONING_SECRET};
 pub use twalk_test_harness::*;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -1237,6 +1237,57 @@ pub fn calendar_status_event(connection: &str, from: &str, to: &str) -> serde_js
 
 /// The subject a connection state change is published on.
 pub const CONNECTION_STATUS_SUBJECT: &str = "twalk.connection.status.changed.v1";
+
+/// One `owner.device.state.changed.v1` as the Sensor publishes it about the
+/// device Twalk acts through (#404, ADR 0041). `remedy` is carried for every
+/// state but `present`, as the contract has it, and it is the Sensor's own
+/// sentence rather than one invented here — the screen and the log tell one
+/// situation one way.
+pub fn owner_device_state_event(
+    device_id: Option<&str>,
+    from: &str,
+    to: &str,
+) -> serde_json::Value {
+    let owner = owner_user_id();
+    let at = rfc3339_of(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after 1970")
+            .as_secs(),
+    );
+    let mut data = serde_json::json!({
+        "owner": owner,
+        "from_state": from,
+        "to_state": to,
+        "occurred_at": at,
+    });
+    if let Some(device_id) = device_id {
+        data["device_id"] = serde_json::json!(device_id);
+    }
+    if to != "present" {
+        data["remedy"] = serde_json::json!(
+            "The homeserver no longer knows the device Twalk acts through. The owner can hand \
+             one over by onboarding again in the Companion, with nothing to restart (#228)."
+        );
+    }
+    let event = serde_json::json!({
+        "specversion": "1.0",
+        "id": sha256_hex(&format!("{owner}:{to}:{at}")),
+        "source": format!("matrix://{SERVER_NAME}/owner-device"),
+        "type": "fr.linagora.twalk.owner.device.state.changed.v1",
+        "time": at,
+        "subject": "owner-device",
+        "datacontenttype": "application/json",
+        "dataschema": "https://schemas.twalk.dev/cloudevents/v1/owner.device.state.changed.schema.json",
+        "data": data,
+    });
+    validate_against_contract(&event, "owner.device.state.changed")
+        .expect("the fixture is an event the contract allows");
+    event
+}
+
+/// The subject the owner device's own state is published on.
+pub const OWNER_DEVICE_STATE_SUBJECT: &str = "twalk.owner.device.state.changed.v1";
 
 /// The collector's internal endpoint, stubbed. Here rather than in one suite
 /// because two of them need it: the free/busy reads suite, which asserts what

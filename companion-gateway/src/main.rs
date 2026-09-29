@@ -497,13 +497,35 @@ async fn main() -> Result<()> {
         "the registry of connections is what every event is stamped with and every consent \
          decision is scoped to"
     );
+    // Whether this deployment can still act as the owner (#404, ADR 0041).
+    // Built before the register that reads it and followed after, because the
+    // register is what turns the state into an answer on the approval screen;
+    // a Gateway that hears nothing answers exactly as it did before #404.
+    let owner_device = Arc::new(
+        twalk_companion_gateway::owner_device::OwnerDeviceState::new(
+            config
+                .sign_in
+                .as_ref()
+                .map(|sign_in| sign_in.owner.as_str()),
+        ),
+    );
+    // Without a bus there is nothing to follow, and nothing to warn about
+    // twice: this deployment has no consent and no approvals either, and the
+    // endpoints that would have read this answer 503 already.
+    if let Some(consent) = &config.consent {
+        tokio::spawn(
+            twalk_companion_gateway::owner_device::follow_until_shutdown(
+                owner_device.clone(),
+                consent.nats_url.clone(),
+            ),
+        );
+    }
     let portals = match Portals::new(
         config.bootstrap.homeserver_url.as_deref(),
         config.bootstrap.sensor_user_id.as_deref(),
-        config
-            .sign_in
-            .as_ref()
-            .map(|sign_in| sign_in.owner.as_str()),
+        // Who the owner is and whether their device can act: one value, read
+        // once, so the register and the state it consults cannot disagree.
+        owner_device,
         config
             .bridges
             .iter()

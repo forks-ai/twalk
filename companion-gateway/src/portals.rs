@@ -248,18 +248,47 @@ impl OwnerMembership {
 /// as this Gateway can tell **before** it is sent (issue #216).
 ///
 /// Three answers and the third is honest rather than optimistic. `CannotReach`
-/// is a certainty — the room is a portal of a configured bridge and the
-/// owner's account is not joined to it, so no bridge will relay anything
-/// posted there. `CanReach` is the register's best reading: the owner is
-/// joined, which is what a bridge relays from. `Unknown` is a room no bridge
-/// bot of this deployment can read — native Matrix traffic (ADR 0009), which
-/// reaches its reader with no bridge in the way, or a portal of a bridge with
-/// no token — and the Sensor's own report after the fact is the answer there.
+/// is a certainty, and it names the [`Obstacle`] it is certain about.
+/// `CanReach` is the register's best reading: the owner is joined, which is
+/// what a bridge relays from. `Unknown` is a room no bridge bot of this
+/// deployment can read — native Matrix traffic (ADR 0009), which reaches its
+/// reader with no bridge in the way, or a portal of a bridge with no token —
+/// and the Sensor's own report after the fact is the answer there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
     CanReach,
-    CannotReach { owner: OwnerMembership },
+    CannotReach { obstacle: Obstacle },
     Unknown { why: &'static str },
+}
+
+/// What makes a reply into a portal a certainty rather than a hope, and there
+/// are two of them because a bridge needs two things at once: the owner's
+/// account **in** the conversation, and a device of that account this
+/// deployment can post **as**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Obstacle {
+    /// The room is a portal of a configured bridge and the owner's account is
+    /// not joined to it, so no bridge will relay anything posted there
+    /// (issue #216).
+    OwnerNotIn(OwnerMembership),
+    /// The owner's account is in it and this deployment holds no usable device
+    /// of that account: the homeserver no longer knows the token, and the
+    /// Sensor said so on the bus (issue #404, ADR 0041). A certainty about
+    /// every portal at once rather than about this room, and the one the
+    /// screen has to read first — the remedy for the other obstacle is a
+    /// device accepting an invitation, which needs a device.
+    OwnerDeviceCredentialGone,
+}
+
+impl Obstacle {
+    /// The one-word reason beside `cannot_reach`, in the API.
+    pub fn detail(self) -> &'static str {
+        match self {
+            Obstacle::OwnerNotIn(OwnerMembership::Invited) => "owner_invited",
+            Obstacle::OwnerNotIn(_) => "owner_absent",
+            Obstacle::OwnerDeviceCredentialGone => "owner_device_credential_gone",
+        }
+    }
 }
 
 impl Delivery {
@@ -276,10 +305,7 @@ impl Delivery {
     pub fn detail(&self) -> &'static str {
         match self {
             Delivery::CanReach => "owner_joined",
-            Delivery::CannotReach { owner } => match owner {
-                OwnerMembership::Invited => "owner_invited",
-                _ => "owner_absent",
-            },
+            Delivery::CannotReach { obstacle } => obstacle.detail(),
             Delivery::Unknown { why } => why,
         }
     }
@@ -611,9 +637,16 @@ pub struct Portals {
     /// The Matrix ID whose membership decides [`Observation`]
     /// (`GATEWAY_SENSOR_USER_ID`).
     sensor_user_id: String,
-    /// The Matrix ID whose membership decides [`OwnerMembership`]
-    /// (`GATEWAY_OWNER`), when the deployment names one.
-    owner_user_id: Option<String>,
+    /// The owner, in both senses the register needs: the Matrix ID whose
+    /// membership decides [`OwnerMembership`] (`GATEWAY_OWNER`, when the
+    /// deployment names one), and whether this deployment can still act as
+    /// them at all — the state the Sensor publishes on the bus (#404). One
+    /// value and not two, so the register and the state it consults cannot
+    /// disagree about who the owner is. The second half is asked about only
+    /// for a **portal**: no bridge stands between a native Matrix room and its
+    /// reader, so a reply there goes out as the Sensor's own account and always
+    /// did.
+    owner_device: Arc<crate::owner_device::OwnerDeviceState>,
     /// Every bridge in `GATEWAY_BRIDGES`, in that order, with the appservice
     /// token that reads it or the reason there is none.
     bridges: Vec<PortalBridge>,
@@ -652,7 +685,7 @@ impl Portals {
     pub fn new(
         homeserver_url: Option<&str>,
         sensor_user_id: Option<&str>,
-        owner_user_id: Option<&str>,
+        owner_device: Arc<crate::owner_device::OwnerDeviceState>,
         bridges: Vec<PortalBridge>,
         crowd_threshold: u64,
         moves: Option<Arc<crate::store::Store>>,
@@ -671,10 +704,7 @@ impl Portals {
         Ok(Some(Self {
             homeserver_url: homeserver_url.trim_end_matches('/').to_owned(),
             sensor_user_id: sensor_user_id.to_owned(),
-            owner_user_id: owner_user_id
-                .map(str::trim)
-                .filter(|owner| !owner.is_empty())
-                .map(str::to_owned),
+            owner_device,
             bridges,
             crowd_threshold,
             moves,
@@ -1063,7 +1093,7 @@ impl Portals {
         let mut name = None;
         let mut members = 0u64;
         let mut observation = Observation::Absent;
-        let mut owner = self.owner_user_id.as_ref().map(|_| OwnerMembership::Absent);
+        let mut owner = self.owner_device.owner().map(|_| OwnerMembership::Absent);
         let mut replaced_by = None;
         let mut moved_from = None;
         let bot = bot_user_id(&state);
@@ -1139,7 +1169,7 @@ impl Portals {
                         };
                         continue;
                     }
-                    if Some(who) == self.owner_user_id.as_deref() {
+                    if Some(who) == self.owner_device.owner() {
                         owner = Some(OwnerMembership::of(membership));
                         // The owner is a member of the conversation and is
                         // counted as one: the number the user reads is who
@@ -1202,7 +1232,7 @@ impl Portals {
     /// reach is the bot's own rooms, so a room no bot is in is simply not
     /// answered, and that is [`Delivery::Unknown`] rather than a guess.
     pub async fn delivery_of(&self, room_id: &str) -> Delivery {
-        let Some(owner) = self.owner_user_id.as_deref() else {
+        let Some(owner) = self.owner_device.owner() else {
             return Delivery::Unknown {
                 why: "no_owner_configured",
             };
@@ -1251,9 +1281,24 @@ impl Portals {
                 // answer to give.
                 continue;
             }
+            // The room is a portal, so whether a reply reaches the contact is
+            // whether a bridge will relay it, and a bridge relays only what
+            // the owner's own account sends. Two things have to hold at once
+            // and the credential is asked about first (#404): a joined account
+            // this deployment holds no device of cannot send either, and the
+            // remedy for a missing membership is a device accepting an
+            // invitation. Asked only here, so a native Matrix room — which
+            // never reaches this line — keeps saying nothing.
+            if self.owner_device.credential_is_gone() {
+                return Delivery::CannotReach {
+                    obstacle: Obstacle::OwnerDeviceCredentialGone,
+                };
+            }
             return match membership {
                 OwnerMembership::Joined => Delivery::CanReach,
-                owner => Delivery::CannotReach { owner },
+                owner => Delivery::CannotReach {
+                    obstacle: Obstacle::OwnerNotIn(owner),
+                },
             };
         }
         Delivery::Unknown {

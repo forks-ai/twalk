@@ -1,0 +1,18 @@
+{
+  "specversion": "1.0",
+  "id": "d92c7ae1e6ee793c81f7f75cc016a11d37b164077c198f8f671984581466ad0f",
+  "source": "matrix://twalk.example.com/owner-device",
+  "type": "fr.linagora.twalk.owner.device.state.changed.v1",
+  "time": "2026-09-28T09:15:00Z",
+  "subject": "owner-device",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/owner.device.state.changed.schema.json",
+  "data": {
+    "owner": "@michel:twalk.example.com",
+    "device_id": "PZJQUQQFOD",
+    "from_state": "present",
+    "to_state": "credential_gone",
+    "occurred_at": "2026-09-28T09:15:00Z",
+    "remedy": "The homeserver no longer knows the device Twalk acts through: the owner revoked it, or an admin did. Until another is held, every approved reply to a bridged conversation is refused rather than posted to nobody. The owner can hand over a new device by onboarding again in the Companion, with nothing to restart; an operator can replace SENSOR_OWNER_DEVICE_ACCESS_TOKEN by running docker-compose/provision-owner-device.sh and restarting the Sensor. This is not a homeserver that is unreachable — that answers differently and is retried."
+  }
+}

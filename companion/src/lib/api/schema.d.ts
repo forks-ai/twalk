@@ -2995,13 +2995,20 @@ export interface components {
              *     `cannot_reach`: the bridge invited the owner into the
              *     conversation and no device of theirs has accepted — every portal,
              *     on a deployment with no owner device configured; that room, on one
-             *     whose device could not join it (#237). `trigger_out_of_reach` is
-             *     the message this suggestion answers lying beyond the read window,
-             *     so its room could not be read; `lookup_failed` is the bus not
-             *     answering that second read.
+             *     whose device could not join it (#237).
+             *     `owner_device_credential_gone` is the other `cannot_reach`, and it
+             *     is about every portal at once rather than about this room: the
+             *     device Twalk acts through has been revoked, the Sensor said so on
+             *     the bus (#404, ADR 0041), and until another is provisioned or
+             *     handed over (#228) no reply can be posted as the owner — so it is
+             *     reported ahead of a membership, whose own remedy is a device
+             *     accepting an invitation. `trigger_out_of_reach` is the message this
+             *     suggestion answers lying beyond the read window, so its room could
+             *     not be read; `lookup_failed` is the bus not answering that second
+             *     read.
              * @enum {string}
              */
-            detail: "owner_joined" | "owner_invited" | "owner_absent" | "not_a_known_portal" | "portal_unreadable" | "no_portal_register" | "no_owner_configured" | "trigger_out_of_reach" | "lookup_failed";
+            detail: "owner_joined" | "owner_invited" | "owner_absent" | "owner_device_credential_gone" | "not_a_known_portal" | "portal_unreadable" | "no_portal_register" | "no_owner_configured" | "trigger_out_of_reach" | "lookup_failed";
             /** @enum {string} */
             reach: "can_reach" | "cannot_reach" | "unknown";
         };

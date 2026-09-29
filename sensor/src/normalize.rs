@@ -68,7 +68,10 @@ pub fn presence_event_id(
     hex_encode(hasher.finalize())
 }
 
-fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+/// Lower-case hex, for the deterministic ids above and for the owner device's
+/// own natural key ([`crate::owner_device::state_changed_id`]) — every one of
+/// them is a SHA-256 the contract spells as 64 hex characters.
+pub(crate) fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 

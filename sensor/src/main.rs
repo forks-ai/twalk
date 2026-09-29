@@ -340,9 +340,36 @@ async fn main() -> Result<()> {
     // for the same reason it already asks the metrics whether the credential is
     // still good (#229).
     let owner_device = Arc::new(OwnerDevice::new());
-    if let Some(device) = bring_up_owner_device(&config, owner.as_ref(), &metrics).await? {
+    let brought_up = bring_up_owner_device(&config, owner.as_ref(), &metrics).await?;
+    // What this deployment can do as the owner, said on the bus before anything
+    // else happens (#404, ADR 0041): the Companion Gateway draws the approval
+    // screen from it, so a screen opened while the Sensor is starting is one that
+    // has already been told. An owner nobody named is announced to nobody — the
+    // event names them — which is why this is built beside `owner`.
+    let announcer = owner.as_ref().map(|owner| {
+        Arc::new(OwnerDeviceAnnouncer::new(
+            jetstream.clone(),
+            client
+                .user_id()
+                .map(|id| id.server_name().as_str().to_owned())
+                .unwrap_or_default(),
+            owner.matrix_id().to_owned(),
+            metrics.clone(),
+        ))
+    });
+    if let Some(announcer) = &announcer {
+        announcer
+            .announce(brought_up.state, brought_up.device_id.as_deref())
+            .await;
+    }
+    if let Some(device) = brought_up.client {
         owner_device
-            .hold(device, bridge_bots.clone(), metrics.clone())
+            .hold(
+                device,
+                bridge_bots.clone(),
+                metrics.clone(),
+                announcer.clone(),
+            )
             .await;
     }
 
@@ -1141,6 +1168,7 @@ async fn main() -> Result<()> {
         let retry_base = config.send_retry_base;
         let max_attempts = config.send_retry_max_attempts;
         let metrics = metrics.clone();
+        let announcer = announcer.clone();
         tokio::spawn(async move {
             consume_approved_replies(
                 client,
@@ -1149,6 +1177,7 @@ async fn main() -> Result<()> {
                 retry_base,
                 max_attempts,
                 metrics,
+                announcer,
             )
             .await;
         });
@@ -1174,6 +1203,7 @@ async fn main() -> Result<()> {
             bridge_bots: bridge_bots.clone(),
             held: owner_device.clone(),
             metrics: metrics.clone(),
+            announcer: announcer.clone(),
         })
     });
     let mut sync = Box::pin(client.sync_with_callback(SyncSettings::default(), {
@@ -1276,6 +1306,103 @@ async fn serve_metrics(listener: tokio::net::TcpListener, metrics: Arc<Metrics>)
                 });
             }
             Err(error) => warn!(%error, "metrics accept failed"),
+        }
+    }
+}
+
+/// Says on the bus whether this deployment can act as the owner (#404, ADR 0041).
+///
+/// One per run, holding the last state it published so that `from_state` is a real
+/// transition and a state that has not changed is not republished — the contract's
+/// `unknown` is the first event of a run, and a consumer reads it as the state.
+///
+/// Publishing is **best effort and never fatal**: a bus that refuses this event is
+/// a bus that refuses everything else too, and the Sensor's job is to keep
+/// observing. What the Companion Gateway loses is the freshness of one screen's
+/// sentence, which it degrades to `unknown` on its own (ADR 0041).
+struct OwnerDeviceAnnouncer {
+    jetstream: async_nats::jetstream::Context,
+    /// The homeserver's server name: the `source`'s authority, as every event the
+    /// Sensor publishes spells it.
+    server_name: String,
+    /// The owner's Matrix ID. Without one there is nobody to name and nothing is
+    /// published at all, which is why this is built only beside a configured owner.
+    owner: String,
+    metrics: Arc<Metrics>,
+    last: tokio::sync::Mutex<Option<owner_device::DeviceState>>,
+}
+
+impl OwnerDeviceAnnouncer {
+    fn new(
+        jetstream: async_nats::jetstream::Context,
+        server_name: String,
+        owner: String,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self {
+            jetstream,
+            server_name,
+            owner,
+            metrics,
+            last: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Publishes `to` when it differs from what this run last said.
+    ///
+    /// `device_id` is the device the state is about, absent when there is none. The
+    /// instant is this process's own: the event's id is keyed on it, so two runs
+    /// observing the same state publish two events — which is what the contract
+    /// wants, since each is that run's own first word.
+    async fn announce(&self, to: owner_device::DeviceState, device_id: Option<&str>) {
+        let from = {
+            let mut last = self.last.lock().await;
+            if *last == Some(to) {
+                return;
+            }
+            let previous = *last;
+            *last = Some(to);
+            previous
+        };
+        let occurred_at = rfc3339(std::time::SystemTime::now());
+        let envelope = owner_device::state_changed(
+            &self.server_name,
+            &self.owner,
+            device_id,
+            from,
+            to,
+            &occurred_at,
+        );
+        let id = envelope["id"].as_str().unwrap_or_default().to_owned();
+        let mut headers = async_nats::header::HeaderMap::new();
+        headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
+        // No `network`, no `connection`, no `consent`: the headers duplicate the
+        // envelope's extensions, and this event has none of them because it is
+        // about no contact and no conversation. A consumer filtering on `consent`
+        // is filtering for events about a person, and a persona's trigger
+        // allowlist never names this type.
+        let payload = serde_json::to_vec(&envelope).expect("the envelope is serializable");
+        let subject = normalize::bus_subject(owner_device::STATE_CHANGED_TYPE);
+        match self
+            .jetstream
+            .publish_with_headers(subject, headers, payload.into())
+            .await
+        {
+            Ok(ack) => match ack.await {
+                Ok(_) => {
+                    self.metrics
+                        .record_published(owner_device::STATE_CHANGED_TYPE);
+                    info!(
+                        %id,
+                        from = from.map_or("unknown", owner_device::DeviceState::as_str),
+                        to = to.as_str(),
+                        device_id = device_id.unwrap_or("none"),
+                        "said on the bus whether this deployment can act as the owner"
+                    );
+                }
+                Err(error) => warn!(%id, %error, "the owner device's state was not acked"),
+            },
+            Err(error) => warn!(%id, %error, "the owner device's state could not be published"),
         }
     }
 }
@@ -1489,14 +1616,22 @@ impl OwnerDevice {
     /// what a replacement needs and what a graceful stop cannot give: the loop
     /// never returns by design (it retries for as long as the Sensor runs), so
     /// there is nothing to await.
-    async fn hold(&self, client: Client, bridge_bots: BridgeBots, metrics: Arc<Metrics>) {
+    async fn hold(
+        &self,
+        client: Client,
+        bridge_bots: BridgeBots,
+        metrics: Arc<Metrics>,
+        announcer: Option<Arc<OwnerDeviceAnnouncer>>,
+    ) {
         let mut held = self.held.write().await;
         if let Some(previous) = held.syncing.take() {
             previous.abort();
         }
         let syncing = {
             let client = client.clone();
-            tokio::spawn(async move { run_owner_device(client, bridge_bots, metrics).await })
+            tokio::spawn(
+                async move { run_owner_device(client, bridge_bots, metrics, announcer).await },
+            )
         };
         *held = Held {
             client: Some(client),
@@ -1605,7 +1740,7 @@ async fn bring_up_owner_device(
     config: &Config,
     owner: Option<&twalk_sensor::owner::Owner>,
     metrics: &Metrics,
-) -> Result<Option<Client>> {
+) -> Result<BroughtUp> {
     let held = config
         .state_dir
         .as_ref()
@@ -1646,7 +1781,9 @@ async fn bring_up_owner_device(
                  defect, degraded on purpose rather than silently; onboarding hands one over \
                  (ADR 0034), and a deployment provisioned by script sets the variable"
             );
-            return Ok(None);
+            return Ok(BroughtUp::without_a_device(
+                owner_device::DeviceState::NotConfigured,
+            ));
         }
     };
     let Some(owner) = owner else {
@@ -1660,9 +1797,14 @@ async fn bring_up_owner_device(
              so approved replies are posted by the Sensor's own account. Set SENSOR_OWNER to the \
              account the credential belongs to"
         );
-        return Ok(None);
+        // Nothing is said on the bus either: the event names the owner, and there is
+        // no owner to name (#404).
+        return Ok(BroughtUp::without_a_device(
+            owner_device::DeviceState::NotConfigured,
+        ));
     };
     let (access_token, device_id) = credential;
+    let device_id_owned = device_id.to_owned();
     let handed_over = held.is_some();
     let opened = open_owner_device(
         &config.homeserver_url,
@@ -1707,7 +1849,11 @@ async fn bring_up_owner_device(
                  device without a restart. The credential is kept, in case the homeserver was \
                  merely away"
             );
-            return Ok(None);
+            return Ok(BroughtUp {
+                client: None,
+                state: owner_device::DeviceState::CredentialGone,
+                device_id: Some(device_id_owned),
+            });
         }
     };
     metrics.record_owner_device_present();
@@ -1719,7 +1865,36 @@ async fn bring_up_owner_device(
          bridge relays them (ADR 0025). It observes nothing, publishes nothing, and reads no \
          history — no cross-signing and no recovery key (ADR 0034)"
     );
-    Ok(Some(client))
+    Ok(BroughtUp {
+        client: Some(client),
+        state: owner_device::DeviceState::Present,
+        device_id: Some(device_id_owned),
+    })
+}
+
+/// What bringing the owner device up came to: the client when there is one, and the
+/// state the deployment is in either way (#404).
+///
+/// The state is returned rather than inferred from `client.is_none()` because the two
+/// reasons there is no client are different facts with different remedies — none was
+/// ever given, or the one given is refused by the homeserver — and the approval screen
+/// draws them differently.
+struct BroughtUp {
+    client: Option<Client>,
+    state: owner_device::DeviceState,
+    device_id: Option<String>,
+}
+
+impl BroughtUp {
+    /// Nothing held, and the state that says why — which is never `Present`,
+    /// because a deployment that holds no device cannot act as the owner.
+    fn without_a_device(state: owner_device::DeviceState) -> Self {
+        Self {
+            client: None,
+            state,
+            device_id: None,
+        }
+    }
 }
 
 /// Builds the client one credential of the owner's account acts through, whether
@@ -1874,6 +2049,10 @@ struct Handovers {
     bridge_bots: BridgeBots,
     held: Arc<OwnerDevice>,
     metrics: Arc<Metrics>,
+    /// Says on the bus that this deployment can act as the owner again, the moment
+    /// a handover is taken (#404): that is what makes re-onboarding clear a revoked
+    /// device on the approval screen with nothing else to do and no reload.
+    announcer: Option<Arc<OwnerDeviceAnnouncer>>,
 }
 
 /// Reads the sync response's to-device events for the credential the owner's
@@ -2188,10 +2367,29 @@ async fn take_the_handover(
         ),
     }
 
-    ctx.held
-        .hold(opened, ctx.bridge_bots.clone(), ctx.metrics.clone())
-        .await;
+    // The gauge and the bus are both told **before** the sync loop starts, and
+    // the order is the point: `hold` spawns a loop that announces
+    // `credential_gone` the moment a sync is refused, so a `present` published
+    // after it could land last and leave the bus saying the deployment can act
+    // while the gauge says it cannot. The credential has already been used
+    // successfully to get here, so saying `present` now is not a guess.
     ctx.metrics.record_handover_held();
+    if let Some(announcer) = &ctx.announcer {
+        announcer
+            .announce(
+                owner_device::DeviceState::Present,
+                Some(&handover.device_id),
+            )
+            .await;
+    }
+    ctx.held
+        .hold(
+            opened,
+            ctx.bridge_bots.clone(),
+            ctx.metrics.clone(),
+            ctx.announcer.clone(),
+        )
+        .await;
 
     match room
         .send_state_event_raw(
@@ -2300,7 +2498,14 @@ fn owner_device_sync_settings() -> SyncSettings {
 /// being joined to portals as the bridges build them, one per conversation as it
 /// becomes active, which on the reference deployment was eighteen new rooms in
 /// one morning (ADR 0024, #105).
-async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<Metrics>) {
+async fn run_owner_device(
+    client: Client,
+    bridge_bots: BridgeBots,
+    metrics: Arc<Metrics>,
+    // Says on the bus when this device's credential is gone (#404). `None` on a
+    // deployment with no owner named, where the event would name nobody.
+    announcer: Option<Arc<OwnerDeviceAnnouncer>>,
+) {
     let settings = owner_device_sync_settings();
     // A refused invitation is refused on every sync, so the log line and the
     // counter would otherwise repeat forever. Each room is decided once per
@@ -2328,6 +2533,17 @@ async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<
                     // wearing a warning's clothes.
                     metrics.record_owner_device_credential_gone();
                     error!(%error, "{}", owner_device::REVOKED_REMEDY);
+                    // And on the bus, so the approval screen stops offering a
+                    // delivery this deployment can no longer perform instead of
+                    // the owner finding out by pressing the button (#404).
+                    if let Some(announcer) = &announcer {
+                        announcer
+                            .announce(
+                                owner_device::DeviceState::CredentialGone,
+                                client.device_id().map(|device| device.as_str()),
+                            )
+                            .await;
+                    }
                     return;
                 }
                 owner_device::AfterRefusal::Retry => {
@@ -3125,6 +3341,7 @@ async fn consume_approved_replies(
     retry_base: Duration,
     max_attempts: i64,
     metrics: Arc<Metrics>,
+    announcer: Option<Arc<OwnerDeviceAnnouncer>>,
 ) {
     loop {
         match run_approved_reply_consumer(
@@ -3134,6 +3351,7 @@ async fn consume_approved_replies(
             retry_base,
             max_attempts,
             &metrics,
+            announcer.as_ref(),
         )
         .await
         {
@@ -3153,6 +3371,7 @@ async fn run_approved_reply_consumer(
     retry_base: Duration,
     max_attempts: i64,
     metrics: &Metrics,
+    announcer: Option<&Arc<OwnerDeviceAnnouncer>>,
 ) -> Result<()> {
     let stream = jetstream
         .get_stream(normalize::STREAM_NAME)
@@ -3233,12 +3452,34 @@ async fn run_approved_reply_consumer(
         // #228 a credential can *arrive* while it runs too, so the device itself
         // is read here and not captured when the consumer was built.
         let held = owner_device.current().await;
+        // The device this attempt acts through, for the event that says its
+        // credential is gone (#404): read here, because by the time the send fails
+        // the cell may already be holding another.
+        let acting_device_id = held
+            .as_ref()
+            .and_then(|device| device.device_id().map(|id| id.as_str().to_owned()));
         let acting = match &held {
             Some(device) if metrics.owner_device_can_act() => Acting::OwnersDevice(device),
             Some(_) => Acting::CredentialGone,
             None => Acting::NotConfigured,
         };
-        match post_approved_reply(client, acting, &job, metrics).await {
+        let outcome = post_approved_reply(client, acting, &job, metrics).await;
+        // Said on the bus before the failure is handled (#404): the approval
+        // screen has to stop offering a delivery this very process has just
+        // refused, and the gauge `classify_send_error` already moved must not
+        // disagree with what the bus says. Only reachable for a send made
+        // *through the owner's device*, which is what `PostError::CredentialGone`
+        // means — the Sensor's own account's token is a different situation with
+        // a different remedy, and is classified as one.
+        if let (Err(PostError::CredentialGone(_)), Some(announcer)) = (&outcome, announcer) {
+            announcer
+                .announce(
+                    owner_device::DeviceState::CredentialGone,
+                    acting_device_id.as_deref(),
+                )
+                .await;
+        }
+        match outcome {
             Ok(posted) => {
                 metrics.record_reply_reach(posted.reach);
                 // Reported before the ack, like the dead-letter copy is, so the
@@ -3290,7 +3531,14 @@ async fn run_approved_reply_consumer(
                 )
                 .await;
             }
-            Err(PostError::Transient(error)) if delivered >= max_attempts => {
+            // A credential the homeserver has forgotten is *the same transient
+            // failure* as any other here, and shares these two arms rather than
+            // copying them: re-provisioning inside the retry schedule still
+            // sends this reply, and letting the schedule run out dead-letters it
+            // with that reason, which is what the approval screen reads (#311).
+            Err(PostError::Transient(error) | PostError::CredentialGone(error))
+                if delivered >= max_attempts =>
+            {
                 metrics.record_outbound_send_failure();
                 error!(id = %job.event_id, room = %job.room_id, %error, %delivered, "approved reply exhausted its retries, dead-lettering");
                 dead_letter(
@@ -3302,7 +3550,7 @@ async fn run_approved_reply_consumer(
                 )
                 .await;
             }
-            Err(PostError::Transient(error)) => {
+            Err(PostError::Transient(error) | PostError::CredentialGone(error)) => {
                 metrics.record_outbound_send_failure();
                 let delay = outbound::retry_delay(retry_base, delivered);
                 warn!(id = %job.event_id, room = %job.room_id, %error, %delivered, ?delay, "approved reply send failed, scheduling a retry");
@@ -3736,6 +3984,12 @@ async fn dead_letter(
 enum PostError {
     Permanent(anyhow::Error),
     Transient(anyhow::Error),
+    /// Transient, and the reason is the one thing a caller acts on beyond the
+    /// retry: the homeserver refuses the acting credential (#229). Retried like any
+    /// transient failure — a re-provisioning inside the schedule still sends the
+    /// reply — and said on the bus by the caller, so the approval screen stops
+    /// offering a delivery this deployment has already refused (#404).
+    CredentialGone(anyhow::Error),
 }
 
 /// One posted approved reply: which identity posted it, and what that reached.
@@ -3883,7 +4137,7 @@ async fn post_approved_reply(
     room.send(content)
         .with_transaction_id(transaction_id)
         .await
-        .map_err(|error| classify_send_error(error, metrics))?;
+        .map_err(|error| classify_send_error(error, metrics, by_the_owners_device))?;
     Ok(Posted {
         reach: owner_device::reach(by_the_owners_device, the_room_is_a_portal),
         posted_as,
@@ -4006,7 +4260,11 @@ fn duplicate_extensions(event: &serde_json::Value, headers: &mut async_nats::hea
 /// schedule before dead-lettering — notably `M_FORBIDDEN`, which a portal
 /// room's power levels raise and which clears once the Sensor is granted the
 /// right to post, and `M_LIMIT_EXCEEDED`, network and server errors.
-fn classify_send_error(error: matrix_sdk::Error, metrics: &Metrics) -> PostError {
+fn classify_send_error(
+    error: matrix_sdk::Error,
+    metrics: &Metrics,
+    by_the_owners_device: bool,
+) -> PostError {
     // The acting credential, refused by the send rather than by a sync (#229).
     // This is the thirty-second window the sync loop cannot close on its own: it
     // learns of a revocation when its long poll comes back, and an approval that
@@ -4014,13 +4272,41 @@ fn classify_send_error(error: matrix_sdk::Error, metrics: &Metrics) -> PostError
     // forgotten. Read here too, so the failure names the credential and the
     // remedy instead of "matrix send failed", and so the gauge an operator alerts
     // on moves at the first symptom rather than at the next sync.
+    //
+    // **Only for a send the owner's device made.** A reply into a native Matrix
+    // room goes out as `@sensor:` and always has (ADR 0009), and an
+    // `M_UNKNOWN_TOKEN` there is about the *Sensor's own* session: a different
+    // credential, a different remedy, and nothing to do with the owner's device
+    // list. Reading it as the owner device's would raise the gauge, publish
+    // `credential_gone` and refuse every bridged conversation's reply on the
+    // approval screen (#404) because a room with no bridge in it answered
+    // badly — which is the conflation this deployment keeps closing.
+    let errcode = matrix_errcode(&error);
     if matches!(
-        owner_device::after_refusal(matrix_errcode(&error).as_deref()),
+        owner_device::after_a_send_refusal(errcode.as_deref(), by_the_owners_device),
         owner_device::AfterRefusal::CredentialGone
     ) {
         metrics.record_owner_device_credential_gone();
         error!("{}", owner_device::REVOKED_REMEDY);
-        return PostError::Transient(anyhow!("{}", owner_device::REVOKED_REMEDY));
+        // The bus is told by the caller, which is async: the gauge and the event
+        // must not disagree — a deployment whose gauge says the credential is gone
+        // and whose bus still says `present` would draw an approval screen that
+        // offers a delivery the same process has already refused (#404).
+        return PostError::CredentialGone(anyhow!("{}", owner_device::REVOKED_REMEDY));
+    }
+    if matches!(
+        owner_device::after_refusal(errcode.as_deref()),
+        owner_device::AfterRefusal::CredentialGone
+    ) {
+        // The Sensor's own session, refused. Named rather than folded into
+        // "matrix send failed", and retried: this process's own sync will refuse
+        // too, and nothing the owner does to their device list changes it.
+        error!(
+            "the homeserver no longer knows this Sensor's own session, which is what posts into \
+             a room no bridge marked: nothing can be posted at all until the Sensor is given a \
+             session again. This is not the owner's device (#123) and re-onboarding will not \
+             replace it"
+        );
     }
     let permanent = matches!(
         error.client_api_error_kind(),

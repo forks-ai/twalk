@@ -985,6 +985,16 @@ async fn a_suggestion_this_build_cannot_read_is_counted_rather_than_blanking_the
 // 9. Published on your bus and delivered to the contact are two facts (#216)
 // ---------------------------------------------------------------------------
 
+/// Serialises the two tests that depend on what the bus last said about the
+/// **owner device** (#404). That fact has one subject and it is about the
+/// deployment rather than about a room, so two Gateways of one owner sharing a
+/// bus cannot each hold their own — the module header's "each test invents its
+/// own contact, its own room and its own suggestion" has no equivalent here.
+/// Across *suites* the owner check does the isolating instead: the Sensor's own
+/// suite runs a deployment owned by `@owner:test.twalk`, and a Gateway
+/// configured for another account ignores what that one says about its device.
+static OWNER_DEVICE_STATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A reply into a portal the owner's account is not a joined member of is
 /// accepted by the homeserver, given an event id, and relayed to nobody — a
 /// bridge relays only the logged-in user's own account. The approval screen
@@ -1000,6 +1010,11 @@ async fn a_suggestion_this_build_cannot_read_is_counted_rather_than_blanking_the
 #[tokio::test]
 async fn a_reply_says_before_the_approval_whether_it_can_reach_the_contact() -> Result<()> {
     ensure_stack().await?;
+    // Held from before this Gateway starts until the last delivery assertion:
+    // it reads the owner device's state off the bus, and the test below moves
+    // it. What follows the assertions — the approval and the Sensor's report —
+    // does not depend on it.
+    let one_at_a_time = OWNER_DEVICE_STATE.lock().await;
     let bus = bus().await?;
     let bridge_bot = MatrixUser::as_fresh_appservice("portalbot").await?;
     let owner = MatrixUser::login(harness::OWNER_LOCALPART).await?;
@@ -1078,6 +1093,7 @@ async fn a_reply_says_before_the_approval_whether_it_can_reach_the_contact() -> 
         .await?;
     assert_eq!(status, reqwest::StatusCode::OK, "{single}");
     assert_eq!(single["delivery"], cannot["delivery"]);
+    drop(one_at_a_time);
 
     // Approving the deliverable one publishes the reply; that is all the
     // Gateway can say by itself, and its answer says exactly that.
@@ -1149,6 +1165,134 @@ async fn a_reply_says_before_the_approval_whether_it_can_reach_the_contact() -> 
     let (_text, listed, _) = running.listed(&talks[0].1).await?;
     assert_eq!(listed["standing"], json!("approved"));
     assert_eq!(listed["posted"], posted);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 9b. The screen knows the acting device is gone before anything is sent (#404)
+// ---------------------------------------------------------------------------
+
+/// #229 made a revoked owner device visible **after** a reply had failed: the
+/// refusal dead-letters with its reason and the approval screen reads that
+/// (#311). Its own words asked for more than its criteria did — *"the
+/// Companion stops offering a delivery it can no longer perform"* — and the
+/// fact had no way to cross from the Sensor, which holds the credential, to
+/// this Gateway, which draws the screen.
+///
+/// It crosses on the bus (ADR 0041): `owner.device.state.changed.v1`,
+/// published by the Sensor and followed here from its last event. This drives
+/// the whole loop through the real binary — a portal the owner is joined to
+/// says `can_reach`, the state is published, the same room says
+/// `cannot_reach` naming the credential, a room no bridge is in says exactly
+/// what it said before, and `present` clears it with nothing restarted and
+/// nothing reloaded.
+#[tokio::test]
+async fn the_screen_says_a_reply_cannot_be_sent_as_the_owner_once_the_device_is_gone() -> Result<()>
+{
+    ensure_stack().await?;
+    let _one_at_a_time = OWNER_DEVICE_STATE.lock().await;
+    let bus = bus().await?;
+    let bridge_bot = MatrixUser::as_fresh_appservice("portalbotgone").await?;
+    let owner = MatrixUser::login(harness::OWNER_LOCALPART).await?;
+    let static_dir = companion_build("suggestions-device-gone")?;
+    let mut env = gateway_env_with_portals(&static_dir, &bridge_bot);
+    env.push(("GATEWAY_NATS_URL".to_owned(), nats_url()));
+    let running = Running::start_with(static_dir, env).await?;
+
+    // A portal the owner's account is joined to: before #404 this was
+    // `can_reach` whatever had become of the device Twalk posts as.
+    let portal = bridge_bot.make_portal("device-gone", "whatsapp").await?;
+    bridge_bot.invite(&portal, &owner.user_id).await?;
+    owner.join(&portal).await?;
+    let contact = ghost("devicegone");
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &portal, "granted");
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+    let suggestion = suggest_event(&trigger, "Oui, à 20h !", Some(&in_seconds(3600)));
+    bus.publish_event(SUGGEST_SUBJECT, &suggestion).await?;
+    let bridged = suggestion["id"].as_str().unwrap().to_owned();
+    // And a conversation no bridge bot of this deployment is in — native
+    // Matrix, as far as the register can tell: no bridge stands between that
+    // room and its reader, so a revoked owner device changes nothing about it.
+    let native = conversation(
+        &running,
+        &bus,
+        "nativegone",
+        "granted",
+        Some(&in_seconds(3600)),
+    )
+    .await?;
+
+    let (_text, before, _) = running.listed(&bridged).await?;
+    assert_eq!(
+        before["delivery"],
+        json!({ "reach": "can_reach", "detail": "owner_joined" }),
+        "nothing has been said about the owner device, so the answer is the one #216 gave and \
+         an absence is not read as a revocation: {before}"
+    );
+
+    // The Sensor's word, as it publishes it at every transition (#404).
+    bus.publish_event(
+        harness::OWNER_DEVICE_STATE_SUBJECT,
+        &harness::owner_device_state_event(Some("PZJQUQQFOD"), "present", "credential_gone"),
+    )
+    .await?;
+
+    let gone = poll_until(
+        || async {
+            let (_text, entry, _) = running.listed(&bridged).await.ok()?;
+            (entry["delivery"]["detail"] == json!("owner_device_credential_gone")).then_some(entry)
+        },
+        "the approval screen to learn the owner device is gone",
+    )
+    .await?;
+    assert_eq!(
+        gone["delivery"],
+        json!({ "reach": "cannot_reach", "detail": "owner_device_credential_gone" }),
+        "the owner's account is still in the room; what is gone is the device this deployment \
+         posts as, and that is a certainty about every bridged conversation at once: {gone}"
+    );
+    // The single read says the same, because a screen and a script must not
+    // learn two different things about one reply.
+    let (status, single) = running.get(&format!("/api/suggestions/{bridged}")).await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{single}");
+    assert_eq!(single["delivery"], gone["delivery"]);
+    // Nothing was attempted: no approval, no post, no dead letter.
+    assert_eq!(gone["standing"], json!("approvable"));
+    assert_eq!(gone["posted"], Value::Null);
+    assert_eq!(gone["given_up"], Value::Null);
+
+    // The native conversation says exactly what it said before, and it is not
+    // a `cannot_reach` of any kind.
+    let (_text, untouched, _) = running.listed(&native.suggestion_id).await?;
+    assert_eq!(
+        untouched["delivery"]["reach"],
+        json!("unknown"),
+        "no bridge stands between this room and its reader, so the owner device has nothing to \
+         do with it: {untouched}"
+    );
+
+    // Re-provisioning, or a handover (#228): the Sensor says `present` and
+    // the same read clears, with nothing restarted here and nothing reloaded
+    // in the Companion.
+    bus.publish_event(
+        harness::OWNER_DEVICE_STATE_SUBJECT,
+        &harness::owner_device_state_event(Some("HANDEDOVER1"), "credential_gone", "present"),
+    )
+    .await?;
+    let back = poll_until(
+        || async {
+            let (_text, entry, _) = running.listed(&bridged).await.ok()?;
+            (entry["delivery"]["reach"] == json!("can_reach")).then_some(entry)
+        },
+        "the approval screen to offer the reply again once a device is held",
+    )
+    .await?;
+    assert_eq!(
+        back["delivery"],
+        json!({ "reach": "can_reach", "detail": "owner_joined" }),
+        "{back}"
+    );
     Ok(())
 }
 

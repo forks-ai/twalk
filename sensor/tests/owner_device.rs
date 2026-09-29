@@ -62,6 +62,7 @@ const STREAM: &str = "twalk";
 const REPLY_APPROVED_SUBJECT: &str = "twalk.persona.reply.approved.v1";
 const POSTED_SUBJECT: &str = "twalk.persona.reply.approved.v1.posted";
 const OUTBOUND_SUBJECT: &str = "twalk.outbound.message.sent.v1";
+const OWNER_DEVICE_STATE_SUBJECT: &str = "twalk.owner.device.state.changed.v1";
 
 /// The owner: unlike every other suite, a **real account** on the test stack.
 /// The identity Twalk acts through has to log in, hold a device, and join
@@ -671,6 +672,70 @@ async fn a_revoked_acting_device_is_noticed_and_named_and_no_reply_goes_out_as_t
         logs.iter()
             .any(|line| line.contains("not a homeserver that is unreachable")),
         "the message tells the two situations apart: {logs:#?}"
+    );
+
+    // 1b. And it is on the **bus**, which is what makes the approval screen
+    //     stop offering a delivery this deployment can no longer perform
+    //     (#404, ADR 0041). The log and the gauge are this process's; the event
+    //     is how the Companion Gateway, which draws the screen, ever finds out.
+    //     Found by this run's own device id, since the subject is the
+    //     deployment's and the bus outlives every run.
+    let this_runs_device = owner.device_id().to_owned();
+    let said_on_the_bus = wait_up_to(Duration::from_secs(30), || {
+        let device = this_runs_device.clone();
+        let bus = &bus;
+        async move {
+            let events = bus.fetch_all(STREAM, OWNER_DEVICE_STATE_SUBJECT).await.ok()?;
+            let mine: Vec<Value> = events
+                .into_iter()
+                .filter(|event| {
+                    event.pointer("/data/device_id").and_then(Value::as_str) == Some(device.as_str())
+                })
+                .collect();
+            mine.iter()
+                .any(|event| {
+                    event.pointer("/data/to_state").and_then(Value::as_str)
+                        == Some("credential_gone")
+                })
+                .then_some(mine)
+        }
+    })
+    .await
+    .context("the revocation was never said on the bus")?;
+    // Every one of them is an event the contract allows, and the first is this
+    // run's startup word — `present`, so a Gateway reads a run's first event as
+    // the state and not as a change.
+    for event in &said_on_the_bus {
+        validate_against_contract(event, "owner.device.state.changed")?;
+        assert_eq!(
+            event.pointer("/data/owner").and_then(Value::as_str),
+            Some(OWNER),
+            "the event names the account the device belongs to, and a Gateway configured for \
+             another one ignores it: {event}"
+        );
+        assert_eq!(event["subject"], json!("owner-device"), "{event}");
+    }
+    assert_eq!(
+        said_on_the_bus
+            .iter()
+            .filter_map(|event| event.pointer("/data/to_state").and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec!["present", "credential_gone"],
+        "this run said what it started with and then what it lost, once each: {said_on_the_bus:#?}"
+    );
+    let gone = said_on_the_bus.last().expect("the revocation is there");
+    let remedy = gone
+        .pointer("/data/remedy")
+        .and_then(Value::as_str)
+        .expect("the state that changed an answer carries what puts it back");
+    assert!(
+        remedy.contains("onboarding again in the Companion")
+            && remedy.contains("provision-owner-device.sh"),
+        "both remedies, because the screen's reader and the log's reader are two people: {remedy}"
+    );
+    assert!(
+        !gone.to_string().contains(owner.access_token()),
+        "the credential never crosses the bus: {gone}"
     );
 
     // 2. And no reply is accepted for sending under the identity the deployment

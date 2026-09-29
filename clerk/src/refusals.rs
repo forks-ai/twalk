@@ -255,20 +255,31 @@ pub enum Unread {
 
 /// The delivery line of a post, in the Companion's own words:
 /// `Livraison : ` / `Delivery: ` and then the sentence the approval screen
-/// shows for this `reach` — `approvals.delivery.canReach`, `cannotReach` or
-/// `unknown`, the last for any `reach` this build has never met, as
-/// `rows.ts`'s `deliveryCopy` falls back — with `{detail}` replaced by the
-/// sentence for the `detail` word (`approvals.delivery.detail.<detail>`),
-/// or by the word itself when the catalogue has none for it. Total: no
-/// answer the Gateway gives leaves the post without a line.
+/// shows for this answer — `approvals.delivery.canReach`, one of the two
+/// `cannotReach` sentences, or `unknown`, the last for any `reach` this build
+/// has never met, as `rows.ts`'s `deliveryCopy` falls back — with `{detail}`
+/// replaced by the sentence for the `detail` word
+/// (`approvals.delivery.detail.<detail>`), or by the word itself when the
+/// catalogue has none for it. Total: no answer the Gateway gives leaves the
+/// post without a line.
+///
+/// `cannot_reach` has two sentences because it has two obstacles and the
+/// older one states the wrong situation as a fact: `owner_invited` and
+/// `owner_absent` are "your account is not in this conversation", while
+/// `owner_device_credential_gone` (#404) is the account being in it and the
+/// device Twalk posts as being gone. `rows.ts`'s `cannotReachKey` chooses the
+/// same way, from the same word.
 ///
 /// The sentence is embedded **verbatim**, including what the Companion
 /// chose to put in it: a translator improves it in one place, and an owner
 /// reading it on Buzz and on the approval screen reads one sentence.
 pub fn delivery_line(l: Lang, delivery: &Delivery) -> String {
-    let key = match delivery.reach.as_str() {
-        "can_reach" => "approvals.delivery.canReach",
-        "cannot_reach" => "approvals.delivery.cannotReach",
+    let key = match (delivery.reach.as_str(), delivery.detail.as_str()) {
+        ("can_reach", _) => "approvals.delivery.canReach",
+        ("cannot_reach", "owner_device_credential_gone") => {
+            "approvals.delivery.cannotReachNoOwnerDevice"
+        }
+        ("cannot_reach", _) => "approvals.delivery.cannotReach",
         _ => "approvals.delivery.unknown",
     };
     let detail = entry(l, &format!("{DETAIL_PREFIX}{}", delivery.detail))
@@ -520,13 +531,15 @@ mod tests {
             for key in [
                 "approvals.delivery.canReach",
                 "approvals.delivery.cannotReach",
+                "approvals.delivery.cannotReachNoOwnerDevice",
                 "approvals.delivery.unknown",
             ] {
                 assert!(entry(l, key).is_some_and(|s| !s.is_empty()), "{l:?}: {key}");
             }
-            // The two that take a detail leave the placeholder for it.
+            // The three that take a detail leave the placeholder for it.
             for key in [
                 "approvals.delivery.cannotReach",
+                "approvals.delivery.cannotReachNoOwnerDevice",
                 "approvals.delivery.unknown",
             ] {
                 assert!(
@@ -568,6 +581,27 @@ mod tests {
              your name (#123) — it has to have joined the conversation. This is not a fault in \
              your setup."
         );
+        // The other `cannot_reach` (#404), which is a different situation and
+        // says so: the account may be in the conversation and the device that
+        // posts as them is gone, so the remedy is handing over another one and
+        // not joining a room.
+        assert_eq!(
+            delivery_line(
+                Lang::En,
+                &delivery("cannot_reach", "owner_device_credential_gone")
+            ),
+            "Delivery: This reply cannot reach the contact. The device Twalk acts through as you \
+             no longer exists (the device that acts in your name has been revoked), and a bridge \
+             relays only what your own account sends: without that device nothing can be posted \
+             as you, in this conversation or in any other that goes through a bridge. Onboard \
+             again in the Companion to hand over a new one — nothing else has to be restarted, \
+             and refreshing this list is enough to see it cleared."
+        );
+        assert!(delivery_line(
+            Lang::Fr,
+            &delivery("cannot_reach", "owner_device_credential_gone")
+        )
+        .contains("Reprenez l’intégration dans le Companion"));
         assert_eq!(
             delivery_line(Lang::Fr, &delivery("can_reach", "owner_joined")),
             "Livraison : Votre compte est dans cette conversation : une fois approuvée, la \
@@ -589,6 +623,15 @@ mod tests {
                 ("unknown", "approvals.delivery.unknown"),
             ] {
                 for detail in known_details() {
+                    // One detail has a sentence of its own, spelled out
+                    // above; this loop pairs one reach with one sentence, so
+                    // it takes that pairing from the same word the line does.
+                    let key = if reach == "cannot_reach" && detail == "owner_device_credential_gone"
+                    {
+                        "approvals.delivery.cannotReachNoOwnerDevice"
+                    } else {
+                        key
+                    };
                     let line = delivery_line(l, &delivery(reach, detail));
                     let sentence = entry(l, key).unwrap().replace(
                         DETAIL_PLACEHOLDER,
