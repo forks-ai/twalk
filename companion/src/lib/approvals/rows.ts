@@ -219,10 +219,30 @@ export function deliveryCopy(delivery: Delivery): { key: MessageKey; warns: bool
 		case 'can_reach':
 			return { key: 'approvals.delivery.canReach', warns: false };
 		case 'cannot_reach':
-			return { key: 'approvals.delivery.cannotReach', warns: true };
+			return { key: cannotReachKey(delivery), warns: true };
 		default:
 			return { key: 'approvals.delivery.unknown', warns: false };
 	}
+}
+
+/**
+ * Which `cannot_reach` sentence a row gets, in one place because the screen
+ * asks it twice — before the button and after the approval — and two spellings
+ * of the same question drift.
+ *
+ * There are two, because the two obstacles are not the same situation and the
+ * older sentence states the wrong one as a fact. `owner_invited` and
+ * `owner_absent` are "your account is not in this conversation", whose remedy
+ * is a device of yours accepting the bridge's invitation (#123).
+ * `owner_device_credential_gone` is the opposite (#404): your account may well
+ * be in it, and what is missing is the device Twalk posts as — so nothing can
+ * be sent in your name anywhere a bridge is involved, and the remedy is
+ * handing over another one (#228).
+ */
+export function cannotReachKey(delivery: Delivery): MessageKey {
+	return delivery.detail === 'owner_device_credential_gone'
+		? 'approvals.delivery.cannotReachNoOwnerDevice'
+		: 'approvals.delivery.cannotReach';
 }
 
 /** The word behind the Gateway's answer, as a sentence fragment. */
@@ -270,7 +290,7 @@ export function postedCopy(row: Pick<Row, 'delivery' | 'posted' | 'givenUp'>): M
 			: 'approvals.posted.nobody';
 	}
 	return row.delivery.reach === 'cannot_reach'
-		? 'approvals.delivery.cannotReach'
+		? cannotReachKey(row.delivery)
 		: 'approvals.posted.pending';
 }
 

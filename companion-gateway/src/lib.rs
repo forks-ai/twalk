@@ -152,6 +152,22 @@
 //! by `GET`/`PUT /api/settings/disclosure`, so turning the disclosure off is a
 //! dated, attributed record and never a forgotten row in a settings table.
 //!
+//! Ticket #404 made the register's answer depend on something outside this
+//! process for the first time ([`owner_device`], ADR 0041). #229 made a
+//! revoked owner device visible *after* a reply had failed; its own words
+//! asked for more than its criteria did — *"the Companion stops offering a
+//! delivery it can no longer perform"* — and the fact had no way to cross from
+//! the Sensor, which holds the credential, to the Gateway, which draws the
+//! screen. It crosses on the bus, as every other fact in this deployment does:
+//! the Sensor publishes `owner.device.state.changed.v1` at every transition and
+//! at the start of every run, this Gateway follows that one subject from its
+//! last event and holds the state **in memory**, and [`portals::Portals`]
+//! answers `cannot_reach` for a **bridged** conversation while the credential
+//! is gone. A native Matrix conversation is untouched and says nothing, a
+//! Gateway that has heard nothing answers as it did before #404 rather than
+//! reading an absence as a revocation, and re-provisioning or a handover (#228)
+//! clears it with nothing reloaded.
+//!
 //! As in the Sensor, the seam-independent logic lives in these modules and
 //! the binary in `main.rs` only wires them to the network.
 
@@ -184,6 +200,10 @@ pub mod metrics;
 pub mod openapi;
 pub mod outbox;
 pub mod owner;
+/// Whether this deployment can still act as the owner, read off the bus and
+/// held in memory (#404, ADR 0041): what makes the approval screen stop
+/// offering a delivery a revoked device can no longer perform.
+pub mod owner_device;
 pub mod portals;
 pub mod portals_http;
 pub mod runtime_presence;
