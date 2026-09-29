@@ -1023,7 +1023,7 @@ mod tests {
         let gone = state_changed(
             SERVER,
             OWNER,
-            Some("PZJQUQQFOD"),
+            Some("EXAMPLEDEV1"),
             Some(DeviceState::Present),
             DeviceState::CredentialGone,
             WHEN,
@@ -1036,7 +1036,7 @@ mod tests {
         );
         assert_eq!(gone["source"], format!("matrix://{SERVER}/owner-device"));
         assert_eq!(gone["data"]["owner"], OWNER);
-        assert_eq!(gone["data"]["device_id"], "PZJQUQQFOD");
+        assert_eq!(gone["data"]["device_id"], "EXAMPLEDEV1");
         assert_eq!(gone["data"]["from_state"], "present");
         assert_eq!(gone["data"]["to_state"], "credential_gone");
         assert_eq!(gone["data"]["remedy"], REVOKED_REMEDY);
@@ -1064,7 +1064,7 @@ mod tests {
         let present = state_changed(
             SERVER,
             OWNER,
-            Some("PZJQUQQFOD"),
+            Some("EXAMPLEDEV1"),
             Some(DeviceState::CredentialGone),
             DeviceState::Present,
             WHEN,

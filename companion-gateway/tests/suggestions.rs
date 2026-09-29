@@ -1234,7 +1234,7 @@ async fn the_screen_says_a_reply_cannot_be_sent_as_the_owner_once_the_device_is_
     // The Sensor's word, as it publishes it at every transition (#404).
     bus.publish_event(
         harness::OWNER_DEVICE_STATE_SUBJECT,
-        &harness::owner_device_state_event(Some("PZJQUQQFOD"), "present", "credential_gone"),
+        &harness::owner_device_state_event(Some("EXAMPLEDEV1"), "present", "credential_gone"),
     )
     .await?;
 

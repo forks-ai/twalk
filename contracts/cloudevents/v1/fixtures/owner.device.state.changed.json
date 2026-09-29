@@ -9,7 +9,7 @@
   "dataschema": "https://schemas.twalk.dev/cloudevents/v1/owner.device.state.changed.schema.json",
   "data": {
     "owner": "@michel:twalk.example.com",
-    "device_id": "PZJQUQQFOD",
+    "device_id": "EXAMPLEDEV1",
     "from_state": "present",
     "to_state": "credential_gone",
     "occurred_at": "2026-09-28T09:15:00Z",

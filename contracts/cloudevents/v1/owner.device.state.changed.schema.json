@@ -86,7 +86,7 @@
           "maxLength": 255,
           "description": "The device the state is about, for an operator comparing it with the owner's device list. Absent on `not_configured`, since there is none. Never a token: a device id is a public name and the credential it belongs to never appears on the bus.",
           "examples": [
-            "PZJQUQQFOD"
+            "EXAMPLEDEV1"
           ]
         },
         "from_state": {
