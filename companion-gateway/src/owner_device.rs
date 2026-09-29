@@ -367,7 +367,7 @@ mod tests {
     fn the_contracts_fixture_is_read_and_an_unknown_state_is_refused() {
         let change = Change::parse(&fixture()).unwrap();
         assert_eq!(change.to_state, DeviceState::CredentialGone);
-        assert_eq!(change.device_id.as_deref(), Some("PZJQUQQFOD"));
+        assert_eq!(change.device_id.as_deref(), Some("EXAMPLEDEV1"));
         assert!(change.owner.starts_with('@'));
         assert!(change.remedy.unwrap().contains("onboarding again"));
         let mut odd = fixture();
@@ -396,7 +396,7 @@ mod tests {
         assert!(state.credential_is_gone());
         assert_eq!(
             state.known().unwrap().device_id.as_deref(),
-            Some("PZJQUQQFOD")
+            Some("EXAMPLEDEV1")
         );
         // Re-provisioning, or a handover (#228): the Sensor says `present`
         // and the register stops refusing, with nothing reloaded.
