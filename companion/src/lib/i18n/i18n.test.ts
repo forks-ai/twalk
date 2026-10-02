@@ -105,6 +105,7 @@ describe('the catalogues', () => {
 			id: '@you:example.com',
 			errcode: 'M_PASSWORD_TOO_SHORT',
 			detail: 'the homeserver said no',
+			rules: 'newsletters, vieux',
 			date: '18/09/2026',
 			network: 'WhatsApp',
 			// A collector connection's state change in the dashboard feed (#275).
