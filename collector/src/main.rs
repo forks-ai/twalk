@@ -346,12 +346,14 @@ async fn run(config: Config) -> Result<()> {
                     .as_deref()
                     .context("a mail connection is held with no COLLECTOR_JMAP_SESSION_URL")?,
                 &config.state_dir,
-                triage.clone(),
-                undos.clone(),
-                config
-                    .gateway_url
-                    .clone()
-                    .zip(config.gateway_service_token.clone()),
+                twalk_collector::mails::FromTheGateway {
+                    triage: triage.clone(),
+                    undos: undos.clone(),
+                    report_to: config
+                        .gateway_url
+                        .clone()
+                        .zip(config.gateway_service_token.clone()),
+                },
                 consent.clone(),
             )
         })

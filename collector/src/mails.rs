@@ -35,12 +35,21 @@ pub struct Mailbox {
     pub state_dir: PathBuf,
     pub consent: ConsentCache,
     http: reqwest::Client,
-    /// The owner's triage rules, re-read from the Gateway before each poll
-    /// (#417). Shared rather than passed, as the working day is: a decision
-    /// taken on the settings screen reaches the next round rather than the
-    /// next restart.
+    /// What the Companion Gateway tells this mailbox about triage (#416-#418).
+    pub governed: FromTheGateway,
+}
+
+/// What the Companion Gateway tells this mailbox: the owner's triage rules,
+/// the undos they asked for, and where to report what moved.
+///
+/// One value rather than three parameters because they travel together and
+/// come from one place — the collection seam, re-read before each round. The
+/// two shared cells are shared rather than passed for the reason the working
+/// day is (#381): a decision taken on the settings screen reaches the next
+/// round rather than the next restart.
+#[derive(Clone, Default)]
+pub struct FromTheGateway {
     pub triage: crate::triage::SharedTriage,
-    /// The undos the owner asked for, read with the rules (#418).
     pub undos: crate::triage::SharedUndos,
     /// Where to report what was moved, and with what. `None` on a deployment
     /// with no Gateway: it still files, and the record is what it loses.
@@ -152,9 +161,7 @@ impl Mailbox {
         owner: &crate::owner::Owner,
         session_url: &str,
         state_dir: &std::path::Path,
-        triage: crate::triage::SharedTriage,
-        undos: crate::triage::SharedUndos,
-        report_to: Option<(String, String)>,
+        governed: FromTheGateway,
         consent: ConsentCache,
     ) -> Result<Self> {
         Ok(Self {
@@ -163,9 +170,7 @@ impl Mailbox {
             session_url: session_url.to_owned(),
             state_dir: state_dir.to_owned(),
             consent,
-            triage,
-            undos,
-            report_to,
+            governed,
             http: side::client()?,
         })
     }
@@ -462,11 +467,11 @@ impl Mailbox {
         poll: &mut MailPoll,
         now: &str,
     ) {
-        let triage = match self.triage.lock() {
+        let triage = match self.governed.triage.lock() {
             Ok(triage) => triage.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         };
-        let undos = match self.undos.lock() {
+        let undos = match self.governed.undos.lock() {
             Ok(undos) => undos.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
         };
@@ -629,7 +634,7 @@ impl Mailbox {
     /// Reported in one request rather than one per move: a round that files
     /// forty newsletters must not make forty calls.
     async fn report(&self, filed: &[Filed], now: &str) {
-        let Some((gateway_url, token)) = &self.report_to else {
+        let Some((gateway_url, token)) = &self.governed.report_to else {
             return;
         };
         if filed.is_empty() {

@@ -267,9 +267,7 @@ pub fn resolve_all(
         .map(|destination| {
             (
                 destination.clone(),
-                resolve(mailboxes, triage, destination)
-                    .map(|mailbox| mailbox.id.clone())
-                    .map_err(|why| why),
+                resolve(mailboxes, triage, destination).map(|mailbox| mailbox.id.clone()),
             )
         })
         .collect()
