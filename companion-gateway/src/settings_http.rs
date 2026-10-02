@@ -115,6 +115,15 @@ pub fn routes() -> Router<Gateway> {
             "/api/settings/mail-triage",
             get(read_mail_triage).put(write_mail_triage),
         )
+        .route("/api/mail-rule-proposals", get(read_rule_proposals))
+        .route(
+            "/api/mail-rule-proposals/{sequence}/approve",
+            axum::routing::post(approve_rule_proposal),
+        )
+        .route(
+            "/api/mail-rule-proposals/{sequence}/refuse",
+            axum::routing::post(refuse_rule_proposal),
+        )
         .route("/api/mail-moves", get(read_mail_moves))
         .route(
             "/api/mail-moves/{sequence}/undo",
@@ -964,6 +973,85 @@ async fn report_mail_moves(
         Json(json!({ "recorded": recorded, "reported": body.moves.len() })),
     )
         .into_response()
+}
+
+/// `GET /api/mail-rule-proposals` — the rules the assistant proposed, newest
+/// first, undecided ones included (#420).
+async fn read_rule_proposals(State(gateway): State<Gateway>) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no rule proposals: it has no consent store to journal them in",
+        );
+    };
+    match consent.store().rule_proposals(50) {
+        Ok(proposals) => Json(json!({ "proposals": proposals })).into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the rule proposals");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the rule proposals could not be read",
+            )
+        }
+    }
+}
+
+async fn approve_rule_proposal(
+    State(gateway): State<Gateway>,
+    axum::extract::Path(sequence): axum::extract::Path<i64>,
+) -> Response {
+    decide_proposal(gateway, sequence, true).await
+}
+
+async fn refuse_rule_proposal(
+    State(gateway): State<Gateway>,
+    axum::extract::Path(sequence): axum::extract::Path<i64>,
+) -> Response {
+    decide_proposal(gateway, sequence, false).await
+}
+
+/// The owner's decision on one proposal.
+///
+/// Approving writes the rule through the triage journal **with the owner as
+/// the actor**, never the agent, and checks it against the allowlist as it
+/// stands now rather than as it stood when the agent proposed: a destination
+/// withdrawn in between refuses the approval, which is the honest answer.
+async fn decide_proposal(gateway: Gateway, sequence: i64, approve: bool) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no rule proposals: it has no consent store to journal them in",
+        );
+    };
+    let at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+    let actor = gateway.owner();
+    match consent
+        .store()
+        .decide_rule_proposal(sequence, approve, &at, &actor)
+    {
+        Ok(Some(triage)) => {
+            info!(sequence, approve, %actor, "the owner decided on a proposed rule");
+            Json(json!({ "triage": triage })).into_response()
+        }
+        Ok(None) => api_error(
+            StatusCode::CONFLICT,
+            "already_decided",
+            "there is no such proposal, or it has already been approved or refused",
+        ),
+        Err(error) => {
+            // The commonest cause by far: the rule files into a destination
+            // the owner has since withdrawn. Named rather than swallowed.
+            warn!(%error, sequence, "a proposed rule could not be approved");
+            api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "not_applicable",
+                &format!("this rule is not one this deployment will apply: {error:#}"),
+            )
+        }
+    }
 }
 
 fn working_day_json(state: &crate::working_day::State) -> Value {

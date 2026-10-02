@@ -455,3 +455,91 @@ mod tests {
         );
     }
 }
+
+/// A rule the drafting agent proposed, and what became of it (#420).
+///
+/// A proposal is **not** a rule: it is text until the owner approves it, and
+/// approving writes the rule with the owner as the actor. The agent never
+/// writes one and never moves a mail — ADR 0042 puts the model outside the
+/// execution path on purpose, because it reads text written by strangers and
+/// a proposal is the only shape in which that reading cannot become an action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Proposal {
+    pub sequence: i64,
+    pub rule: Rule,
+    /// The agent's own words for why. Shown to the owner, never acted on.
+    pub because: Option<String>,
+    pub proposed_at: String,
+    /// `proposed`, `approved` or `refused`.
+    pub state: String,
+    pub decided_at: Option<String>,
+}
+
+#[cfg(test)]
+mod the_agent_can_only_propose {
+    /// The ticket's last criterion, asserted rather than assumed: **there is
+    /// no path, by any tool or any prompt, by which the agent moves a mail or
+    /// writes a rule directly** (#420).
+    ///
+    /// Read off this crate's own source, the way `tests/openapi.rs` reads the
+    /// `.route("…")` literals: every route mounted on the Hermes seam is
+    /// listed, and the only one that writes anything writes a *proposal*. A
+    /// route added there later fails this until somebody looks at it, which is
+    /// the point — the separation is the whole of ADR 0042, and a reviewer
+    /// should not have to remember it.
+    #[test]
+    fn the_hermes_seam_mounts_no_route_that_applies_anything() {
+        let seam = concat!(
+            include_str!("hermes_answer_http.rs"),
+            include_str!("hermes_freebusy_http.rs"),
+        );
+        // Insensitive to formatting: rustfmt breaks a long `.route(…)` across
+        // lines, so the path is the first string literal after `.route(`
+        // rather than the text immediately following it.
+        let mounted: Vec<&str> = seam
+            .match_indices(".route(")
+            .filter_map(|(at, _)| {
+                let rest = &seam[at + ".route(".len()..];
+                let open = rest.find('"')?;
+                let rest = &rest[open + 1..];
+                Some(&rest[..rest.find('"')?])
+            })
+            // `.route("…")` also appears inside the doc comments that explain
+            // why these literals are written out; only real paths count.
+            .filter(|path: &&str| path.starts_with('/'))
+            .collect();
+        assert_eq!(
+            mounted,
+            vec![
+                "/_twalk/hermes/answers",
+                "/_twalk/hermes/mail-rule-proposals",
+                "/_twalk/hermes/freebusy",
+                "/_twalk/hermes/event-facts",
+            ],
+            "a route was added to the Hermes seam; if it writes to the owner's mailbox or to \
+             their triage rules, ADR 0042 says it must not exist"
+        );
+        // And the proposal route records a proposal and nothing else: it never
+        // reaches the triage journal, which is what applying a rule would mean.
+        let proposing = include_str!("hermes_answer_http.rs");
+        let body = &proposing[proposing
+            .find("async fn propose_mail_rule")
+            .expect("the proposal handler is here")..];
+        assert!(
+            body.contains("record_rule_proposal"),
+            "the proposal handler records a proposal"
+        );
+        for applying in [
+            "record_mail_triage_decision",
+            "decide_rule_proposal",
+            "record_mail_move",
+            "request_mail_undo",
+        ] {
+            assert!(
+                !body.contains(applying),
+                "the agent's own route calls {applying}, which applies something: ADR 0042 puts \
+                 the model outside the execution path, and approving is the owner's act"
+            );
+        }
+    }
+}

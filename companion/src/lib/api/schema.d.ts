@@ -1270,6 +1270,76 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mail-rule-proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Triage rules the assistant proposed, newest first.
+         * @description Where the drafting agent's judgement is worth having and harmless
+         *     (#420, ADR 0042): recognising a pattern across weeks of mail is what a
+         *     rule cannot do and a model can — and a proposal is text until the owner
+         *     acts on it.
+         *
+         *     A refused proposal stays refused and readable: *the assistant suggested
+         *     this and I said no* is a thing the owner may want to see again when it
+         *     suggests the same thing a second time.
+         */
+        get: operations["getMailRuleProposals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-rule-proposals/{sequence}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a proposed rule, which writes it as the owner's.
+         * @description Writes the rule through the same journal the Companion writes to, with
+         *     **the owner as the actor** — never the agent.
+         *
+         *     Checked against the allowlist as it stands *now* rather than as it
+         *     stood when the agent proposed: a destination withdrawn in between
+         *     refuses the approval, which is the honest answer rather than a rule
+         *     that files nowhere.
+         */
+        post: operations["approveMailRuleProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-rule-proposals/{sequence}/refuse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Refuse a proposed rule. Nothing is written but the refusal. */
+        post: operations["refuseMailRuleProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/portals": {
         parameters: {
             query?: never;
@@ -3834,6 +3904,24 @@ export interface components {
             id: string;
             /** @description A string for the first three fields, a count of days for the fourth. */
             value: string | number;
+        };
+        /**
+         * @description A rule the drafting agent proposed. **It is not a rule**: it is text
+         *     until the owner approves it, and approving writes the rule with the
+         *     owner as the actor (ADR 0042).
+         */
+        MailRuleProposal: {
+            /** @description The agent's own words for why. Shown to the owner, never acted on. */
+            because: string | null;
+            /** Format: date-time */
+            decided_at: string | null;
+            /** Format: date-time */
+            proposed_at: string;
+            rule: components["schemas"]["MailRule"];
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            state: "proposed" | "approved" | "refused";
         };
         /** @description The mailboxes a rule may file into, and the rules themselves. */
         MailTriage: {
@@ -7709,6 +7797,105 @@ export interface operations {
             };
             401: components["responses"]["Unauthenticated"];
             /** @description There is no such move, or it cannot be undone. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    getMailRuleProposals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The proposals, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        proposals: components["schemas"]["MailRuleProposal"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    approveMailRuleProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sequence: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The triage set the approval left behind. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailTriageState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description No such proposal, or it was already decided. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The rule is not one this deployment will apply. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    refuseMailRuleProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sequence: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The triage set, unchanged. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailTriageState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description No such proposal, or it was already decided. */
             409: {
                 headers: {
                     [name: string]: unknown;

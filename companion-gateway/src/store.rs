@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 21] = [
+pub const MIGRATIONS: [&str; 22] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -1030,6 +1030,50 @@ pub const MIGRATIONS: [&str; 21] = [
            OR OLD.to_mailbox_id IS NOT NEW.to_mailbox_id
            OR OLD.occurred_at IS NOT NEW.occurred_at
            OR OLD.undoes IS NOT NEW.undoes;
+    END;
+    "#,
+    // v22 — rules the drafting agent proposed, and what the owner did with
+    // them (#420, ADR 0042).
+    //
+    // A proposal is **not** a rule. It is text until the owner approves it,
+    // and approving appends to `mail_triage_decision` with the owner as the
+    // actor — never the agent. That separation is the whole ticket: the agent
+    // reads mail written by strangers, and a proposal is the only shape in
+    // which that reading cannot become an action.
+    //
+    // Append-only like its neighbours, with the decision as its own row: a
+    // proposal that was refused stays refused and readable, because "the agent
+    // suggested this and I said no" is a thing the owner may want to see again
+    // when it suggests it a second time.
+    r#"
+    CREATE TABLE mail_rule_proposal (
+        sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- The proposed rule, in the same shape `mail_triage_decision` holds a
+        -- set's rules. Validated when it arrives and again when it is
+        -- approved, because the allowlist may have moved in between.
+        rule        TEXT NOT NULL,
+        -- The agent's own words for why. Shown to the owner, never acted on.
+        because     TEXT,
+        proposed_at TEXT NOT NULL,
+        state       TEXT NOT NULL DEFAULT 'proposed'
+                    CHECK (state IN ('proposed', 'approved', 'refused')),
+        decided_at  TEXT,
+        CHECK ((state = 'proposed') = (decided_at IS NULL))
+    );
+    CREATE TRIGGER mail_rule_proposal_no_delete BEFORE DELETE ON mail_rule_proposal
+    BEGIN
+        SELECT RAISE(ABORT, 'the rule proposal journal is append-only');
+    END;
+    -- Only the decision may be written after the fact, and only once: a
+    -- proposal cannot be un-decided, and the rule it proposed cannot change
+    -- under the decision the owner took on it.
+    CREATE TRIGGER mail_rule_proposal_decide_once BEFORE UPDATE ON mail_rule_proposal
+    BEGIN
+        SELECT RAISE(ABORT, 'a proposal is decided once, and its rule never changes')
+        WHERE OLD.rule IS NOT NEW.rule
+           OR OLD.because IS NOT NEW.because
+           OR OLD.proposed_at IS NOT NEW.proposed_at
+           OR OLD.state <> 'proposed';
     END;
     "#,
 ];
@@ -2879,6 +2923,119 @@ impl Store {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Records a rule the drafting agent proposed (#420). It is text until
+    /// the owner approves it; nothing is applied here.
+    pub fn record_rule_proposal(
+        &self,
+        rule: &crate::mail_rules::Rule,
+        because: Option<&str>,
+        proposed_at: &str,
+    ) -> Result<i64> {
+        let document = serde_json::to_string(rule).context("failed to serialize the rule")?;
+        let connection = self.connection();
+        connection.execute(
+            "INSERT INTO mail_rule_proposal (rule, because, proposed_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![document, because, proposed_at],
+        )?;
+        Ok(connection.last_insert_rowid())
+    }
+
+    /// Every proposal, newest first — undecided ones included, which is what
+    /// the owner's screen shows first.
+    pub fn rule_proposals(&self, limit: usize) -> Result<Vec<crate::mail_rules::Proposal>> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(
+            "SELECT sequence, rule, because, proposed_at, state, decided_at
+             FROM mail_rule_proposal ORDER BY sequence DESC LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map(rusqlite::params![limit as i64], |row| {
+                let document: String = row.get(1)?;
+                Ok((
+                    crate::mail_rules::Proposal {
+                        sequence: row.get(0)?,
+                        rule: serde_json::from_str(&document).unwrap_or_else(|_| {
+                            crate::mail_rules::Rule {
+                                id: String::new(),
+                                matches: crate::mail_rules::Match::Subject(String::new()),
+                                destination: String::new(),
+                            }
+                        }),
+                        because: row.get(2)?,
+                        proposed_at: row.get(3)?,
+                        state: row.get(4)?,
+                        decided_at: row.get(5)?,
+                    },
+                    document,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // A proposal this build cannot read is dropped from the listing rather
+        // than shown as an empty rule the owner might approve.
+        Ok(rows
+            .into_iter()
+            .filter(|(proposal, document)| {
+                serde_json::from_str::<crate::mail_rules::Rule>(document).is_ok()
+                    || !proposal.rule.id.is_empty()
+            })
+            .map(|(proposal, _)| proposal)
+            .collect())
+    }
+
+    /// The owner's decision on one proposal.
+    ///
+    /// Approving **appends the rule to the triage set** through the same
+    /// journal the Companion writes to, with the owner as the actor — never
+    /// the agent. It is checked against the allowlist as it stands now, not as
+    /// it stood when the agent proposed: a destination withdrawn in between
+    /// refuses the approval, which is the honest answer.
+    pub fn decide_rule_proposal(
+        &self,
+        sequence: i64,
+        approve: bool,
+        at: &str,
+        actor: &str,
+    ) -> Result<Option<crate::mail_rules::Triage>> {
+        let proposal = {
+            let connection = self.connection();
+            let held: Option<(String, String)> = connection
+                .query_row(
+                    "SELECT rule, state FROM mail_rule_proposal WHERE sequence = ?1",
+                    rusqlite::params![sequence],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            match held {
+                Some((rule, state)) if state == "proposed" => rule,
+                _ => return Ok(None),
+            }
+        };
+        let decided = if approve { "approved" } else { "refused" };
+        let triage = if approve {
+            let rule: crate::mail_rules::Rule =
+                serde_json::from_str(&proposal).context("the proposed rule cannot be read")?;
+            let mut triage = self.mail_triage()?;
+            triage.rules.retain(|held| held.id != rule.id);
+            triage.rules.push(rule);
+            Some(self.record_mail_triage_decision(
+                Some(&triage),
+                at,
+                actor,
+                Some("approved a rule the assistant proposed"),
+            )?)
+        } else {
+            None
+        };
+        self.connection().execute(
+            "UPDATE mail_rule_proposal SET state = ?2, decided_at = ?3 WHERE sequence = ?1",
+            rusqlite::params![sequence, decided, at],
+        )?;
+        Ok(Some(
+            triage.unwrap_or_else(crate::mail_rules::Triage::default),
+        ))
     }
 
     /// The owner's working day, recorded (#381): the days they accept

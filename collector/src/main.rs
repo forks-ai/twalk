@@ -828,6 +828,35 @@ async fn run(config: Config) -> Result<()> {
             (&mailbox, &credential, mail_is_connected, mail_poll_is_due)
         {
             last_mail_poll = Some(std::time::Instant::now());
+            // The owner's triage rules and the undos they asked for, before
+            // the round that would act on them (#416, #418).
+            //
+            // Read **here** and not only beside the calendar's switch: a
+            // deployment with no calendar connection never reaches that
+            // branch, so its rules would have been read once at start and
+            // never again — an owner who wrote a rule at noon would have
+            // waited for a restart. Found by the end-to-end undo test, which
+            // is what it is for.
+            if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
+                match collection_settings(url, token).await {
+                    Ok((_, _, rules, undos_now)) => {
+                        *triage.lock().expect("the triage mutex is never poisoned") = rules;
+                        *undos.lock().expect("the undo mutex is never poisoned") = undos_now
+                            .iter()
+                            .filter_map(|one| serde_json::from_value(one.clone()).ok())
+                            .collect();
+                    }
+                    // Not fatal, and nothing is withheld: the rules as they
+                    // stand are the ones last read, which is the owner's own
+                    // decision rather than a guess. A Gateway that is down
+                    // stops rules changing, never applies them wrongly
+                    // (ADR 0042).
+                    Err(error) => debug!(
+                        error = %format!("{error:#}"),
+                        "the triage rules could not be re-read this round; the ones in force stand"
+                    ),
+                }
+            }
             match mailbox.poll(credential, &occurred_at).await {
                 Ok(found) => {
                     debug!(

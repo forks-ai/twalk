@@ -2788,6 +2788,115 @@ paths:
         "503":
           $ref: "#/components/responses/SwitchNotConfigured"
 
+  /api/mail-rule-proposals:
+    get:
+      operationId: getMailRuleProposals
+      tags: [settings]
+      summary: Triage rules the assistant proposed, newest first.
+      description: |
+        Where the drafting agent's judgement is worth having and harmless
+        (#420, ADR 0042): recognising a pattern across weeks of mail is what a
+        rule cannot do and a model can — and a proposal is text until the owner
+        acts on it.
+
+        A refused proposal stays refused and readable: *the assistant suggested
+        this and I said no* is a thing the owner may want to see again when it
+        suggests the same thing a second time.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The proposals, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals]
+                additionalProperties: false
+                properties:
+                  proposals:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MailRuleProposal"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          $ref: "#/components/responses/ConsentNotConfigured"
+
+  /api/mail-rule-proposals/{sequence}/approve:
+    post:
+      operationId: approveMailRuleProposal
+      tags: [settings]
+      summary: Approve a proposed rule, which writes it as the owner's.
+      description: |
+        Writes the rule through the same journal the Companion writes to, with
+        **the owner as the actor** — never the agent.
+
+        Checked against the allowlist as it stands *now* rather than as it
+        stood when the agent proposed: a destination withdrawn in between
+        refuses the approval, which is the honest answer rather than a rule
+        that files nowhere.
+      security:
+        - deviceToken: []
+      parameters:
+        - name: sequence
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: The triage set the approval left behind.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailTriageState"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          description: No such proposal, or it was already decided.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: The rule is not one this deployment will apply.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ConsentNotConfigured"
+
+  /api/mail-rule-proposals/{sequence}/refuse:
+    post:
+      operationId: refuseMailRuleProposal
+      tags: [settings]
+      summary: Refuse a proposed rule. Nothing is written but the refusal.
+      security:
+        - deviceToken: []
+      parameters:
+        - name: sequence
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: The triage set, unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailTriageState"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          description: No such proposal, or it was already decided.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ConsentNotConfigured"
+
   /api/mail-moves:
     get:
       operationId: getMailMoves
@@ -5499,6 +5608,30 @@ components:
           example: "18:00"
         exceptions:
           $ref: "#/components/schemas/WorkingDayExceptions"
+    MailRuleProposal:
+      type: object
+      description: |
+        A rule the drafting agent proposed. **It is not a rule**: it is text
+        until the owner approves it, and approving writes the rule with the
+        owner as the actor (ADR 0042).
+      required: [sequence, rule, because, proposed_at, state, decided_at]
+      additionalProperties: false
+      properties:
+        sequence: { type: integer, format: int64 }
+        rule:
+          $ref: "#/components/schemas/MailRule"
+        because:
+          type: string
+          nullable: true
+          description: The agent's own words for why. Shown to the owner, never acted on.
+        proposed_at: { type: string, format: date-time }
+        state:
+          type: string
+          enum: [proposed, approved, refused]
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
     MailMoveReport:
       type: object
       description: One move, as the collector reports it.
