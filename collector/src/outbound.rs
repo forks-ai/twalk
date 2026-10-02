@@ -409,6 +409,7 @@ mod tests {
     fn original() -> Mail {
         Mail {
             id: "M4f2a9c".to_owned(),
+            mailbox_ids: Vec::new(),
             received_at: "2026-09-21T08:14:58Z".to_owned(),
             from: Person {
                 name: Some("Alice Martin".to_owned()),

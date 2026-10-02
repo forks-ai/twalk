@@ -4,7 +4,6 @@ import {
 	emptyDraft,
 	idIsTaken,
 	isUndoable,
-	movesForScreen,
 	orphanedBy,
 	REFUSAL_CODES,
 	refusalKey,
@@ -79,7 +78,7 @@ describe('the owner writes their triage rules (#419)', () => {
 		}
 	});
 
-	it('lists moves newest first and knows which can be put back', () => {
+	it('knows which moves can still be put back', () => {
 		const move = (sequence: number, undoes: number | null = null) => ({
 			sequence,
 			connection: 'mail',
@@ -93,10 +92,13 @@ describe('the owner writes their triage rules (#419)', () => {
 			undoes,
 			undo_requested_at: null
 		});
-		expect(movesForScreen([move(1), move(3), move(2)]).map((m) => m.sequence)).toEqual([3, 2, 1]);
 		expect(isUndoable(move(1))).toBe(true);
 		// An undo cannot be undone: asking for that is asking for the first
 		// move again, which the owner does by asking for the first move again.
 		expect(isUndoable(move(4, 1))).toBe(false);
+		// Nor is one already asked about offered twice — the Gateway refuses a
+		// second request, so a screen that offered the button would be a
+		// screen whose button does nothing.
+		expect(isUndoable({ ...move(5), undo_requested_at: '2026-10-02T10:05:00.000Z' })).toBe(false);
 	});
 });

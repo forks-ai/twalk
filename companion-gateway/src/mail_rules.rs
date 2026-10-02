@@ -166,24 +166,33 @@ impl Refusal {
 /// (#417). This exists so that an owner who types `Corbeille` is told now,
 /// while they are writing the rule, instead of discovering it when a mail does
 /// not move.
-const DESTRUCTIVE: [&str; 15] = [
+const DESTRUCTIVE: [&str; 22] = [
     // JMAP roles, which is what the collector will match on.
     "trash",
     "junk",
-    // en, fr, de, es, it — the languages the Companion ships.
+    // en, fr, de, es, it — the languages the Companion ships, including the
+    // "deleted items" spelling each of them uses, which four of the five were
+    // missing until a review counted them.
     "bin",
     "deleted",
     "deleted items",
+    "deleted messages",
     "spam",
+    "junk email",
     "corbeille",
     "pourriel",
     "indésirables",
+    "éléments supprimés",
     "papierkorb",
     "gelöscht",
+    "gelöschte elemente",
+    "junk-e-mail",
     "papelera",
     "correo no deseado",
+    "elementos eliminados",
     "cestino",
     "posta indesiderata",
+    "posta eliminata",
 ];
 
 /// Whether this name can never be a destination, whatever the owner asks.
@@ -309,6 +318,17 @@ mod tests {
             "Posta indesiderata",
             "Bin",
             "Deleted Items",
+            // The "deleted items" spelling of each language, which four of the
+            // five were missing until a review counted them — a server names
+            // the mailbox in the owner's own language, and a word absent here
+            // is a mailbox this check waves through to the role check alone.
+            "Éléments supprimés",
+            "Gelöschte Elemente",
+            "Junk-E-Mail",
+            "Elementos eliminados",
+            "Posta eliminata",
+            "Deleted Messages",
+            "Junk Email",
         ] {
             assert!(is_destructive(name), "{name} should be refused");
             assert_eq!(

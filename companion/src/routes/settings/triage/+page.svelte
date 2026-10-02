@@ -38,7 +38,6 @@
 		FIELDS,
 		idIsTaken,
 		isUndoable,
-		movesForScreen,
 		orphanedBy,
 		refusalKey,
 		toRule,
@@ -65,7 +64,7 @@
 		const answer: TriageAnswer = await loadTriage();
 		if (answer.ok) triage = answer.triage;
 		const seen: MovesAnswer = await loadMoves();
-		if (seen.ok) moves = movesForScreen(seen.moves);
+		if (seen.ok) moves = seen.moves;
 	}
 
 	/** Saves the whole set, and keeps the Gateway's own refusal when it has one. */
@@ -192,7 +191,7 @@
 
 	<label class="field">
 		<span class="label">{$t('settings.triage.rules.title')}</span>
-		<input bind:value={draft.id} placeholder="newsletters" disabled={saving} data-testid="rule-id" />
+		<input bind:value={draft.id} placeholder={$t('settings.triage.rules.idPlaceholder')} disabled={saving} data-testid="rule-id" />
 	</label>
 	<label class="field">
 		<select bind:value={draft.field} disabled={saving} data-testid="rule-field">

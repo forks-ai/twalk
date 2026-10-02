@@ -3,28 +3,34 @@
 	"app.name": "Twalk Companion",
 	"app.tagline": "Le centre de commande de votre hub de messagerie souverain",
 	"app.skipToContent": "Aller au contenu",
+
 	"lang.switch": "Langue",
+
 	"screen1.description": "Twalk réunit toutes vos conversations — WhatsApp, Telegram, Signal, Discord, Google Messages — dans un espace qui vous appartient, surveillé par des agents que vous configurez. Ce Companion s'occupe de tout installer pour vous.",
 	"screen1.domain.label": "Votre domaine Twalk",
 	"screen1.domain.placeholder": "exemple.fr",
 	"screen1.domain.invalid": "Saisissez un domaine valide, par exemple {example}.",
 	"screen1.continue": "Continuer",
 	"screen1.checking": "Vérification de votre installation Twalk…",
+
 	"onboarding.title": "Créer votre compte",
 	"onboarding.domain": "Twalk créera votre compte sur {domain}.",
 	"onboarding.pending.title": "Cette étape arrive bientôt",
 	"onboarding.pending.body": "La création du compte et votre clé de récupération arrivent avec le parcours d'installation. Ce sur quoi cet écran repose — l'application, le client de la passerelle, la vérification du navigateur — est déjà en place.",
 	"onboarding.back": "Changer de domaine",
 	"onboarding.diagnostics": "Ouvrir les diagnostics",
+
 	"gate.title": "Ce navigateur ne peut pas encore faire fonctionner Twalk",
 	"gate.intro": "{count, plural, one {Il manque un élément indispensable à ce navigateur.} other {Il manque # éléments indispensables à ce navigateur.}} Twalk réalise ses opérations cryptographiques ici, dans la page, pour que votre clé de récupération ne quitte jamais votre appareil — et cela exige tous ces éléments.",
 	"gate.degraded.intro": "Tout ce qu'exige l'installation est présent. Ces éléments complémentaires ne le sont pas : certains conforts vous manqueront.",
 	"gate.recheck": "Vérifier à nouveau",
 	"gate.diagnostics": "Diagnostics",
+
 	"gate.cause.insecure-context": "La page n'a pas été chargée par une connexion sécurisée. Hors HTTPS, les navigateurs désactivent la cryptographie, le stockage et l'installation dont Twalk a besoin. Ouvrez le Companion en {https}, ou sur {localhost} pendant le développement.",
 	"gate.cause.lockdown-mode": "Tout indique le mode Isolement d'iOS : WebAssembly fonctionne encore, mais le stockage local, l'installation et le verrouillage des onglets sont désactivés. Ouvrez Réglages, puis Confidentialité et sécurité, puis Mode Isolement, et autorisez ce site — ou ouvrez Twalk dans un autre navigateur.",
 	"gate.cause.storage-blocked": "Le stockage local est désactivé. Une fenêtre de navigation privée, ou un réglage qui bloque les données de site, produit cet effet. Ouvrez le Companion dans une fenêtre normale et autorisez les données de site pour {origin}.",
 	"gate.cause.unsupported-browser": "Il manque à ce navigateur quelque chose dont Twalk a besoin. Twalk prend en charge Safari sur iOS 16.4 et versions ultérieures, ainsi que les versions actuelles de Chrome, Edge et Firefox.",
+
 	"gate.capability.secure-context": "Connexion sécurisée",
 	"gate.capability.secure-context.why": "HTTPS, ou localhost. Tout le reste en dépend.",
 	"gate.capability.webassembly": "WebAssembly",
@@ -37,16 +43,19 @@
 	"gate.capability.service-worker.why": "Permet d'installer Twalk sur votre écran d'accueil.",
 	"gate.capability.tab-lock": "Verrouillage des onglets (Web Locks)",
 	"gate.capability.tab-lock.why": "Empêche deux onglets ouverts d'abîmer vos clés.",
+
 	"gate.state.present": "Disponible",
 	"gate.state.missing": "Absent",
 	"gate.state.blocked": "Désactivé",
 	"gate.checking": "Vérification des capacités du navigateur…",
+
 	"version.mismatch.title": "Twalk a été mis à jour",
 	"version.mismatch.body": "Cette page a été compilée pour Twalk {expected}, et votre serveur exécute désormais {actual}. Rechargement pour récupérer la nouvelle version.",
 	"version.reload": "Recharger maintenant",
 	"version.staleShell.title": "Une version plus récente du Companion est prête",
 	"version.staleShell.body": "Votre serveur sert désormais la version {shipped}, et cette page exécute encore la version {running}. Rechargez pour la récupérer — d’ici là, ce que vous voyez n’est peut-être pas ce qui a été corrigé.",
 	"version.unreachable": "Votre serveur Twalk est injoignable : sa version est donc inconnue. L'application fonctionne, mais certains écrans ne fonctionneront pas.",
+
 	"diagnostics.title": "Diagnostics",
 	"dashboard.settings": "Réglages",
 	"settings.back": "Retour au tableau de bord",
@@ -131,10 +140,10 @@
 	"settings.calendarLocation.record.reason": "Motif donné : « {reason} »",
 	"settings.calendarLocation.notRetroactive": "Rien n’est rétroactif : les événements publiés pendant que le lieu était retenu le restent, et l’autoriser ne les republie pas. Cela s’applique au prochain relevé de l’agenda.",
 	"settings.calendarLocation.saved": "Consigné. Cela s’applique aux événements publiés à partir du prochain relevé.",
-	"settings.workingDay.title": "Votre journée de travail",
-	"settings.workingDay.intro": "Les jours où vous acceptez des rendez-vous, et l’amplitude de ces journées. Votre assistant ne proposera que le temps libre qui s’y trouve.",
-	"settings.workingDay.why": "Sans cela, il propose tous les trous que laisse votre agenda, la nuit comprise — et il a déjà proposé un vendredi à 19h30. Vos occupations ne sont jamais modifiées par ce réglage : seulement ce qui peut être proposé.",
-	"settings.workingDay.days": "Jours où vous acceptez des rendez-vous",
+	"settings.workingDay.title": "Votre journ\u00e9e de travail",
+	"settings.workingDay.intro": "Les jours o\u00f9 vous acceptez des rendez-vous, et l\u2019amplitude de ces journ\u00e9es. Votre assistant ne proposera que le temps libre qui s\u2019y trouve.",
+	"settings.workingDay.why": "Sans cela, il propose tous les trous que laisse votre agenda, la nuit comprise \u2014 et il a d\u00e9j\u00e0 propos\u00e9 un vendredi \u00e0 19h30. Vos occupations ne sont jamais modifi\u00e9es par ce r\u00e9glage : seulement ce qui peut \u00eatre propos\u00e9.",
+	"settings.workingDay.days": "Jours o\u00f9 vous acceptez des rendez-vous",
 	"settings.workingDay.day.1": "Lundi",
 	"settings.workingDay.day.2": "Mardi",
 	"settings.workingDay.day.3": "Mercredi",
@@ -142,28 +151,28 @@
 	"settings.workingDay.day.5": "Vendredi",
 	"settings.workingDay.day.6": "Samedi",
 	"settings.workingDay.day.7": "Dimanche",
-	"settings.workingDay.startsAt": "La journée commence à",
-	"settings.workingDay.endsAt": "La journée finit à",
-	"settings.workingDay.exceptions.add": "Un jour aux horaires différents",
-	"settings.workingDay.exceptions.choose": "Choisir un jour…",
+	"settings.workingDay.startsAt": "La journ\u00e9e commence \u00e0",
+	"settings.workingDay.endsAt": "La journ\u00e9e finit \u00e0",
+	"settings.workingDay.exceptions.add": "Un jour aux horaires diff\u00e9rents",
+	"settings.workingDay.exceptions.choose": "Choisir un jour\u2026",
 	"settings.workingDay.exceptions.give": "Lui donner ses propres horaires",
 	"settings.workingDay.exceptions.asUsual": "Comme d'habitude",
-	"settings.workingDay.exceptions.pending": "{day} reviendra à {startsAt}–{endsAt} à l'enregistrement.",
-	"settings.workingDay.exceptions.pendingUnticked": "{day} n'est plus un jour que vous acceptez : ses horaires propres partiront à l'enregistrement.",
+	"settings.workingDay.exceptions.pending": "{day} reviendra \u00e0 {startsAt}\u2013{endsAt} \u00e0 l'enregistrement.",
+	"settings.workingDay.exceptions.pendingUnticked": "{day} n'est plus un jour que vous acceptez : ses horaires propres partiront \u00e0 l'enregistrement.",
 	"settings.workingDay.exceptions.keep": "Lui garder ses horaires",
-	"settings.workingDay.exceptions.theRest": "Tous les autres jours que vous acceptez vont de {startsAt} à {endsAt}.",
-	"settings.workingDay.trouble.days": "Cochez au moins un jour, ou effacez tout le réglage pour accepter n’importe quelle heure à nouveau.",
-	"settings.workingDay.trouble.time": "Les deux heures s’écrivent en heures et minutes, sous la forme HH:MM.",
-	"settings.workingDay.trouble.order": "La fin de journée vient après son début. Une journée qui passe minuit n’est pas ce que ce réglage retient.",
+	"settings.workingDay.exceptions.theRest": "Tous les autres jours que vous acceptez vont de {startsAt} \u00e0 {endsAt}.",
+	"settings.workingDay.trouble.days": "Cochez au moins un jour, ou effacez tout le r\u00e9glage pour accepter n\u2019importe quelle heure \u00e0 nouveau.",
+	"settings.workingDay.trouble.time": "Les deux heures s\u2019\u00e9crivent en heures et minutes, sous la forme HH:MM.",
+	"settings.workingDay.trouble.order": "La fin de journ\u00e9e vient apr\u00e8s son d\u00e9but. Une journ\u00e9e qui passe minuit n\u2019est pas ce que ce r\u00e9glage retient.",
 	"settings.workingDay.reason.label": "Une note pour votre propre trace (facultatif)",
-	"settings.workingDay.save": "Enregistrer ma journée",
+	"settings.workingDay.save": "Enregistrer ma journ\u00e9e",
 	"settings.workingDay.clear": "Ne plus rien dire",
-	"settings.workingDay.saved": "Enregistré. Dès la prochaine lecture de votre agenda, seul le temps libre dans ces horaires sera proposé.",
-	"settings.workingDay.clearedNotice": "Effacé. Tous les trous libres sont proposés à nouveau, comme avant que vous ne disiez quoi que ce soit.",
-	"settings.workingDay.notRetroactive": "Cela change ce que la prochaine lecture propose, et rien de ce qui est déjà dans votre agenda ni d’une réponse déjà approuvée.",
-	"settings.workingDay.record.unset": "Personne n’a rien dit : tous les trous libres sont proposés.",
-	"settings.workingDay.record.cleared": "Effacé le {date} par {actor} : tous les trous libres sont proposés.",
-	"settings.workingDay.record.set": "Réglé le {date} par {actor}.",
+	"settings.workingDay.saved": "Enregistr\u00e9. D\u00e8s la prochaine lecture de votre agenda, seul le temps libre dans ces horaires sera propos\u00e9.",
+	"settings.workingDay.clearedNotice": "Effac\u00e9. Tous les trous libres sont propos\u00e9s \u00e0 nouveau, comme avant que vous ne disiez quoi que ce soit.",
+	"settings.workingDay.notRetroactive": "Cela change ce que la prochaine lecture propose, et rien de ce qui est d\u00e9j\u00e0 dans votre agenda ni d\u2019une r\u00e9ponse d\u00e9j\u00e0 approuv\u00e9e.",
+	"settings.workingDay.record.unset": "Personne n\u2019a rien dit : tous les trous libres sont propos\u00e9s.",
+	"settings.workingDay.record.cleared": "Effac\u00e9 le {date} par {actor} : tous les trous libres sont propos\u00e9s.",
+	"settings.workingDay.record.set": "R\u00e9gl\u00e9 le {date} par {actor}.",
 	"settings.workingDay.record.reason": "Sa note : {reason}",
 	"settings.tracing.title": "Traçage",
 	"settings.tracing.pending": "Tracer ce que votre assistant a raisonné — le prompt envoyé, la réponse, le temps pris — est décidé (ce sera OpenTelemetry, inactif tant qu’aucun point d’accès n’est défini, avec le contenu des messages derrière un second interrupteur) et n’est pas encore quelque chose que ce déploiement peut stocker. Quand ce sera le cas, les réglages seront ici, et l’interrupteur du contenu dira clairement que les messages de vos contacts partent alors vers le service de traçage.",
@@ -186,6 +195,7 @@
 	"diagnostics.yes": "oui",
 	"diagnostics.no": "non",
 	"diagnostics.back": "Retour",
+
 	"screen1.error.title": "Nous n'avons pas pu démarrer",
 	"screen1.error.gateway": "Votre serveur Twalk n'a pas répondu. Vérifiez votre connexion, puis réessayez.",
 	"screen1.error.homeserver": "Nous n'avons pas pu joindre {domain}. Vérifiez l'adresse ou votre connexion internet.",
@@ -195,6 +205,7 @@
 	"screen1.signedIn.title": "Vous êtes connecté",
 	"screen1.signedIn.body": "Ce navigateur a déjà une session pour {owner}.",
 	"screen1.signedIn.continue": "Poursuivre l'installation",
+
 	"screen2.back": "Changer de domaine",
 	"screen2.title": "Créer votre compte",
 	"screen2.subtitle": "Twalk créera votre compte sur {domain}.",
@@ -239,6 +250,7 @@
 	"screen2.error.exists.cta": "J'ai ma clé de récupération",
 	"screen2.error.recoveryKeyRefused": "Twalk a refusé d'envoyer cette requête parce qu'elle transportait du matériel cryptographique. C'est un défaut du Companion, pas une erreur de votre part. Merci de le signaler.",
 	"screen2.error.generic": "Votre compte n'a pas pu être créé. {detail}",
+
 	"key.title": "Enregistrez votre clé de récupération",
 	"key.intro": "C'est la seule fois où cette clé est affichée. Rien sur votre serveur Twalk, et rien chez Twalk, ne peut vous la montrer de nouveau.",
 	"key.label": "Votre clé de récupération",
@@ -254,6 +266,7 @@
 	"key.backup.on": "Votre sauvegarde de clés est active : les nouveaux messages sont sauvegardés, chiffrés avec cette clé.",
 	"key.backup.off": "Votre sauvegarde de clés n'a pas pu démarrer. Votre clé de récupération reste valide ; ouvrez les diagnostics avant d'aller plus loin.",
 	"key.account": "Compte {id}",
+
 	"pdf.title": "Clé de récupération Twalk",
 	"pdf.intro": "Cette feuille porte l'unique copie de votre clé de récupération Twalk. Elle déverrouille vos conversations chiffrées sur un nouvel appareil.",
 	"pdf.keyLabel": "Votre clé de récupération",
@@ -263,11 +276,13 @@
 	"pdf.advice3": "Quiconque détient cette clé peut lire votre historique de conversations. Twalk ne la voit jamais.",
 	"pdf.account": "Compte : {id} — {domain}",
 	"pdf.generated": "Générée le {date} par le Twalk Companion.",
+
 	"done.title": "Votre compte est prêt",
 	"done.body": "{id} existe, votre identité cryptographique est en place et votre clé de récupération est enregistrée.",
 	"done.next.title": "Ensuite : connecter un réseau",
 	"done.next.body": "Connectez WhatsApp, Signal, les SMS ou un compte Matrix existant, puis activez votre assistant dessus. Si votre serveur Twalk n’a aucune passerelle configurée, c’est la carte Matrix qui fonctionnera — les autres le disent à l’écran.",
 	"done.diagnostics": "Ouvrir les diagnostics",
+
 	"handover.roomName": "Twalk — interne",
 	"handover.ready": "Twalk peut joindre son Sensor avec le chiffrement de votre compte.",
 	"handover.problem.title": "Twalk ne peut pas encore joindre son Sensor",
@@ -286,6 +301,7 @@
 	"handover.credential.problem.notEncrypted": "L’identifiant n’a pas pu être chiffré pour tous les appareils du Sensor de Twalk, et le Sensor n’a jamais confirmé le détenir. L’appareil {name} existe sur votre compte et ne fait rien : vous pouvez le révoquer depuis votre liste d’appareils, et refaire l’installation réessaiera avec les clés que ce navigateur connaîtra alors.",
 	"handover.credential.problem.failed": "Votre serveur a refusé : {detail}",
 	"handover.credential.problem.after": "Tout le reste fonctionne. Ce que cela empêche, c’est que Twalk réponde en votre nom : d’ici là, une réponse que vous validez part depuis le compte de Twalk, et un contact sur WhatsApp, Signal ou SMS ne reçoit rien.",
+
 	"recover.title": "Vos clés ne sont plus sur cet appareil",
 	"recover.intro": "C'est normal, ce n'est pas une panne. Twalk conserve vos clés de chiffrement dans ce navigateur uniquement, et un navigateur peut les jeter : iOS les supprime après sept jours sans ouvrir l'application, et effacer vos données de navigation le fait aussi.",
 	"recover.domain.label": "Votre domaine Twalk",
@@ -317,6 +333,7 @@
 	"recover.done.body": "Vos clés sont de nouveau sur cet appareil et il est vérifié. Vos conversations chiffrées s'ouvrent comme avant.",
 	"recover.done.unverified": "Vos clés sont revenues, mais cet appareil n'a pas pu être vérifié. Ouvrez les diagnostics avant d'aller plus loin.",
 	"recover.done.backup": "Votre sauvegarde de clés est de nouveau connectée.",
+
 	"tabs.title": "Twalk est ouvert dans un autre onglet",
 	"tabs.body": "Twalk conserve vos clés de chiffrement à un seul endroit, et deux onglets qui y écrivent en même temps les abîmeraient. Revenez à l'autre onglet, ou prenez la main ici.",
 	"tabs.takeOver": "Utiliser cet onglet",
@@ -337,6 +354,7 @@
 	"network.telegram.subtitle": "Vos conversations Telegram, comme une session de plus",
 	"network.discord.name": "Discord",
 	"network.comingSoon": "Arrive en v0.2",
+
 	"networks.add.title": "Ajouter un réseau",
 	"networks.add.intro": "Les réseaux déjà connectés sont signalés comme tels. Choisissez-en un autre à ajouter, ou revenez en arrière.",
 	"networks.add.done": "Terminé, retour au tableau de bord",
@@ -355,7 +373,9 @@
 	"networks.card.iosBlocked": "Nécessite un téléphone Android. iOS ne peut pas alimenter cet aperçu : Google Messages Web lit les SMS depuis un appareil Android.",
 	"networks.card.notConfigured": "Aucune passerelle pour ce réseau n'est configurée sur votre serveur Twalk.",
 	"networks.back": "Retour aux réseaux",
+
 	"networks.bridgesUnreadable.title": "Cet écran n’a pas pu démarrer",
+
 	"networks.noBridge.title": "Ce réseau n'est pas configuré",
 	"networks.noBridge.body": "Votre serveur Twalk n'a pas de passerelle pour {network}. Activez le profil « bridges » de votre installation, puis revenez sur cet écran.",
 	"networks.whichConnection.title": "Quel compte {network} ?",
@@ -363,6 +383,7 @@
 	"networks.whichConnection.back": "Retour aux réseaux",
 	"conversations.unknownConnection.title": "Quel compte ?",
 	"conversations.unknownConnection.body": "Ce lien désigne un compte que votre serveur Twalk ne liste pas, ou la liste des comptes n’a pas pu être lue. Revenez aux réseaux et ouvrez les conversations depuis la carte du compte.",
+
 	"networks.starting": "Demande d'un code…",
 	"networks.expiresIn": "Ce code se renouvelle dans {seconds, plural, one {# seconde} other {# secondes}}.",
 	"networks.expired": "Ce code a expiré avant d'être scanné.",
@@ -373,10 +394,12 @@
 	"networks.cancelled": "Cette connexion a été annulée.",
 	"networks.retry": "Réessayer",
 	"networks.troubleshooting": "En cas de problème",
+
 	"networks.conflict.title": "Une connexion est déjà en cours",
 	"networks.conflict.body": "Un autre de vos appareils, {device}, a lancé une connexion à {started} et elle est toujours en cours. Un réseau n'accepte qu'une connexion à la fois.",
 	"networks.conflict.takeOver": "Reprendre la main sur cet appareil",
 	"networks.conflict.leaveIt": "La laisser se terminer",
+
 	"networks.trouble.unauthenticated": "Votre session sur ce serveur Twalk a expiré. Reconnectez-vous pour continuer.",
 	"networks.trouble.tooManyLogins": "Le réseau refuse un appareil lié de plus sur ce compte. Retirez-en un depuis le réseau lui-même, puis réessayez.",
 	"networks.trouble.bridge": "Votre serveur Twalk n'a pas pu joindre la passerelle de ce réseau. Vérifiez qu'elle fonctionne, puis réessayez.",
@@ -384,24 +407,30 @@
 	"networks.trouble.network": "La liaison avec votre serveur Twalk s'est interrompue. Nouvelle tentative…",
 	"networks.trouble.unexpected": "Quelque chose s'est mal passé sur votre serveur Twalk. Réessayez, et ouvrez les diagnostics si cela persiste.",
 	"networks.trouble.refused": "Votre serveur Twalk a répondu et a refusé cette requête. Ni votre serveur ni votre connexion ne sont en cause : c’est un défaut de Twalk. Signalez-le, en joignant ce que votre serveur Twalk a journalisé.",
+
 	"networks.failed.loginLost": "La connexion a été perdue : votre serveur Twalk ou sa passerelle a redémarré pendant l'opération. Rien d'une connexion en cours ne survit à un redémarrage. Recommencez.",
 	"networks.failed.expired": "Le réseau a mis fin à cette connexion : le code a expiré, ou il avait déjà servi. Recommencez.",
 	"networks.failed.webauthn": "Le réseau demande une clé d'accès, que le Companion ne sait pas présenter. Terminez cette connexion dans l'application du réseau, ou connectez ce réseau depuis un autre appareil.",
 	"networks.failed.unsupportedStep": "Le réseau demande une étape que Twalk ne sait pas exécuter. Rien n'a été connecté.",
 	"networks.failed.bridge": "La passerelle a refusé cette connexion. Vérifiez qu'elle fonctionne et qu'elle est bien configurée, puis réessayez.",
+
 	"networks.state.starting": "Connexion…",
 	"networks.state.degraded": "Reconnexion…",
 	"networks.state.sessionExpired": "À reconnecter",
 	"networks.state.disconnected": "Non connecté",
 	"networks.state.unknown": "Indéterminé",
+
 	"networks.qrAlt": "Un code à scanner avec l’application du réseau.",
 	"networks.cookies.wanted": "{count, plural, one {Le cookie demandé par votre passerelle} other {Les # cookies demandés par votre passerelle}} :",
 	"networks.cookies.domain": "Votre passerelle indique qu’ils appartiennent à {domain}.",
 	"networks.cookies.label": "Collez les cookies ici",
 	"networks.cookies.unreadable": "Impossible d'y lire des cookies. Collez soit « nom=valeur ; nom=valeur », soit le JSON exporté par votre extension.",
 	"networks.cookies.missing": "Il manque : {names}. Votre navigateur ne les a pas inclus dans ce que vous avez copié — la vue Application › Stockage › Cookies liste tous les cookies du site : copiez depuis là plutôt que depuis une requête.",
+
 	"networks.jar.wanted": "{count, plural, one {La valeur demandée par votre passerelle} other {Les # valeurs demandées par votre passerelle}}, telles que votre navigateur les envoie :",
 	"networks.jar.label": "Collez-les ici au format JSON",
+
+
 	"networks.field.empty": "Remplissez ce champ avant de l’envoyer.",
 	"networks.field.pattern": "Ce n’est pas la forme attendue par ce réseau pour ce champ. Vérifiez avant d’envoyer : une valeur refusée par le réseau met fin à la connexion, et il faudrait tout recommencer.",
 	"networks.field.blockedTitle": "Cette étape ne peut pas être remplie ici",
@@ -411,22 +440,27 @@
 	"networks.field.choose": "Choisissez…",
 	"networks.field.refusedNoOptions": "Twalk n’affichera pas « {field} » : votre passerelle demande un choix sans indiquer les possibilités, et choisir à votre place serait pire que de le dire.",
 	"networks.field.leftOut": "« {field} » ne sera pas envoyé : cette version ne sait pas le collecter, et votre passerelle indique que la connexion n’en a pas besoin.",
+
 	"networks.step.submit": "Envoyer à mon serveur Twalk",
 	"networks.step.neverStored": "Rien de cet écran n’est enregistré dans votre navigateur. Fermez l’onglet et ce que vous avez saisi disparaît.",
 	"networks.step.driftTitle": "Les explications de Twalk ne correspondent plus à cette question",
 	"networks.step.driftBody": "Twalk a ses propres explications pour cette étape, écrites pour {expected}, et votre passerelle demande maintenant {found}. Seuls les mots de votre passerelle sont affichés ci-dessus, car une explication assurée de la mauvaise question est pire que rien. C’est un défaut de Twalk — signalez-le en indiquant le nom de l’étape ci-dessous.",
 	"networks.step.noExplanationTitle": "Twalk n’a pas d’explications pour cette étape",
 	"networks.step.noExplanationBody": "Cette étape confie un identifiant à votre serveur Twalk, et seuls les mots de votre passerelle sont affichés ci-dessus — ils ne suffisent peut-être pas à vous dire ce que vous confiez. Signalez-le en indiquant le nom de l’étape ci-dessous.",
+
 	"networks.refused.title": "Le réseau a refusé cette réponse",
 	"networks.refused.body": "C’est le réseau qui refuse ce qui a été envoyé, non un problème de votre serveur Twalk. Le réseau met fin à la connexion dès qu’il refuse une réponse : il n’y a donc rien à corriger ici, il faut recommencer une connexion. Si un code vous avait été envoyé, il vous en faudra un nouveau.",
 	"networks.refused.reported": "Ce que votre serveur Twalk a signalé :",
 	"networks.refused.startAgain": "Recommencer une connexion",
+
 	"networks.unknownStep.title": "Cette connexion demande quelque chose que cette version ne sait pas afficher",
 	"networks.unknownStep.body": "Votre serveur Twalk connaît un type d’étape de connexion (« {type} ») que cette application ignore. Cela arrive quand les deux moitiés d’un déploiement ne sont pas de la même version : le serveur a été mis à jour, l’application non. Rechargez cette page pour récupérer l’application actuelle, ou terminez cette connexion dans l’application du réseau.",
 	"networks.unknownStep.bridgeSays": "Ce que votre passerelle demande :",
+
 	"networks.emoji.body": "Votre téléphone affiche un emoji. Vérifiez que c'est bien celui-ci, puis confirmez l'association sur le téléphone.",
 	"networks.emoji.alt": "L'emoji d'association est {emoji}. Vérifiez que votre téléphone affiche le même, puis confirmez sur le téléphone.",
 	"networks.emoji.waiting": "En attente de votre confirmation sur le téléphone…",
+
 	"manage.title": "Votre liaison {network}",
 	"manage.caption": "Le compte auquel votre serveur Twalk est relié, et ce que vous pouvez en faire.",
 	"manage.account.label": "Compte relié",
@@ -456,8 +490,10 @@
 	"manage.connect": "Connecter ce réseau",
 	"manage.unknown.title": "Cette liaison ne peut pas être vérifiée pour l'instant",
 	"manage.unknown.body": "Votre serveur Twalk n'a pas pu joindre la passerelle de ce réseau : il ne peut donc pas dire si le compte est toujours relié. Ce n'est pas la même chose qu'être déconnecté — vérifiez que la passerelle fonctionne, puis réessayez.",
+
 	"qr.disclosure.confirm": "J'ai compris, continuer",
 	"qr.disclosure.learnMore": "En savoir plus",
+
 	"qr.whatsapp.title": "Connecter WhatsApp",
 	"qr.whatsapp.caption": "Twalk se connecte à WhatsApp comme une session WhatsApp Web de plus. Vos conversations restent chiffrées de bout en bout entre WhatsApp et Twalk ; Twalk se contente de les observer.",
 	"qr.whatsapp.disclosure.title": "À propos des comptes WhatsApp",
@@ -470,6 +506,7 @@
 	"qr.whatsapp.trouble1": "Votre téléphone doit se connecter au moins une fois tous les 12 jours pour que la liaison reste active.",
 	"qr.whatsapp.trouble2": "WhatsApp autorise jusqu'à 4 appareils connectés par compte. Retirez-en un dans WhatsApp si le code est refusé.",
 	"qr.whatsapp.trouble3": "Si le code ne passe pas, tenez le téléphone immobile à une vingtaine de centimètres de l'écran, et montez la luminosité.",
+
 	"qr.signal.title": "Connecter Signal",
 	"qr.signal.caption": "Twalk devient un appareil lié à votre compte Signal, comme Signal Desktop. Votre téléphone reste l'appareil principal et demeure ce qui récupère votre compte.",
 	"qr.signal.step1": "Ouvrez Signal sur votre téléphone.",
@@ -481,6 +518,7 @@
 	"qr.signal.success": "Signal est connecté. Twalk observe désormais vos nouveaux messages Signal.",
 	"qr.signal.trouble1": "Votre téléphone doit rester connecté pour que les messages Signal parviennent à Twalk.",
 	"qr.signal.trouble2": "Si le code est refusé, vérifiez que Signal est à jour sur votre téléphone, puis affichez un nouveau code.",
+
 	"qr.telegram.title": "Connecter Telegram",
 	"qr.telegram.caption": "Twalk devient une session de votre compte Telegram, comme Telegram Desktop. Contrairement à WhatsApp et Signal, votre téléphone n'a pas besoin de rester allumé : une session Telegram vit par elle-même.",
 	"qr.telegram.step1": "Ouvrez Telegram sur votre téléphone.",
@@ -494,6 +532,7 @@
 	"qr.telegram.trouble1": "Si la vérification en deux étapes est activée sur votre compte, Telegram demandera votre mot de passe après le scan. C'est celui de Telegram, pas celui de Twalk.",
 	"qr.telegram.trouble2": "Un code refusé ne se corrige pas : Telegram met fin à la tentative. Recommencez une connexion pour en obtenir un nouveau.",
 	"qr.telegram.trouble3": "Telegram limite le nombre de sessions par compte. Si l'association échoue sans raison visible, retirez une ancienne session dans Paramètres puis Appareils.",
+
 	"matrix.title": "Connecter votre compte Matrix",
 	"matrix.caption": "Si vous utilisez déjà Matrix, Twalk peut veiller sur le compte que vous avez plutôt que d'en créer un autre. Twalk invite son Sensor dans les salons que vous choisissez, et ne change rien à vos autres sessions Matrix.",
 	"matrix.homeserverPlaceholder": "exemple.fr",
@@ -510,9 +549,9 @@
 	"signin.title": "Se reconnecter",
 	"signin.intro": "Votre session a expiré, c'est normal : l'identifiant qui voyage sur chaque requête est volontairement de courte durée. Se reconnecter prend un instant et ne change rien à votre compte.",
 	"signin.submit": "Se connecter",
-	"signin.working": "Connexion en cours…",
+	"signin.working": "Connexion en cours\u2026",
 	"signin.ssoWith": "Se connecter avec {provider}",
-	"signin.notRecovery": "Ce n'est pas l'écran de la clé de récupération. Vos clés de chiffrement sont intactes — une session qui expire et un navigateur qui perd ses clés sont deux choses différentes.",
+	"signin.notRecovery": "Ce n'est pas l'écran de la clé de récupération. Vos clés de chiffrement sont intactes \u2014 une session qui expire et un navigateur qui perd ses clés sont deux choses différentes.",
 	"signin.lostKeys": "Mes clés ont disparu de cet appareil",
 	"signin.noAccountYet": "Ce déploiement Twalk n'a pas encore de compte : il n'y a rien à quoi se connecter. Commencez par l'installer.",
 	"signin.error.ssoLost": "Cette connexion n'a pas pu aboutir : le navigateur ne sait plus à quel serveur elle avait commencé. Rien n'a été envoyé nulle part. Recommencez depuis cet écran.",
@@ -524,6 +563,7 @@
 	"matrix.signingIn": "Connexion en cours…",
 	"matrix.noFlow": "Ce serveur ne propose aucune méthode de connexion que le Companion sache utiliser. Connectez-vous depuis votre client Matrix habituel, puis revenez.",
 	"matrix.qrLater": "La connexion par QR code depuis un autre client Matrix (MSC4108) arrivera dans une version ultérieure : elle transporte vos secrets de chiffrement, ce qui demande des rouages que ces écrans ne chargent volontairement pas.",
+
 	"matrix.error.unreachable": "Ce serveur n'a pas pu être joint. Vérifiez l'adresse et votre connexion internet.",
 	"matrix.error.ssoLost": "Cette connexion n'a pas pu aboutir : le navigateur ne sait plus à quel serveur elle avait commencé. Rien n'a été envoyé nulle part. Indiquez votre serveur et recommencez.",
 	"matrix.error.ssoNeedsStorage": "Ce navigateur n'autorise pas la connexion à mémoriser où elle a commencé : l'authentification unique ne peut pas se terminer ici. Utilisez un mot de passe, ou autorisez les données de site pour cette adresse.",
@@ -532,6 +572,7 @@
 	"matrix.error.refused": "Le serveur a refusé la connexion. Réessayez, et ouvrez les diagnostics si cela persiste.",
 	"matrix.error.invite": "Votre serveur Twalk n'a pas pu inviter le Sensor. Votre session Matrix a peut-être expiré — reconnectez-vous, puis réessayez.",
 	"matrix.error.tokenRejected": "Votre serveur Matrix n'a pas accepté cette connexion : rien n'a été invité. Soit votre session Matrix a expiré — reconnectez-vous ci-dessus — soit ce compte est sur un serveur où ce déploiement Twalk ne peut pas faire entrer le Sensor.",
+
 	"matrix.rooms.intro": "Voici les salons que {user} a rejoints. Twalk ne connaîtra que ceux que vous cochez : la liste elle-même reste dans ce navigateur.",
 	"matrix.rooms.loading": "Lecture de vos salons depuis votre serveur…",
 	"matrix.rooms.none": "Ce compte n'a encore rejoint aucun salon. Rejoignez-en un depuis votre client Matrix habituel, puis revenez.",
@@ -547,22 +588,27 @@
 	"matrix.rooms.invite": "{count, plural, =0 {Choisissez au moins un salon} one {Inviter le Sensor dans 1 salon} other {Inviter le Sensor dans # salons}}",
 	"matrix.rooms.inviting": "Invitation du Sensor…",
 	"matrix.rooms.onlySelected": "Votre mot de passe Matrix et votre jeton d'accès restent dans ce navigateur. La seule chose transmise à votre serveur Twalk est la liste des salons cochés, accompagnée d'un jeton à usage unique qui lui permet d'envoyer les invitations.",
+
 	"matrix.done.title": "{sensor} a été invité",
 	"matrix.done.body": "Le Sensor rejoint les salons de lui-même et commence à les observer. Rien de ce que vous n'avez pas coché ne lui est visible.",
 	"matrix.done.invited": "invité",
 	"matrix.done.alreadyPresent": "déjà présent",
 	"matrix.done.failed": "n'a pas pu être invité — vous n'avez peut-être pas le droit d'inviter dans ce salon",
+
 	"sms.title": "Connecter les SMS via Google Messages",
 	"sms.disclosure.title": "Cette voie SMS est un aperçu",
 	"sms.disclosure.body": "Il s'agit d'une démonstration de la v0.1. Elle repose sur Google Messages Web : vos SMS transitent donc par l'infrastructure de Google et un compte Google est nécessaire. En v0.2, Twalk la remplace par une application Android maison qui lit les SMS directement sur votre téléphone, sans intermédiaire, et votre configuration migrera toute seule à ce moment-là.",
 	"sms.requirement": "Twalk s'appuie sur l'application Google Messages de votre téléphone Android pour envoyer et recevoir vos SMS. Google Messages doit y être installée et définie comme application de messagerie par défaut. Un iPhone seul ne peut pas utiliser cet aperçu.",
+
 	"sms.ios.title": "Cet aperçu demande un téléphone Android",
 	"sms.ios.body": "En v0.1, les SMS passent par Google Messages sur un téléphone Android, ce dont iOS ne dispose pas. Si vous avez à la fois un iPhone et un téléphone Android, vous pouvez utiliser l'Android comme source de vos SMS. La voie souveraine qui arrive en v0.2 demandera elle aussi un téléphone Android.",
 	"sms.ios.skip": "Passer les SMS pour l'instant",
+
 	"sms.step1.title": "Étape 1 — activer l'association d'appareil sur votre téléphone",
 	"sms.step1.a": "Ouvrez Google Messages sur votre téléphone Android.",
 	"sms.step1.b": "Touchez votre photo de profil, puis Association d'appareils.",
 	"sms.step1.c": "Laissez cet écran ouvert : votre téléphone doit rester joignable pour la suite.",
+
 	"sms.step2.title": "Étape 2 — confier votre session Google Messages",
 	"sms.step2.why": "Google a supprimé en 2024 la connexion par QR code pour les autres clients Google Messages. Il ne reste qu'une possibilité : confier les cookies de session que votre propre navigateur obtient lorsque vous vous connectez à Google Messages Web. Twalk ne peut pas les lire à votre place : aucune page web n'a le droit de lire les cookies d'un autre site, et c'est précisément cette règle qui protège vos autres comptes. Vous les copiez donc, une fois.",
 	"sms.step2.requirements": "Deux réglages à faire d'abord, sans quoi les cookies copiés ne fonctionneront pas",
@@ -577,29 +623,40 @@
 	"sms.cookies.notThese": "Seuls les cookies listés ci-dessous sont attendus. __Secure-3P*, NID et SIDCC n’en font pas partie, et coller tout le trousseau donnerait plus que ce que la connexion demande.",
 	"sms.cookies.onlyHere": "Ce sont les cookies de session de votre compte Google. Ils vont dans ce champ, vers votre propre serveur Twalk, et nulle part ailleurs : ni dans une conversation avec un assistant, ni dans un ticket, ni dans un fil de support — quiconque les détient peut agir en votre nom.",
 	"sms.cookies.missingScoped": "{scoped} manque — et pas parce que vous avez mal copié. Il appartient à messages.google.com, et une requête copiée depuis l’onglet Réseau allait vers l’hôte API de Google, qui ne le porte jamais. Copiez les cookies depuis Application › Stockage › Cookies › https://messages.google.com.",
+
 	"sms.cookies.whatTheyAre": "Ensemble, ces cookies sont votre session Google : quiconque les détient peut agir en votre nom sur Google Messages Web tant qu'ils restent valides. Google ne documente aucune durée de vie, Twalk n'en promet donc aucune — attendez-vous à recommencer un jour. Ils partent vers votre propre serveur Twalk, qui les transmet à la passerelle sans en garder de copie ; ce navigateur ne les écrit nulle part. Vous pouvez y mettre fin à tout moment depuis les paramètres de sécurité de votre compte Google.",
 	"sms.cookies.submit": "Les envoyer à mon serveur Twalk",
 	"sms.cookies.neverStored": "Rien de cet écran n'est enregistré dans votre navigateur. Fermez l'onglet et ce que vous avez collé disparaît.",
+
+
 	"sms.success": "Les SMS sont connectés via Google Messages.",
 	"sms.migration": "Ce réseau migrera tout seul vers la voie souveraine à la sortie de la v0.2. Rien à faire aujourd'hui.",
 	"sms.failed.google": "Google a refusé la session. Ce qu’il a répondu est cité ci-dessous, et Twalk ne peut rien en déduire de plus — il ne devine donc pas de cause. Si Google mentionne une vérification en deux étapes, répondez-y sur votre téléphone et copiez des cookies frais ; s’il dit autre chose, recommencer l’étape avec les mêmes cookies ne changera rien, et c’est cette réponse qu’il faut signaler.",
+
 	"sms.trouble1": "Votre téléphone Android doit rester connecté pour que les SMS parviennent à Twalk. S'il est éteint, votre opérateur les met en attente jusqu'à son retour.",
 	"sms.trouble2": "Si Google demande une vérification en deux étapes pendant la connexion, répondez-y avant de copier les cookies : une connexion inachevée produit des cookies inopérants.",
 	"sms.trouble3": "Si les SMS cessent d'arriver des semaines plus tard, Google a probablement mis fin à la session. Revenez sur cet écran et collez-en de nouveaux — c'est le prix de la voie d'aperçu, et la v0.2 le supprime.",
+
 	"error.title": "Cette page n'existe pas",
 	"error.body": "Rien dans Twalk ne répond à {path}.",
 	"error.home": "Revenir au début",
+
 	"persona.assistant.name": "Assistant",
 	"persona.assistant.description": "Votre assistant lit les messages qui arrivent sur les réseaux que vous avez connectés et vous propose des réponses à relire. Il n’envoie jamais rien sans votre accord.",
+
 	"persona.ability.read.label": "Lire les messages entrants",
 	"persona.ability.read.detail": "Sur les réseaux que vous choisissez ci-dessous, et sur aucun autre.",
 	"persona.ability.read.locked": "Toujours actif : un assistant qui ne lit rien n’a rien à proposer.",
 	"persona.ability.suggest.label": "Proposer des réponses à relire",
 	"persona.ability.suggest.detail": "Une proposition vous attend. Rien ne quitte votre déploiement tant que vous ne l’avez pas approuvé.",
 	"persona.ability.suggest.locked": "Toujours actif : lire et proposer sont une seule décision dans cette version — l’assistant est actif, ou il est en pause.",
+
 	"persona.title": "Activez votre premier agent",
+
 	"persona.step": "Étape 2 sur 3",
+
 	"persona.back": "Retour aux réseaux",
+
 	"persona.scope.title": "Ce qu’il peut lire",
 	"persona.scope.intro": "L’assistant est activé exactement sur les réseaux que vous cochez ici. Si vous connectez un autre réseau plus tard, il y restera inactif tant que vous n’en aurez pas décidé autrement.",
 	"persona.scope.proven": "Connecté",
@@ -607,38 +664,56 @@
 	"persona.scope.none": "Aucun réseau n’est encore connecté. Connectez-en un, et l’assistant aura quelque chose à lire.",
 	"persona.scope.connectFirst": "Connecter un réseau",
 	"persona.scope.unknown": "Twalk n’a pas pu lire quels réseaux ce déploiement a connectés : cet écran ne peut donc pas dire ce que l’assistant serait autorisé à lire. Réessayez plutôt que de l’activer à l’aveugle.",
+
 	"persona.consent.title": "Qui l’assistant peut lire, par défaut",
 	"persona.consent.body": "Chaque contact démarre à « en attente ». L’assistant ne lit rien de quelqu’un tant que vous n’avez pas décidé à son sujet, et aucune règle n’accorde l’accès automatiquement — cette version n’importe aucun carnet d’adresses.",
+
 	"persona.removed.title": "Deux réglages que la maquette prévoyait, et que cet écran n’a pas",
 	"persona.removed.autoSend": "L’envoi automatique des réponses approuvées. C’est la seule chose dans Twalk qui laisserait un agent envoyer sans vous : ce n’est pas un interrupteur d’écran d’installation.",
 	"persona.removed.hours": "Les heures d’activité. Une plage horaire est une règle à appliquer et à auditer à l’exécution ; un réglage cosmétique ici laisserait croire à une protection qui n’existe pas.",
+
 	"persona.runtime.title": "Ce qui se passe après l’activation",
 	"persona.runtime.body": "La décision est enregistrée et publiée sur votre bus, où le moteur d’agents la lit : l’assistant part des réseaux que vous avez choisis, et de rien d’autre.",
+
 	"persona.pause.meaning": "Mettre un assistant en pause signifie qu’il ne reçoit plus rien. Il continue de tourner et reste supervisé : il est privé d’événements, pas arrêté.",
+
 	"persona.activate": "Activer l’assistant",
+
 	"persona.activating": "Réveil de l’assistant…",
+
 	"persona.activated.title": "Votre assistant surveille désormais {networks}.",
 	"persona.activated.body": "Il est activé sur ces réseaux et sur aucun autre.",
 	"persona.activated.continue": "Aller à mon tableau de bord",
+
 	"persona.error.noNetworks": "Cochez au moins un réseau : un assistant sans périmètre n’est pas une décision que le déploiement peut enregistrer.",
 	"persona.error.refused": "Votre déploiement a refusé la décision ({error}). Rien n’a été enregistré.",
 	"persona.error.unreachable": "Votre déploiement est injoignable. Rien n’a été enregistré — réessayez.",
+
 	"persona.skip": "Plus tard",
+
 	"dashboard.title": "Votre Twalk",
+
 	"dashboard.refresh": "Actualiser",
+
 	"dashboard.refreshing": "Actualisation…",
+
 	"dashboard.unreachable": "Votre déploiement est injoignable. Ce qui suit est sa dernière réponse connue.",
+
 	"dashboard.health.ok": "Tout fonctionne",
 	"dashboard.health.attention": "Quelque chose demande votre attention",
 	"dashboard.health.setup": "Presque terminé",
 	"dashboard.health.setupDetail": "Connectez un réseau et activez votre assistant pour finir l’installation de Twalk.",
+
 	"dashboard.banner.expired.title": "Votre session {network} a expiré.",
 	"dashboard.banner.expired.body": "Reconnectez-vous pour continuer à en recevoir les messages.",
 	"dashboard.banner.expired.cta": "Reconnecter",
+
 	"dashboard.chip.pending": "{count, plural, one {# décision de consentement vous attend} other {# décisions de consentement vous attendent}}",
+
 	"dashboard.bridges.title": "Réseaux",
 	"dashboard.bridges.none": "Aucune passerelle n’est configurée sur ce déploiement.",
 	"dashboard.bridges.note": "Ces états sont ceux que chaque passerelle rapporte sur le compte qui lui est relié. La date du dernier message n'est pas encore rapportée par cette installation.",
+
 	"dashboard.bridge.state.connected": "Connecté",
 	"dashboard.bridge.state.connecting": "Connexion…",
 	"dashboard.bridge.state.expired": "Session expirée",
@@ -647,7 +722,9 @@
 	"dashboard.bridge.state.unknown": "État inconnu",
 	"dashboard.bridge.lastMessage.unknown": "Dernier message : pas encore rapporté",
 	"dashboard.bridge.manage": "Gérer {network}",
+
 	"dashboard.personas.title": "Agents",
+
 	"dashboard.persona.active": "Actif",
 	"dashboard.persona.paused": "En pause",
 	"dashboard.persona.never": "Jamais activé",
@@ -663,9 +740,11 @@
 	"runtime.never": "Aucun moteur d’agents n’a encore hébergé d’assistant ici : un assistant actif ne produit donc rien aujourd’hui. Votre décision est enregistrée et publiée, et le moteur la respectera dès son démarrage.",
 	"runtime.noBus": "Ce serveur n’a pas de bus d’événements configuré : aucun moteur d’agents ne peut donc y tourner, et un assistant n’y lirait rien et ne proposerait rien.",
 	"runtime.unknown": "Impossible de lire pour l’instant si un moteur d’agents tourne sur votre serveur.",
+
 	"dashboard.messages.title": "Messages transportés",
 	"dashboard.messages.unknown": "Non comptés sur ce déploiement.",
 	"dashboard.messages.count": "{count, plural, one {# message} other {# messages}}",
+
 	"dashboard.feed.title": "Activité récente",
 	"dashboard.feed.empty": "Il ne s’est encore rien passé.",
 	"dashboard.feed.privacy": "Événements techniques uniquement : passerelles, consentement et agents, plus un décompte. Twalk ne garde pas la liste de qui vous écrit : cet écran ne peut donc pas l’afficher.",
@@ -682,6 +761,7 @@
 	"dashboard.feed.consent.contact": "Le consentement d’un contact sur {network} est passé à {state}",
 	"dashboard.feed.device.signedIn": "{device} s’est connecté",
 	"dashboard.feed.device.revoked": "{device} a été révoqué",
+
 	"dashboard.devices.title": "Vos appareils",
 	"dashboard.devices.current": "Cet appareil",
 	"dashboard.devices.revokedOn": "Révoqué {when}",
@@ -691,61 +771,73 @@
 	"dashboard.devices.confirmCurrent": "C’est l’appareil que vous utilisez. Le révoquer vous déconnectera ici. Continuer ?",
 	"dashboard.devices.failed": "Cet appareil n’a pas pu être révoqué ({error}).",
 	"dashboard.devices.none": "Aucun appareil ne s’est encore connecté.",
+
 	"dashboard.messagr.title": "Associer à Messagr",
 	"dashboard.messagr.body": "Messagr est l’interface de messagerie de LINAGORA. L’association du Companion avec Messagr n’est pas disponible dans cette version.",
+
 	"dashboard.addNetwork": "Ajouter un réseau",
+
 	"dashboard.activateAgent": "Activer votre assistant",
+
 	"dashboard.version": "Version du déploiement {version}",
+
 	"networks.toAssistant": "Passer à votre assistant",
+
 	"done.next.cta": "Connecter un réseau",
 	"done.next.after": "Ensuite : activez votre assistant sur les réseaux que vous avez connectés, et arrivez sur votre tableau de bord.",
 	"done.dashboard": "Aller à mon tableau de bord",
 	"dashboard.chip.inbox": "Ce sont des personnes qui vous ont écrit et sur lesquelles vous n’avez jamais décidé. On décide personne par personne.",
 	"dashboard.chip.inboxLink": "Décider à leur sujet",
+
 	"approvals.title": "Réponses en attente",
 	"approvals.step": "Votre assistant propose ; vous décidez. Rien n’est envoyé tant que vous ne l’avez pas dit.",
 	"approvals.back": "Retour au tableau de bord",
 	"approvals.refresh": "Actualiser",
 	"approvals.refreshing": "Actualisation…",
 	"approvals.deliberate": "Il n’y a pas de « tout approuver » ici, et rien n’est coché à votre place : chaque réponse s’approuve seule, avec son propre bouton.",
+
 	"approvals.empty.title": "Rien n’attend",
 	"approvals.empty.body": "Aucun persona n’a proposé de réponse dans la portion du flux d’événements que votre serveur relit.",
 	"approvals.empty.noRuntime": "Aucun moteur d’agents ne tourne sur ce déploiement en ce moment : rien ne peut être proposé. Rien ne va mal, et il n’y a rien à approuver.",
 	"approvals.empty.notActivated": "Votre assistant n’est activé sur aucun réseau : il ne propose donc rien. Activez-le depuis le tableau de bord quand vous le souhaitez.",
 	"approvals.empty.nothingProposed": "Votre assistant est actif et n’a rien proposé dans cette portion du flux : aucun message qu’il peut lire n’est arrivé. Rien ne va mal, et il n’y a rien à approuver.",
 	"approvals.empty.unknown": "Impossible de lire pour l’instant si votre assistant est actif ou si un moteur d’agents tourne : cet écran ne peut donc pas dire pourquoi la liste est vide.",
+
 	"approvals.row.persona": "Proposée par {persona}",
 	"approvals.row.produced": "Écrite {when}",
 	"approvals.row.expires": "Périme {when}",
 	"approvals.row.expiresNever": "Sans péremption : celle-ci pourra être approuvée à n’importe quelle date.",
 	"approvals.row.attempt": "Tentative {attempt} pour ce message",
 	"approvals.row.body": "La réponse proposée",
+
 	"approvals.trigger.message": "Une réponse à un message sur {network}",
 	"approvals.trigger.other": "Une réponse à un événement {network} de type {type}",
 	"approvals.trigger.id": "Référence du message {id}",
 	"approvals.context.label": "Ce à quoi cette réponse répond, d'après votre assistant",
 	"approvals.context.named": "{contact} · {summary}",
-	"approvals.path.title": "Ce que votre assistant a fait avant d'écrire",
-	"approvals.path.freebusy": "A lu vos disponibilités du {from} au {to} — {intervals} périodes occupées",
-	"approvals.path.freebusyRefused": "A essayé de lire vos disponibilités du {from} au {to}, sans y arriver ({outcome})",
-	"approvals.path.eventFacts": "A demandé ce que porte un de vos événements",
-	"approvals.path.eventFactsRefused": "A essayé de demander ce que porte un de vos événements, sans y arriver ({outcome})",
-	"approvals.path.asked": "Vous a demandé : {asked}",
-	"approvals.times.checkedOne": "L'horaire proposé a été vérifié dans votre agenda",
-	"approvals.times.checked": "Les {count} horaires proposés ont été vérifiés dans votre agenda",
-	"approvals.times.checkedPlain": "Les horaires proposés ont été vérifiés dans votre agenda",
-	"approvals.times.unverified": "Cette réponse nomme une heure que rien n'a vérifiée — relisez-la avant de l'envoyer",
+	"approvals.path.title": "Ce que votre assistant a fait avant d'\u00e9crire",
+	"approvals.path.freebusy": "A lu vos disponibilit\u00e9s du {from} au {to} \u2014 {intervals} p\u00e9riodes occup\u00e9es",
+	"approvals.path.freebusyRefused": "A essay\u00e9 de lire vos disponibilit\u00e9s du {from} au {to}, sans y arriver ({outcome})",
+	"approvals.path.eventFacts": "A demand\u00e9 ce que porte un de vos \u00e9v\u00e9nements",
+	"approvals.path.eventFactsRefused": "A essay\u00e9 de demander ce que porte un de vos \u00e9v\u00e9nements, sans y arriver ({outcome})",
+	"approvals.path.asked": "Vous a demand\u00e9 : {asked}",
+	"approvals.times.checkedOne": "L'horaire propos\u00e9 a \u00e9t\u00e9 v\u00e9rifi\u00e9 dans votre agenda",
+	"approvals.times.checked": "Les {count} horaires propos\u00e9s ont \u00e9t\u00e9 v\u00e9rifi\u00e9s dans votre agenda",
+	"approvals.times.checkedPlain": "Les horaires propos\u00e9s ont \u00e9t\u00e9 v\u00e9rifi\u00e9s dans votre agenda",
+	"approvals.times.unverified": "Cette r\u00e9ponse nomme une heure que rien n'a v\u00e9rifi\u00e9e \u2014 relisez-la avant de l'envoyer",
 	"approvals.answered.open": "Voir le message d'origine",
 	"approvals.answered.loading": "Lecture du message…",
 	"approvals.answered.attachments": "{count, plural, =0 {aucune pièce jointe} one {une pièce jointe} other {# pièces jointes}}",
 	"approvals.answered.received": "Reçu {when}",
 	"approvals.whoIsIt.title": "Cet écran ne peut pas vous dire à qui elle s’adresse",
 	"approvals.whoIsIt.body": "Votre serveur liste ce que votre assistant a écrit, et identifie le message auquel il répond par sa seule référence — jamais par l’expéditeur, jamais par une citation de ses mots. Relire son message pour étiqueter cette ligne copierait les mots d’un contact là où ils n’étaient jamais allés. Savoir si ce compromis est le bon est une question ouverte sur le projet, et voici ce que la réponse coûte aujourd’hui.",
+
 	"approvals.standing.approvable": "Vous attend",
 	"approvals.standing.expired": "Plus approuvable",
 	"approvals.standing.approved": "Approuvée",
 	"approvals.expired.reason": "Cette suggestion a périmé avant que vous n’y veniez. Rien n’en garde de copie, elle ne peut donc pas être approuvée en retard — elle est montrée plutôt que masquée pour que vous sachiez ce qu’elle est devenue. Pour en obtenir une nouvelle, écrivez de nouveau à cette personne.",
 	"approvals.stale": "Celle-ci a périmé pendant que cet écran était ouvert. L’approuver sera refusé ; actualisez pour voir où elle en est.",
+
 	"approvals.approve": "Approuver et envoyer",
 	"approvals.approving": "Envoi…",
 	"approvals.edit": "Modifier avant d’envoyer",
@@ -757,14 +849,17 @@
 	"approvals.writeOwn.label": "Votre réponse, à la place de celle proposée",
 	"approvals.writeOwn.undisclosed": "Vous écrivez ce message : il partira tel quel, sans la mention de l'assistant.",
 	"approvals.editing.empty": "Une réponse vide enverrait un message vide. Écrivez quelque chose, ou gardez ce qui était proposé.",
+
 	"approvals.disclosure.label": "Ajoutée après la réponse, sur une ligne à part — non modifiable ici :",
 	"approvals.disclosure.fixed": "Cette phrase part avec chaque réponse rédigée par votre assistant, dans la langue de la réponse. Elle ne peut pas être retirée d’une seule réponse ; elle peut être désactivée pour toutes, dans les réglages, et c’est consigné.",
 	"approvals.disclosure.off": "La mention n’est pas ajoutée : désactivée depuis {date}.",
 	"approvals.disclosure.none": "Cette suggestion ne porte aucune phrase de mention, donc la réponse partira sans : elle a été écrite avant cette version, ou par un assistant qui n’en a pas fixé.",
 	"approvals.disclosure.unknown": "Son ajout dépend de l’interrupteur des réglages, qui n’a pas pu être lu à l’instant.",
+
 	"approvals.dismiss": "Refuser",
 	"approvals.dismiss.meaning": "Refuser masque cette réponse sur ce navigateur. Votre assistant n’en est pas averti, rien n’est enregistré sur votre serveur, et la suggestion périme d’elle-même.",
 	"approvals.dismissed.restore": "Remontrer celles que j’ai refusées",
+
 	"approvals.approvedText.label": "Ce que vous avez envoyé",
 	"approvals.approvedText.original": "Ce que votre assistant proposait",
 	"approvals.sent.title": "Publiée",
@@ -772,6 +867,7 @@
 	"approvals.sent.recordOnly": "Approuvée en tant que {owner} et publiée sur votre flux d’événements à la position {sequence}.",
 	"approvals.sent.edited": "Vous l’avez modifiée avant de l’approuver.",
 	"approvals.sent.unedited": "Publiée telle que votre assistant l’avait écrite.",
+
 	"approvals.delivery.canReach": "Votre compte est dans cette conversation : une fois approuvée, la réponse est relayée au contact par le réseau, comme si vous l’aviez écrite.",
 	"approvals.delivery.cannotReach": "Cette réponse ne peut pas atteindre le contact. Votre compte n’est pas dans cette conversation ({detail}), et un bridge ne relaie que ce que votre propre compte envoie : l’approuver la publierait sur votre flux, et personne ne la recevrait. Ce qui change cela est le device qui agit en votre nom (#123) — il doit avoir rejoint la conversation. Ce n’est pas un défaut de votre installation.",
 	"approvals.delivery.cannotReachNoOwnerDevice": "Cette réponse ne peut pas atteindre le contact. L’appareil par lequel Twalk agit en votre nom n’existe plus ({detail}), et un bridge ne relaie que ce que votre propre compte envoie : sans cet appareil, rien ne peut être posté en votre nom, dans cette conversation ni dans aucune autre passant par un bridge. Reprenez l’intégration dans le Companion pour en confier un nouveau — rien d’autre n’est à redémarrer, et il suffit de rafraîchir cette liste pour la voir dégagée.",
@@ -791,13 +887,16 @@
 	"approvals.posted.pending": "Votre Sensor ne l’a pas encore postée — ou l’a fait au-delà de la portion du flux que votre serveur relit.",
 	"approvals.posted.givenUp": "Le service qui devait l’envoyer a abandonné : {reason}",
 	"approvals.posted.givenUp.unexplained": "Le service qui devait l’envoyer a abandonné, sans dire pourquoi.",
+
 	"approvals.lost.title": "Cette réponse n’est pas partie",
 	"approvals.lost.body": "Votre serveur a enregistré votre approbation et le flux d’événements n’a jamais accusé réception de la réponse : elle n’a donc jamais été postée. L’approuver de nouveau republie exactement la même réponse — elle ne peut pas partir deux fois, quoi qu’il arrive.",
 	"approvals.lost.retry": "L’envoyer de nouveau",
+
 	"approvals.notice.window": "Votre serveur ne relit qu’une portion du flux d’événements, et il n’en a pas atteint le début. Des suggestions plus anciennes que cette portion existent et ne sont pas listées ici.",
 	"approvals.notice.truncated": "Plus de réponses ont été trouvées qu’il n’en est affiché. Les autres sont plus anciennes ; approuvez ou refusez celles-ci, puis actualisez.",
 	"approvals.notice.unreadable": "{count, plural, one {# réponse de cette portion n’a pas pu être lue par votre serveur et n’est pas listée} other {# réponses de cette portion n’ont pas pu être lues par votre serveur et ne sont pas listées}} : elles portent quelque chose que cette version ne comprend pas.",
 	"approvals.notice.dismissed": "{count, plural, one {# réponse est masquée parce que vous l’avez refusée ici} other {# réponses sont masquées parce que vous les avez refusées ici}}.",
+
 	"approvals.refusal.malformed_request": "Votre serveur n’a pas accepté la requête faite par cet écran. C’est un défaut du Companion, pas quelque chose que vous avez fait.",
 	"approvals.refusal.approval_is_not_a_batch": "Votre serveur s’est vu demander d’approuver plusieurs réponses d’un coup, et il a refusé. Une approbation porte sur une seule réponse, délibérément — ce refus est le produit qui fonctionne, et cet écran n’aurait pas dû le demander.",
 	"approvals.refusal.unknown_value": "Le format de la réponse n’est pas un de ceux que votre serveur connaît.",
@@ -820,23 +919,29 @@
 	"approvals.refusal.approvals_not_configured": "Ce déploiement n’approuve rien : aucun flux d’événements n’y est configuré, il n’y a donc rien où lire une suggestion ni où publier une réponse.",
 	"approvals.refusal.suggestions_not_configured": "Ce déploiement ne lit aucune suggestion : aucun flux d’événements n’y est configuré. Ce n’est pas la même chose que « personne n’a rien proposé » — votre serveur ne regarde pas.",
 	"approvals.refusal.unknown": "Votre serveur a refusé, pour une raison que cette version du Companion ne connaît pas ({error}). Rien n’a été envoyé.",
+
 	"approvals.remedy.retry": "Réessayez dans un instant.",
 	"approvals.remedy.reload": "Actualisez cet écran pour voir où en sont les choses.",
 	"approvals.remedy.signIn": "Reconnectez-vous pour continuer.",
 	"approvals.remedy.diagnostics": "Ouvrez le diagnostic et signalez ceci, avec le code ci-dessus.",
 	"approvals.remedy.none": "Il n’y a rien à faire ici, et rien n’est resté à moitié fait.",
+
 	"dashboard.chip.suggestions": "{count, plural, one {# réponse attend votre approbation} other {# réponses attendent votre approbation}}",
 	"dashboard.chip.suggestionsAtLeast": "Au moins autant : votre serveur n’a relu qu’une partie du flux d’événements.",
 	"dashboard.chip.suggestionsLink": "Les lire et décider",
 	"dashboard.chip.suggestionsPrivate": "Ce que votre assistant a écrit n’est pas montré ici. Cet écran se déverrouille dans le train.",
+
+
 	"consent.title": "Vos décisions sur vos contacts",
 	"consent.step": "Vous décidez, personne par personne, quels messages Twalk peut traiter.",
 	"consent.back": "Retour au tableau de bord",
 	"consent.refresh": "Actualiser",
 	"consent.refreshing": "Actualisation…",
+
 	"consent.intro.title": "Ce qui se décide ici",
 	"consent.intro.body": "Votre assistant ne peut lire que les messages d’un contact que vous avez autorisé. C’est ici que vous autorisez, que vous révoquez, ou que vous répondez « pas encore ».",
 	"consent.intro.notTheirs": "C’est votre décision, pas la leur. Vos contacts ne sont ni consultés ni informés, et « autorisé » enregistre que vous avez décidé — jamais que quelqu’un a donné son accord.",
+
 	"consent.legend.title": "Les trois réponses, et ce que chacune fait",
 	"consent.legend.granted": "Votre assistant peut lire ce que cette personne écrit, et peut vous proposer des réponses.",
 	"consent.legend.pending": "Le message arrive quand même sur votre serveur, en entier, et votre assistant est censé ne pas y toucher. Cette réponse ne cache rien à votre propre serveur.",
@@ -845,19 +950,24 @@
 	"consent.legend.notRetroactive": "La réponse est apposée sur chaque message à son arrivée : une décision vaut pour la suite et ne retire rien de ce qui est déjà sur votre serveur. Une autorisation revient, elle, sur les messages récents qui attendaient encore ; cette page n’a pas pu lire jusqu’où, ni combien attendent.",
 	"consent.legend.noReach": "La réponse est apposée sur chaque message à son arrivée : une décision vaut pour la suite et ne change rien de ce qui est déjà sur votre serveur. Sur cette installation, une autorisation ne revient pas sur les messages déjà reçus : si vous autorisez quelqu’un, attendez son prochain message.",
 	"consent.legend.grantReaches": "La réponse est apposée sur chaque message à son arrivée : une décision vaut pour la suite. Une autorisation fait la seule exception, et c’est celle qu’on vous doit : les messages de ce contact arrivés dans les {minutes} dernières minutes et qui attendaient encore une réponse seront traités. Plus anciens, ils ne le seront jamais. Remettre quelqu’un en attente ou le refuser ne vaut que pour la suite, et rien ne retire ce qui est déjà sur votre serveur.",
+
 	"consent.state.granted": "Autorisé",
 	"consent.state.pending": "Pas encore",
 	"consent.state.revoked": "Révoqué",
+
 	"consent.count.awaiting": "{count, plural, =0 {personne n’attend une première réponse} one {1 personne attend une première réponse} other {# personnes attendent une première réponse}}",
 	"consent.count.granted": "{count, plural, one {# autorisé} other {# autorisés}}",
 	"consent.count.revoked": "{count, plural, one {# révoqué} other {# révoqués}}",
 	"consent.count.gateway": "Votre serveur compte {count, plural, one {# contact} other {# contacts}} en attente d’une première réponse. Si ce nombre diffère de celui ci-dessus, certains ont écrit sur un réseau que cette version de l’application ne connaît pas.",
+
 	"consent.empty.title": "Personne sur qui décider",
 	"consent.empty.body": "Personne n’a encore écrit, et personne n’a fait l’objet d’une décision. Connectez un réseau et cette liste se remplira au fur et à mesure.",
+
 	"consent.search.label": "Rechercher dans vos contacts",
 	"consent.search.placeholder": "Un nom, un numéro, un identifiant Matrix",
 	"consent.search.showing": "{shown} sur {total} affichés.",
 	"consent.search.none": "Rien ne correspond à ce que vous avez saisi.",
+
 	"consent.bulk.title": "Répondre pour tous les contacts affichés",
 	"consent.bulk.scope": "Cela agit sur {shown, plural, one {le # contact} other {les # contacts}} que la recherche affiche en ce moment, et sur personne d’autre. Affinez la recherche d’abord si ce n’est pas le groupe que vous visez.",
 	"consent.bulk.grant": "{count, plural, one {Autoriser le contact affiché} other {Autoriser les # contacts affichés}}",
@@ -869,6 +979,7 @@
 	"consent.bulk.applying": "Enregistrement…",
 	"consent.bulk.done": "{count, plural, one {# décision enregistrée} other {# décisions enregistrées}} : {state}.",
 	"consent.bulk.partial": "Ce qui a été enregistré avant cet échec est enregistré. Actualisez pour voir quoi.",
+
 	"consent.row.byId": "Votre serveur ne garde plus de nom pour cette personne : voici l’identité que son réseau lui a donnée.",
 	"consent.row.neverDecided": "Personne n’a encore décidé sur ce contact.",
 	"consent.row.inForce": "En vigueur : {state}",
@@ -878,21 +989,27 @@
 	"consent.row.nothingWaiting": "Rien n’attend de ce contact : une autorisation vaudra pour ses prochains messages.",
 	"consent.row.willAnswer": "{count, plural, one {# message reçu récemment attend cette décision : il sera traité si vous autorisez.} other {# messages reçus récemment attendent cette décision : ils seront traités si vous autorisez.}}",
 	"consent.row.isOwner": "C’est vous, et vous n’êtes pas l’un de vos propres contacts. Il n’y a rien à décider ici — voyez la note ci-dessus.",
+
 	"consent.action.grant": "Autoriser",
 	"consent.action.revoke": "Révoquer",
 	"consent.action.undecide": "Pas encore",
 	"consent.action.undecideMeaning": "« Pas encore » est une réponse, pas une annulation : elle est enregistrée comme les deux autres, et cette personne cesse d’être comptée comme en attente d’une première réponse. Rien dans cette version ne permet de dédire une décision — le registre ne fait que grandir.",
+
 	"consent.decided.recorded": "Enregistré : {state}.",
 	"consent.decided.replayed": "Déjà enregistré : {state}. Rien n’a changé.",
 	"consent.decided.notRetroactive": "Cela vaut pour leur prochain message, pas pour ceux qui sont déjà sur votre serveur.",
 	"consent.decided.grantReached": "Cela vaut pour leurs prochains messages, et pour ceux des {minutes} dernières minutes qui attendaient encore.",
+
 	"consent.waiting.missing": "Tout ce sur quoi vous avez déjà décidé est ci-dessous et à jour. Ce qui manque, ce sont les personnes qui vous ont écrit et sur lesquelles vous n’avez jamais décidé : cette liste vient d’une autre lecture, et c’est celle qui a échoué.",
 	"consent.names.unreadable": "Votre serveur n’a pas pu relire comment ces contacts s’appellent : ils sont affichés avec l’identité que leur réseau leur a donnée. La liste, elle, est complète : les noms sont cherchés à part et ne sont jamais stockés.",
 	"consent.connections.unreadable": "Votre serveur Twalk n’a pas pu lister ses connexions. Chaque décision ci-dessous reste vraie, mais sur un serveur avec deux comptes d’un même réseau cet écran ne peut pas dire de quel compte parle une ligne.",
+
 	"consent.owner.title": "Vous figurez parmi vos propres contacts",
 	"consent.owner.body": "{id} est le compte de ce déploiement, et il ne devrait jamais apparaître ici : vous n’êtes pas quelqu’un sur qui vous décidez. C’est une trace d’avant que votre serveur n’apprenne à vous reconnaître, et un défaut connu plutôt qu’une erreur de votre part.",
 	"consent.owner.remedy": "Elle est montrée plutôt que cachée pour que vous sachiez qu’elle existe, et aucune décision n’est proposée dessus : y répondre ferait taire vos propres messages pour tout ce qui lit ce registre. Rien sur cet écran ne peut la supprimer.",
+
 	"consent.networks.note": "Répondre pour tout un réseau d’un coup décide pour tout le monde sur ce réseau, y compris pour ceux qui n’ont pas encore écrit. Ce n’est délibérément pas proposé ici : cet écran décide personne par personne.",
+
 	"consent.refusal.malformed_request": "Votre serveur a refusé cette décision comme mal formée. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application, pas de quelque chose que vous auriez fait.",
 	"consent.refusal.unknown_value": "Votre serveur n’a pas reconnu une valeur envoyée par cette application — un réseau, ou une réponse. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
 	"consent.refusal.unsupported_subject_type": "Votre serveur n’accepte pas de décision sur ce type de sujet. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
@@ -904,17 +1021,21 @@
 	"consent.refusal.contacts_not_configured": "Ce déploiement ne surveille pas les messages entrants : il n’a donc aucune liste de personnes en attente d’une réponse. Ce n’est pas la même affirmation que « personne ne vous a écrit ».",
 	"consent.refusal.bus_unreachable": "Votre serveur n’a pas pu relire comment ces contacts s’appellent. Seuls les noms sont touchés ; la liste est complète.",
 	"consent.refusal.unknown": "Votre serveur a refusé avec une raison dont cette version de l’application n’a pas la formulation. Les journaux de votre serveur la nomment.",
+
 	"consent.remedy.retry": "Réessayez.",
 	"consent.remedy.reload": "Actualisez cet écran : ce qu’il affiche n’est plus à jour.",
 	"consent.remedy.signIn": "Reconnectez-vous pour continuer.",
 	"consent.remedy.signInLink": "Se reconnecter",
 	"consent.remedy.diagnostics": "Ouvrez le diagnostic et signalez ce qu’il indique : cela ne devrait pas arriver.",
 	"consent.remedy.none": "Il n’y a rien à faire depuis ici.",
+
 	"session.expired.title": "Votre session a expiré",
 	"session.expired.body": "Twalk connecte chaque navigateur pour une durée courte à la fois, et celle-ci est écoulée. Reconnectez-vous pour continuer.",
 	"session.expired.bodyFor": "Twalk connecte chaque navigateur pour une durée courte à la fois, et celle-ci est écoulée. Reconnectez-vous en tant que {owner} pour continuer.",
 	"session.expired.stay": "Votre serveur Twalk n’a rien d’anormal et rien n’a été perdu. Vous reviendrez directement sur cet écran, et les réseaux que vous avez connectés le sont toujours.",
 	"session.expired.signIn": "Se reconnecter",
+
+	
 	"conversations.title": "Les conversations que Twalk observe",
 	"conversations.caption": "Rien n’est observé avant que vous ne le décidiez. Choisissez une conversation à la fois — et lisez le nombre à côté avant de le faire.",
 	"conversations.summary": "Twalk lit {observing} de vos {total, plural, one {# conversation} other {# conversations}}.",
@@ -971,6 +1092,7 @@
 	"conversations.outcome.failed": "Celle-ci n’a pas fonctionné ({reason}). Les autres n’ont pas été touchées.",
 	"conversations.bridgeUnreadable": "Aucune conversation de {bridge} n’est dans cette liste : votre serveur Twalk n’a pas pu les lire.",
 	"conversations.bridgeAskedNothing": "{bridge} a répondu, et le compte utilisé par votre serveur Twalk pour l’interroger ({account}) n’est dans aucune conversation. Soit ce réseau n’en a encore créé aucune, soit votre serveur interroge avec le mauvais compte — le second cas est un problème de configuration, et les journaux nomment le réglage.",
+
 	"api.trouble.unreachable": "Votre serveur Twalk n’a pas pu être joint : rien n’a répondu du tout. Vérifiez qu’il fonctionne, et vérifiez votre connexion.",
 	"api.trouble.sessionRefused": "Votre serveur Twalk a répondu, et il a refusé cette session. Reconnectez-vous pour continuer — rien d’autre ne va mal.",
 	"api.trouble.refused": "Votre serveur Twalk a répondu, mais il n’a pas pu faire cela. Réessayez, et ouvrez le diagnostic si cela persiste.",
@@ -988,37 +1110,38 @@
 	"dashboard.feed.connection.pending_operator": "La connexion {connection} attend que l'opérateur modifie son client",
 	"approvals.refusal.connection_not_connected": "Le compte d'où partirait cette réponse n'est pas connecté pour l'instant : rien n'a été envoyé. L'opérateur doit le reconnecter sur le serveur ; la réponse reste ici.",
 	"settings.triage.title": "Tri du courrier",
-	"settings.triage.lead": "Vos règles classent votre courrier à l’arrivée. Elles sont appliquées par votre serveur, pas par l’agent : aucun modèle ne décide où va un message, pour qu’un texte reçu d’un inconnu ne puisse jamais devenir une instruction.",
+	"settings.triage.lead": "Vos r\u00e8gles classent votre courrier \u00e0 l\u2019arriv\u00e9e. Elles sont appliqu\u00e9es par votre serveur, pas par l\u2019agent : aucun mod\u00e8le ne d\u00e9cide o\u00f9 va un message, pour qu\u2019un texte re\u00e7u d\u2019un inconnu ne puisse jamais devenir une instruction.",
 	"settings.triage.destinations.title": "Dossiers de destination",
-	"settings.triage.destinations.lead": "Les dossiers dans lesquels une règle a le droit de classer. Une règle ne peut en nommer aucun autre.",
-	"settings.triage.destinations.never": "La corbeille et les indésirables ne peuvent pas y figurer : la plupart des serveurs les vident automatiquement, et un geste réversible qui cesse de l’être ne l’est pas.",
-	"settings.triage.rules.title": "Règles",
-	"settings.triage.rules.empty": "Aucune règle. Rien n’est déplacé.",
-	"settings.triage.rules.order": "La première règle qui correspond l’emporte, dans l’ordre ci-dessous. Un message qui correspond à deux règles est classé par la première.",
-	"settings.triage.field.sender": "Expéditeur",
+	"settings.triage.destinations.lead": "Les dossiers dans lesquels une r\u00e8gle a le droit de classer. Une r\u00e8gle ne peut en nommer aucun autre.",
+	"settings.triage.destinations.never": "La corbeille et les ind\u00e9sirables ne peuvent pas y figurer : la plupart des serveurs les vident automatiquement, et un geste r\u00e9versible qui cesse de l\u2019\u00eatre ne l\u2019est pas.",
+	"settings.triage.rules.title": "R\u00e8gles",
+	"settings.triage.rules.empty": "Aucune r\u00e8gle. Rien n\u2019est d\u00e9plac\u00e9.",
+	"settings.triage.rules.order": "La premi\u00e8re r\u00e8gle qui correspond l\u2019emporte, dans l\u2019ordre ci-dessous. Un message qui correspond \u00e0 deux r\u00e8gles est class\u00e9 par la premi\u00e8re.",
+	"settings.triage.field.sender": "Exp\u00e9diteur",
 	"settings.triage.field.subject": "Objet contient",
 	"settings.triage.field.list_id": "Identifiant de liste",
 	"settings.triage.field.older_than_days": "Plus ancien que (jours)",
-	"settings.triage.body.never": "Aucune règle ne lit le corps du message : une règle qui le lirait serait une règle qu’un inconnu peut écrire.",
-	"settings.triage.orphaned": "Retirer ce dossier laisserait ces règles sans destination : {rules}",
-	"settings.triage.moves.title": "Ce que le tri a déplacé",
-	"settings.triage.moves.empty": "Rien n’a encore été déplacé.",
-	"settings.triage.moves.undo": "Remettre où c’était",
-	"settings.triage.moves.undoRequested": "Remise en place demandée — elle aura lieu au prochain passage du collecteur.",
+	"settings.triage.body.never": "Aucune r\u00e8gle ne lit le corps du message : une r\u00e8gle qui le lirait serait une r\u00e8gle qu\u2019un inconnu peut \u00e9crire.",
+	"settings.triage.orphaned": "Retirer ce dossier laisserait ces r\u00e8gles sans destination : {rules}",
+	"settings.triage.moves.title": "Ce que le tri a d\u00e9plac\u00e9",
+	"settings.triage.moves.empty": "Rien n\u2019a encore \u00e9t\u00e9 d\u00e9plac\u00e9.",
+	"settings.triage.moves.undo": "Remettre o\u00f9 c\u2019\u00e9tait",
+	"settings.triage.moves.undoRequested": "Remise en place demand\u00e9e \u2014 elle aura lieu au prochain passage du collecteur.",
 	"settings.triage.moves.isUndo": "Remise en place",
-	"settings.triage.refused.destination_not_allowed": "Cette règle classe dans un dossier que vous n’avez pas déclaré.",
-	"settings.triage.refused.destination_is_destructive": "La corbeille et les indésirables ne peuvent jamais être une destination.",
-	"settings.triage.refused.destination_is_empty": "Un dossier de destination ne peut pas être vide.",
+	"settings.triage.refused.destination_not_allowed": "Cette r\u00e8gle classe dans un dossier que vous n\u2019avez pas d\u00e9clar\u00e9.",
+	"settings.triage.refused.destination_is_destructive": "La corbeille et les ind\u00e9sirables ne peuvent jamais \u00eatre une destination.",
+	"settings.triage.refused.destination_is_empty": "Un dossier de destination ne peut pas \u00eatre vide.",
 	"settings.triage.refused.destination_too_long": "Ce nom de dossier est trop long.",
-	"settings.triage.refused.match_is_empty": "Cette règle ne compare rien.",
-	"settings.triage.refused.match_too_long": "Ce que cette règle compare est trop long.",
-	"settings.triage.refused.match_out_of_range": "Une ancienneté se compte en jours, de 1 à 3650.",
-	"settings.triage.refused.too_many_rules": "Vous avez atteint le nombre maximum de règles.",
-	"settings.triage.refused.duplicate_rule_id": "Deux règles portent le même nom.",
-	"settings.triage.refused.rule_id_is_empty": "Chaque règle a besoin d’un nom.",
-	"settings.triage.refused.rule_id_too_long": "Ce nom de règle est trop long.",
-	"settings.triage.refused.malformed_request": "Ces règles n’ont pas pu être lues.",
+	"settings.triage.refused.match_is_empty": "Cette r\u00e8gle ne compare rien.",
+	"settings.triage.refused.match_too_long": "Ce que cette r\u00e8gle compare est trop long.",
+	"settings.triage.refused.match_out_of_range": "Une anciennet\u00e9 se compte en jours, de 1 \u00e0 3650.",
+	"settings.triage.refused.too_many_rules": "Vous avez atteint le nombre maximum de r\u00e8gles.",
+	"settings.triage.refused.duplicate_rule_id": "Deux r\u00e8gles portent le m\u00eame nom.",
+	"settings.triage.refused.rule_id_is_empty": "Chaque r\u00e8gle a besoin d\u2019un nom.",
+	"settings.triage.refused.rule_id_too_long": "Ce nom de r\u00e8gle est trop long.",
+	"settings.triage.refused.malformed_request": "Ces r\u00e8gles n\u2019ont pas pu \u00eatre lues.",
 	"settings.triage.add": "Ajouter",
 	"settings.triage.remove": "Retirer",
-	"settings.triage.trouble": "Ces règles n’ont pas pu être enregistrées."
+	"settings.triage.trouble": "Ces r\u00e8gles n\u2019ont pas pu \u00eatre enregistr\u00e9es.",
+	"settings.triage.rules.idPlaceholder": "lettres-info"
 }

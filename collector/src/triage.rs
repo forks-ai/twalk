@@ -253,26 +253,6 @@ pub fn file(
     Ok(None)
 }
 
-/// Every destination of the set, resolved once, with the reason for each one
-/// that cannot be used. For the log line a deployment prints when its rules
-/// change: an owner finds out that a mailbox was renamed from this rather than
-/// from mail that quietly stops moving.
-pub fn resolve_all(
-    triage: &Triage,
-    mailboxes: &[Mailbox],
-) -> BTreeMap<String, Result<String, Unusable>> {
-    triage
-        .destinations
-        .iter()
-        .map(|destination| {
-            (
-                destination.clone(),
-                resolve(mailboxes, triage, destination).map(|mailbox| mailbox.id.clone()),
-            )
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +299,7 @@ mod tests {
     ) -> crate::jmap::Mail {
         crate::jmap::Mail {
             id: "m1".into(),
+            mailbox_ids: vec!["mb-inbox".to_owned()],
             received_at: received_at.into(),
             from: crate::jmap::Person {
                 name: None,

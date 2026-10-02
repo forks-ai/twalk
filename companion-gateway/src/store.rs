@@ -1027,7 +1027,9 @@ pub const MIGRATIONS: [&str; 22] = [
            OR OLD.email_id IS NOT NEW.email_id
            OR OLD.rule_id IS NOT NEW.rule_id
            OR OLD.from_mailbox_id IS NOT NEW.from_mailbox_id
+           OR OLD.from_mailbox_name IS NOT NEW.from_mailbox_name
            OR OLD.to_mailbox_id IS NOT NEW.to_mailbox_id
+           OR OLD.to_mailbox_name IS NOT NEW.to_mailbox_name
            OR OLD.occurred_at IS NOT NEW.occurred_at
            OR OLD.undoes IS NOT NEW.undoes;
     END;
@@ -2847,32 +2849,40 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// The eleven columns a recorded move is read from — one reader, because
+    /// the two queries below differ only in their WHERE and their order, and
+    /// two copies of a column list is how one of them silently stops matching.
+    const MOVE_COLUMNS: &'static str =
+        "sequence, connection, email_id, rule_id, from_mailbox_id, from_mailbox_name,
+         to_mailbox_id, to_mailbox_name, occurred_at, undoes, undo_requested_at";
+
+    fn recorded_move(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::mail_moves::Recorded> {
+        Ok(crate::mail_moves::Recorded {
+            sequence: row.get(0)?,
+            moved: crate::mail_moves::Move {
+                connection: row.get(1)?,
+                email_id: row.get(2)?,
+                rule_id: row.get(3)?,
+                from_mailbox_id: row.get(4)?,
+                from_mailbox_name: row.get(5)?,
+                to_mailbox_id: row.get(6)?,
+                to_mailbox_name: row.get(7)?,
+                occurred_at: row.get(8)?,
+                undoes: row.get(9)?,
+            },
+            undo_requested_at: row.get(10)?,
+        })
+    }
+
     /// The moves, newest first. What the owner reads back.
     pub fn mail_moves(&self, limit: usize) -> Result<Vec<crate::mail_moves::Recorded>> {
         let connection = self.connection();
-        let mut statement = connection.prepare(
-            "SELECT sequence, connection, email_id, rule_id, from_mailbox_id, from_mailbox_name,
-                    to_mailbox_id, to_mailbox_name, occurred_at, undoes, undo_requested_at
-             FROM mail_move ORDER BY sequence DESC LIMIT ?1",
-        )?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {} FROM mail_move ORDER BY sequence DESC LIMIT ?1",
+            Self::MOVE_COLUMNS
+        ))?;
         let rows = statement
-            .query_map(rusqlite::params![limit as i64], |row| {
-                Ok(crate::mail_moves::Recorded {
-                    sequence: row.get(0)?,
-                    moved: crate::mail_moves::Move {
-                        connection: row.get(1)?,
-                        email_id: row.get(2)?,
-                        rule_id: row.get(3)?,
-                        from_mailbox_id: row.get(4)?,
-                        from_mailbox_name: row.get(5)?,
-                        to_mailbox_id: row.get(6)?,
-                        to_mailbox_name: row.get(7)?,
-                        occurred_at: row.get(8)?,
-                        undoes: row.get(9)?,
-                    },
-                    undo_requested_at: row.get(10)?,
-                })
-            })?
+            .query_map(rusqlite::params![limit as i64], Self::recorded_move)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -2898,29 +2908,12 @@ impl Store {
     /// queue it reads on the seam it already fetches.
     pub fn pending_mail_undos(&self) -> Result<Vec<crate::mail_moves::Recorded>> {
         let connection = self.connection();
-        let mut statement = connection.prepare(
-            "SELECT sequence, connection, email_id, rule_id, from_mailbox_id, from_mailbox_name,
-                    to_mailbox_id, to_mailbox_name, occurred_at, undoes, undo_requested_at
-             FROM mail_move WHERE undo_requested_at IS NOT NULL ORDER BY sequence",
-        )?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT {} FROM mail_move WHERE undo_requested_at IS NOT NULL ORDER BY sequence",
+            Self::MOVE_COLUMNS
+        ))?;
         let rows = statement
-            .query_map([], |row| {
-                Ok(crate::mail_moves::Recorded {
-                    sequence: row.get(0)?,
-                    moved: crate::mail_moves::Move {
-                        connection: row.get(1)?,
-                        email_id: row.get(2)?,
-                        rule_id: row.get(3)?,
-                        from_mailbox_id: row.get(4)?,
-                        from_mailbox_name: row.get(5)?,
-                        to_mailbox_id: row.get(6)?,
-                        to_mailbox_name: row.get(7)?,
-                        occurred_at: row.get(8)?,
-                        undoes: row.get(9)?,
-                    },
-                    undo_requested_at: row.get(10)?,
-                })
-            })?
+            .query_map([], Self::recorded_move)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -2945,6 +2938,9 @@ impl Store {
 
     /// Every proposal, newest first — undecided ones included, which is what
     /// the owner's screen shows first.
+    ///
+    /// A row this build cannot read is left out rather than shown as an empty
+    /// rule the owner might approve.
     pub fn rule_proposals(&self, limit: usize) -> Result<Vec<crate::mail_rules::Proposal>> {
         let connection = self.connection();
         let mut statement = connection.prepare(
@@ -2953,35 +2949,30 @@ impl Store {
         )?;
         let rows = statement
             .query_map(rusqlite::params![limit as i64], |row| {
-                let document: String = row.get(1)?;
                 Ok((
-                    crate::mail_rules::Proposal {
-                        sequence: row.get(0)?,
-                        rule: serde_json::from_str(&document).unwrap_or_else(|_| {
-                            crate::mail_rules::Rule {
-                                id: String::new(),
-                                matches: crate::mail_rules::Match::Subject(String::new()),
-                                destination: String::new(),
-                            }
-                        }),
-                        because: row.get(2)?,
-                        proposed_at: row.get(3)?,
-                        state: row.get(4)?,
-                        decided_at: row.get(5)?,
-                    },
-                    document,
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        // A proposal this build cannot read is dropped from the listing rather
-        // than shown as an empty rule the owner might approve.
         Ok(rows
             .into_iter()
-            .filter(|(proposal, document)| {
-                serde_json::from_str::<crate::mail_rules::Rule>(document).is_ok()
-                    || !proposal.rule.id.is_empty()
-            })
-            .map(|(proposal, _)| proposal)
+            .filter_map(
+                |(sequence, document, because, proposed_at, state, decided_at)| {
+                    Some(crate::mail_rules::Proposal {
+                        sequence,
+                        rule: serde_json::from_str(&document).ok()?,
+                        because,
+                        proposed_at,
+                        state,
+                        decided_at,
+                    })
+                },
+            )
             .collect())
     }
 
@@ -3033,9 +3024,14 @@ impl Store {
             "UPDATE mail_rule_proposal SET state = ?2, decided_at = ?3 WHERE sequence = ?1",
             rusqlite::params![sequence, decided, at],
         )?;
-        Ok(Some(
-            triage.unwrap_or_else(crate::mail_rules::Triage::default),
-        ))
+        // On a refusal the set is unchanged, so the set as it STANDS is the
+        // answer — not an empty one, which the screen would read as "you have
+        // no rules" and which is how a refusal would appear to wipe them
+        // (found in review).
+        match triage {
+            Some(triage) => Ok(Some(triage)),
+            None => Ok(Some(self.mail_triage()?)),
+        }
     }
 
     /// The owner's working day, recorded (#381): the days they accept

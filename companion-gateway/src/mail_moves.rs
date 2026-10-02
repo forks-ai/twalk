@@ -52,14 +52,7 @@ pub struct Recorded {
     pub undo_requested_at: Option<String>,
 }
 
-/// How many moves one read answers with, and the ceiling a request may ask
-/// for. A bound rather than a limit anybody meets: the screen shows a page.
+/// How many moves one read answers with. A bound rather than a limit anybody
+/// meets: the screen shows a page. No `MAX_LIMIT` beside it, because this
+/// route takes no `limit` — one would be surface nobody asked for.
 pub const DEFAULT_LIMIT: usize = 50;
-pub const MAX_LIMIT: usize = 500;
-
-impl Recorded {
-    /// Whether this row is itself an undo.
-    pub fn is_undo(&self) -> bool {
-        self.moved.undoes.is_some()
-    }
-}

@@ -546,11 +546,24 @@ impl Mailbox {
             match crate::triage::file(&triage, &mailboxes, mail, at) {
                 Ok(Some(filing)) => {
                     moves.push((mail.id.clone(), filing.mailbox_id.clone()));
+                    // Where this mail actually is, not "the inbox": a
+                    // deployment whose inbox has no `inbox` role, or a mail
+                    // the owner had already filed somewhere, would otherwise
+                    // record an origin that is not the one an undo must
+                    // restore — and an empty one makes the move un-undoable
+                    // (#418, found in review).
+                    let (from_id, from_name) = mail
+                        .mailbox_ids
+                        .first()
+                        .and_then(|id| mailboxes.iter().find(|mb| &mb.id == id))
+                        .map(|mb| (mb.id.clone(), mb.name.clone()))
+                        .or_else(|| inbox.map(|mb| (mb.id.clone(), mb.name.clone())))
+                        .unwrap_or_default();
                     filed.push(Filed {
                         email_id: mail.id.clone(),
                         rule_id: filing.rule_id,
-                        from_mailbox_id: inbox.map(|mb| mb.id.clone()).unwrap_or_default(),
-                        from_mailbox_name: inbox.map(|mb| mb.name.clone()).unwrap_or_default(),
+                        from_mailbox_id: from_id,
+                        from_mailbox_name: from_name,
                         to_mailbox_id: filing.mailbox_id,
                         to_mailbox_name: filing.mailbox_name,
                         undoes: None,

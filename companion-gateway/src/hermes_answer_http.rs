@@ -213,6 +213,18 @@ async fn propose_mail_rule(
     // door rather than shown to them. The **allowlist** is deliberately not
     // checked here: a destination the owner has not declared yet is a
     // reasonable thing to propose, and they declare it when they approve.
+    // The **allowlist** is deliberately not checked — a destination the owner
+    // has not declared yet is a reasonable thing to propose, and they declare
+    // it when they approve. The trash is not: ADR 0042 says neither a typo nor
+    // a proposal can invent one, so it is refused at the door rather than
+    // shown to the owner as something they might approve (found in review).
+    if let Err(why) = crate::mail_rules::check_destination(&proposal.rule.destination) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "code": why.code(), "detail": "this rule is not one this deployment could apply" })),
+        )
+            .into_response();
+    }
     if let Err(why) = proposal.rule.matches.check() {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,

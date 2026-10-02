@@ -694,6 +694,11 @@ pub struct Attachment {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Mail {
     pub id: String,
+    /// The mailboxes this mail is in, as the server answers them. Read for
+    /// triage (#417): a move records where the mail actually was, which is
+    /// what an undo restores — "the inbox" would be a guess, and a wrong one
+    /// for a mail the owner had already filed.
+    pub mailbox_ids: Vec<String>,
     pub received_at: String,
     pub from: Person,
     pub to: Vec<Person>,
@@ -836,6 +841,15 @@ impl Mail {
             })
             .unwrap_or_default();
         Ok(Self {
+            // The order the server lists them in is not meaningful; the first
+            // is taken as "where it is" because a mail this collector triages
+            // is in one mailbox in every deployment it has met, and recording
+            // one honest origin beats recording none.
+            mailbox_ids: email
+                .get("mailboxIds")
+                .and_then(Value::as_object)
+                .map(|held| held.keys().cloned().collect())
+                .unwrap_or_default(),
             received_at: email
                 .get("receivedAt")
                 .and_then(Value::as_str)

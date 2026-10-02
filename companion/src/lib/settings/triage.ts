@@ -1,14 +1,12 @@
-/**
- * The owner's mail triage rules, as the screen works with them (#419,
- * ADR 0042).
- *
- * The wire shape is a set — an allowlist of destinations and a list of rules —
- * and the screen edits it whole, because a rule is only valid against the
- * allowlist it was written for. This module is the part of that editing worth
- * testing without a browser: what the form holds, what a draft rule becomes on
- * the wire, which rules a destination's removal would break, and the sentence
- * key for a refusal the Gateway sent back.
- */
+// The owner's mail triage rules, as the screen works with them (#419,
+// ADR 0042).
+//
+// The wire shape is a set — an allowlist of destinations and a list of rules —
+// and the screen edits it whole, because a rule is only valid against the
+// allowlist it was written for. This module is the part of that editing worth
+// testing without a browser: what the form holds, what a draft rule becomes on
+// the wire, which rules a destination's removal would break, and the sentence
+// key for a refusal the Gateway sent back.
 
 import type { components } from '$lib/api/schema';
 import type { MessageKey } from '$lib/i18n';
@@ -101,14 +99,13 @@ export const REFUSAL_CODES = [
 ] as const;
 
 /**
- * A move as the screen lists it: newest first, and an undo shown as what it
- * is rather than as a move of its own kind.
+ * Whether this move can still be put back.
+ *
+ * An undo cannot be undone — asking for that is asking for the first move
+ * again, which the owner does by asking for the first move again — and a move
+ * already asked about is not offered twice, which is what the Gateway's
+ * `request_mail_undo` refuses on.
  */
-export function movesForScreen(moves: MailMove[]): MailMove[] {
-	return [...moves].sort((a, b) => b.sequence - a.sequence);
-}
-
-/** Whether this move can still be put back. */
 export function isUndoable(move: MailMove): boolean {
-	return move.undoes === null && move.undoes === undefined ? true : !move.undoes;
+	return !move.undoes && !move.undo_requested_at;
 }
