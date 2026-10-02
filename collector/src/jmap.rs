@@ -295,6 +295,34 @@ pub fn email_received_after(
     )
 }
 
+/// The inbox's mail older than an instant, oldest first (#417).
+///
+/// What an `older_than_days` rule needs and the poll cannot give it: the poll
+/// sees only what `Email/changes` just reported, and a mail that arrived a
+/// minute ago is never thirty days old. Without this the match would be
+/// offered by the API and by the screen and would move nothing — a rule that
+/// does nothing being worse than no rule.
+///
+/// Bounded by `QUERY_PAGE` and by one mailbox: this reads the **inbox** and
+/// never the rest of the account, because the inbox is the lane triage
+/// governs and a mail the owner already filed is theirs.
+pub fn email_received_before(
+    account_id: &str,
+    inbox_id: &str,
+    before: &str,
+) -> (&'static str, Value) {
+    (
+        "Email/query",
+        json!({
+            "accountId": account_id,
+            "filter": { "inMailbox": inbox_id, "before": before },
+            "sort": [{ "property": "receivedAt", "isAscending": true }],
+            "position": 0,
+            "limit": QUERY_PAGE
+        }),
+    )
+}
+
 /// One page of the account's newest mails, ids only (#331): how a thread
 /// is found when the server answers no header filter — list what a client
 /// lists, then match the Message-ID on the mails themselves. A sort on

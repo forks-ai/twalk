@@ -24,8 +24,6 @@
 //! `trash` or `junk` is refused **here**, whatever the Gateway let through, and
 //! that refusal is the one that counts.
 
-use std::collections::BTreeMap;
-
 use serde::Deserialize;
 
 /// A mailbox as `Mailbox/get` answers it.
@@ -222,6 +220,34 @@ fn older_than(received_at: &str, days: u32, now: std::time::SystemTime) -> bool 
     let now: chrono::DateTime<chrono::Utc> = now.into();
     let age = now.signed_duration_since(received.with_timezone(&chrono::Utc));
     age.num_seconds() > i64::from(days) * 86_400
+}
+
+/// The RFC 3339 instant `days` before `now`, which is what the sweep asks the
+/// server for (`before` on `receivedAt`). `None` when `now` cannot be read,
+/// and the caller then sweeps nothing rather than guessing an instant.
+pub fn days_before(now: &str, days: u32) -> Option<String> {
+    let at = time::OffsetDateTime::parse(now, &time::format_description::well_known::Rfc3339)
+        .ok()?
+        - time::Duration::days(i64::from(days));
+    at.format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+/// The narrowest `older_than_days` any rule names, or `None` when no rule is
+/// about age.
+///
+/// What the sweep asks the server for: mail older than this is mail some rule
+/// *might* match, and nothing younger can match any of them. One query for the
+/// whole set rather than one per rule.
+pub fn oldest_age_wanted(triage: &Triage) -> Option<u32> {
+    triage
+        .rules
+        .iter()
+        .filter_map(|rule| match rule.matches {
+            Match::OlderThanDays(days) => Some(days),
+            _ => None,
+        })
+        .min()
 }
 
 /// The first rule that matches, resolved to a mailbox — or nothing, or why a
@@ -473,6 +499,54 @@ mod tests {
             file(&set, &mailboxes(), &m, now()),
             Err(("dangereuse".into(), Unusable::DestinationIsDestructive))
         );
+    }
+
+    #[test]
+    fn the_sweep_asks_the_server_for_an_instant_it_can_read() {
+        let before = days_before("2026-10-02T12:00:00Z", 30).unwrap();
+        assert!(before.starts_with("2026-09-02T12:00:00"), "{before}");
+        assert_eq!(
+            days_before("hier", 30),
+            None,
+            "an unreadable now sweeps nothing"
+        );
+    }
+
+    /// The sweep asks for one instant, not one per rule: the narrowest age any
+    /// rule names, because nothing younger can match any of them (#417).
+    #[test]
+    fn the_sweep_asks_for_the_narrowest_age_any_rule_names() {
+        let none = Triage {
+            destinations: vec!["Veille".into()],
+            rules: vec![Rule {
+                id: "r".into(),
+                matches: Match::Subject("x".into()),
+                destination: "Veille".into(),
+            }],
+        };
+        assert_eq!(oldest_age_wanted(&none), None, "no rule is about age");
+        let aged = Triage {
+            destinations: vec!["Veille".into()],
+            rules: vec![
+                Rule {
+                    id: "a".into(),
+                    matches: Match::OlderThanDays(90),
+                    destination: "Veille".into(),
+                },
+                Rule {
+                    id: "b".into(),
+                    matches: Match::Subject("x".into()),
+                    destination: "Veille".into(),
+                },
+                Rule {
+                    id: "c".into(),
+                    matches: Match::OlderThanDays(30),
+                    destination: "Veille".into(),
+                },
+            ],
+        };
+        assert_eq!(oldest_age_wanted(&aged), Some(30));
+        assert_eq!(oldest_age_wanted(&Triage::default()), None);
     }
 
     /// Every deployment ships here, and nothing must happen.

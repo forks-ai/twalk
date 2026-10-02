@@ -286,3 +286,92 @@ async fn an_undo_puts_the_mail_back_and_is_itself_a_move() -> Result<()> {
     collector.stop().await;
     Ok(())
 }
+
+/// An `older_than_days` rule, which the poll alone can never satisfy: it sees
+/// only what `Email/changes` just reported, and a mail that arrived a minute
+/// ago is never thirty days old. The inbox is swept for the rest (#417).
+///
+/// The second assertion is the one that matters as much as the first: **the
+/// swept mail is not published**. The collector does no backfill (#251), and
+/// reading an old mail to decide where it lives must not announce it — a rule
+/// about age would otherwise put months of the owner's old mail on the bus the
+/// first time they wrote one.
+#[tokio::test]
+async fn a_rule_about_age_files_old_mail_and_publishes_none_of_it() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("triage-age").await?;
+    run.authorize().await?;
+    run.serve_snapshot(&bus, Vec::new()).await?;
+    run.sso.set_mail_triage(json!({
+        "destinations": ["Archive"],
+        "rules": [
+            { "id": "vieux", "field": "older_than_days", "value": 30, "destination": "Archive" }
+        ]
+    }));
+
+    // Already in the inbox when the collector starts — the past, which is
+    // never published. Dated well beyond the rule's thirty days.
+    let mut old = FakeMail::from_person(
+        "Un vieux fil",
+        "ancien@example.org",
+        OWNER,
+        "De l'an dernier",
+        "Ceci dormait dans la boîte.",
+    );
+    old.received_at = "2025-01-04T09:00:00Z".to_owned();
+    let old_id = run.sso.deliver(old);
+
+    // And one that arrived just now, which no rule about age can match.
+    let mut fresh = FakeMail::from_person(
+        "Alice Martin",
+        "alice@example.org",
+        OWNER,
+        "Ce matin",
+        "On se voit lundi ?",
+    );
+    fresh.received_at = "2026-10-02T08:00:00Z".to_owned();
+    let fresh_id = run.sso.deliver(fresh);
+
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged(
+            "swept the inbox for mail old enough for a rule about age",
+            1,
+        )
+        .await?;
+    collector
+        .wait_logged("the owner's rule filed a mail", 1)
+        .await?;
+
+    assert_eq!(
+        run.sso.mailbox_of(&old_id),
+        Some(ARCHIVE_ID.to_owned()),
+        "the old mail is filed: this is what the poll alone could never do"
+    );
+    assert_eq!(
+        run.sso.mailbox_of(&fresh_id),
+        Some(INBOX_ID.to_owned()),
+        "a mail that arrived this morning is not thirty days old"
+    );
+
+    // And nothing swept reached the bus. The messages this run published, if
+    // any, are about the fresh mail and never the old one.
+    let published = run
+        .events_of(&bus, "twalk.inbound.message.received.v1", &run.mail)
+        .await?;
+    for message in &published {
+        assert_ne!(
+            message["data"]["message_id"],
+            json!("<de-l-an-dernier@example.org>"),
+            "the swept mail must not be published: the collector does no backfill (#251)"
+        );
+    }
+    assert!(
+        !serde_json::to_string(&published)?.contains("Ceci dormait"),
+        "not a word of the swept mail is on the bus: {published:#?}"
+    );
+
+    collector.stop().await;
+    Ok(())
+}

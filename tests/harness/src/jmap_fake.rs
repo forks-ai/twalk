@@ -764,6 +764,7 @@ fn identity_get(account: &str) -> Value {
 }
 
 /// `Email/query` with the filters the collector uses: `inMailbox`, `after`
+/// and `before`
 /// on `receivedAt` (#277's look-back, oldest first, `position` and `limit`
 /// honoured so a recovery pages), and `header: ["Message-ID", "<…>"]` to
 /// find the mail a reply answers (#278).
@@ -780,6 +781,9 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
             ))
         });
     let after = filter.get("after").and_then(Value::as_str);
+    // `before` on `receivedAt`: the sweep that finds mail old enough for an
+    // `older_than_days` rule (#417).
+    let before = filter.get("before").and_then(Value::as_str);
     // A server whose index holds no headers answers an empty list, not a
     // refusal (#331): the shape TMail showed on the reference deployment.
     if store.no_header_filter && header.is_some() {
@@ -796,6 +800,7 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
         .filter(|(_, (mailbox, _, mail))| {
             in_mailbox.is_none_or(|wanted| wanted == mailbox)
                 && after.is_none_or(|after| mail.received_at.as_str() >= after)
+                && before.is_none_or(|before| mail.received_at.as_str() < before)
                 && header.as_ref().is_none_or(|(name, value)| {
                     if name == "message-id" {
                         // Exactly as this server indexes it, and not both

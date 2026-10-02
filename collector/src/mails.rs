@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use twalk_consent_cache::ConsentCache;
 
 use crate::jmap::{self, Changes, Dropped, Envelopes, Mail, Session};
@@ -37,6 +37,10 @@ pub struct Mailbox {
     http: reqwest::Client,
     /// What the Companion Gateway tells this mailbox about triage (#416-#418).
     pub governed: FromTheGateway,
+    /// When the inbox was last swept for mail old enough for an
+    /// `older_than_days` rule. `None` until the first sweep, which is why one
+    /// happens at start.
+    swept_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 /// What the Companion Gateway tells this mailbox: the owner's triage rules,
@@ -119,6 +123,17 @@ fn look_back_from(last_read_at: &str) -> Option<String> {
         .ok()
 }
 
+/// How often the inbox is swept for mail old enough for an `older_than_days`
+/// rule (#417).
+///
+/// Not every poll: the poll runs every few seconds and a sweep is a query over
+/// the whole inbox, so sweeping at that rate would ask the owner's server for
+/// the same answer hundreds of times an hour to move nothing. An hour is the
+/// grain the rule itself works at — a rule about *days* does not need
+/// minutes — and the first sweep happens at start, so a deployment that has
+/// just been given a rule does not wait an hour to honour it.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// One mail the owner's rules filed: what moved, by which rule, and from
 /// where (#417).
 ///
@@ -171,6 +186,7 @@ impl Mailbox {
             state_dir: state_dir.to_owned(),
             consent,
             governed,
+            swept_at: std::sync::Mutex::new(None),
             http: side::client()?,
         })
     }
@@ -367,13 +383,14 @@ impl Mailbox {
             last_read_at: now.to_owned(),
             ..previous.clone()
         };
-        if created.is_empty() {
-            if next.state != previous.state || recovered {
-                poll.state = Some(next);
-            }
-            return Ok(poll);
-        }
-        let in_inbox = if recovered {
+        // A round where nothing new arrived still sweeps and still files: an
+        // `older_than_days` rule matters most on a quiet mailbox, and an early
+        // return here would have meant it never ran there at all (found by the
+        // end-to-end test, which is what it is for).
+        let nothing_new = created.is_empty();
+        let in_inbox = if nothing_new {
+            Vec::new()
+        } else if recovered {
             // The query was already the INBOX's.
             created
         } else {
@@ -439,13 +456,136 @@ impl Mailbox {
                 triaged.push(mail);
             }
         }
+        // The sweep: mail already in the inbox and old enough for an
+        // `older_than_days` rule (#417). Added to what this round triages and
+        // **never** to what it publishes — `poll.envelopes` is built above and
+        // is not touched here.
+        //
+        // That separation is the whole of it. The collector does no backfill
+        // (#251): what the inbox held before it started is the past and is not
+        // news. Reading an old mail to decide where it lives is a different
+        // act from announcing it, and conflating the two would put months of
+        // the owner's old mail on the bus the first time they wrote a rule
+        // about age.
+        triaged.extend(
+            self.sweep(&session, credential, account, &previous.inbox_id, now)
+                .await,
+        );
         // Filed after the envelopes are built, never before: a mail is
         // published as a trigger from the inbox it arrived in, and a move that
         // raced the read would publish a source that had already changed.
         self.file(&session, credential, account, &triaged, &mut poll, now)
             .await;
-        poll.state = Some(next);
+        // On a quiet round the state is written only when it actually moved,
+        // which is what the early return used to do: rewriting it every second
+        // for nothing is a write the owner's disk does not need.
+        if !nothing_new || next.state != previous.state || recovered {
+            poll.state = Some(next);
+        }
         Ok(poll)
+    }
+
+    /// The inbox's mail old enough for an `older_than_days` rule, for this
+    /// round to triage (#417).
+    ///
+    /// Empty — and not one request — unless a rule is actually about age, and
+    /// at most once an hour ([`SWEEP_EVERY`]): a poll runs every few seconds
+    /// and this is a query over the whole inbox.
+    ///
+    /// **Nothing read here is ever published.** The caller adds these to what
+    /// it triages, never to what it publishes: the collector does no backfill
+    /// (#251), and a rule about age must not put months of the owner's old
+    /// mail on the bus the first time they write one.
+    ///
+    /// A failure gives up on this round and says so at debug. The mail is
+    /// still in the inbox and still old; the next sweep finds it.
+    async fn sweep(
+        &self,
+        session: &Session,
+        credential: &crate::side::Credential,
+        account: &str,
+        inbox_id: &str,
+        now: &str,
+    ) -> Vec<Mail> {
+        let triage = match self.governed.triage.lock() {
+            Ok(triage) => triage.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let Some(days) = crate::triage::oldest_age_wanted(&triage) else {
+            return Vec::new();
+        };
+        {
+            let mut swept = match self.swept_at.lock() {
+                Ok(swept) => swept,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if swept.is_some_and(|last| last.elapsed() < SWEEP_EVERY) {
+                return Vec::new();
+            }
+            *swept = Some(std::time::Instant::now());
+        }
+        let Some(before) = crate::triage::days_before(now, days) else {
+            warn!(%now, "this round's instant cannot be read; the inbox is not swept");
+            return Vec::new();
+        };
+        let ids = match self
+            .call(
+                &session.api_url,
+                credential,
+                vec![jmap::email_received_before(account, inbox_id, &before)],
+            )
+            .await
+            .ok()
+            .as_ref()
+            .and_then(|response| method(response, 0).ok())
+            .map(|query| {
+                query
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            }) {
+            Some(ids) if !ids.is_empty() => ids,
+            _ => return Vec::new(),
+        };
+        let Ok(response) = self
+            .call(
+                &session.api_url,
+                credential,
+                vec![jmap::email_get(account, &ids)],
+            )
+            .await
+        else {
+            debug!(
+                wanted = ids.len(),
+                "the swept mails could not be read this round"
+            );
+            return Vec::new();
+        };
+        let Ok(list) = method(&response, 0) else {
+            return Vec::new();
+        };
+        let swept: Vec<Mail> = list
+            .get("list")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|email| Mail::parse(email).ok())
+            .collect();
+        if !swept.is_empty() {
+            info!(
+                swept = swept.len(),
+                older_than_days = days,
+                "swept the inbox for mail old enough for a rule about age; nothing read here is \
+                 published"
+            );
+        }
+        swept
     }
 
     /// Files what the owner's rules match, and records what moved (#417).
