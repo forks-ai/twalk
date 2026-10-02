@@ -15,11 +15,17 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-/// The JMAP account id the fake serves, and the three mailboxes' ids.
+/// The JMAP account id the fake serves, and its mailboxes' ids.
 pub const ACCOUNT_ID: &str = "u1";
 pub const INBOX_ID: &str = "inbox-1";
 pub const SENT_ID: &str = "sent-1";
 pub const ARCHIVE_ID: &str = "archive-1";
+/// A mailbox whose **name** says nothing and whose **role** is the trash.
+/// Triage must refuse it on the role, which is what a mailbox actually is, and
+/// not on what it is called (#417, ADR 0042).
+pub const TRASH_ID: &str = "trash-1";
+/// One the owner made themselves, with no role at all — the ordinary case.
+pub const VEILLE_ID: &str = "veille-1";
 
 /// One person on a mail: the display name, when one, and the address.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +130,7 @@ fn uuid_like(seed: &str) -> String {
 /// id — and so one CloudEvents id the bus would deduplicate.
 pub(crate) struct MailStore {
     mails: BTreeMap<String, (String, u64, FakeMail)>,
+
     /// The Email state: moves on every delivery.
     state: u64,
     /// States older than this are forgotten: `Email/changes` from one
@@ -212,6 +219,13 @@ impl Default for MailStore {
 }
 
 impl MailStore {
+    /// Which mailbox one mail is in — the one fact triage is about (#417).
+    pub(crate) fn mailbox_of(&self, email_id: &str) -> Option<String> {
+        self.mails
+            .get(email_id)
+            .map(|(mailbox, _, _)| mailbox.clone())
+    }
+
     pub(crate) fn deliver(&mut self, mailbox: &str, mail: FakeMail) -> String {
         self.state += 1;
         self.next_id += 1;
@@ -464,6 +478,11 @@ fn mailbox_get(store: &MailStore) -> Value {
             mailbox(SENT_ID, "Sent", Some("sent")),
             mailbox(DRAFTS_ID, "Drafts", Some("drafts")),
             mailbox(ARCHIVE_ID, "Archive", Some("archive")),
+            // A mailbox whose NAME says nothing and whose ROLE is the trash:
+            // what makes the collector's role check the authority (#417).
+            mailbox(TRASH_ID, "Vrac", Some("trash")),
+            // And one the owner made themselves, with no role at all.
+            mailbox(VEILLE_ID, "Veille", None),
         ],
         "notFound": []
     })
@@ -745,6 +764,7 @@ fn identity_get(account: &str) -> Value {
 }
 
 /// `Email/query` with the filters the collector uses: `inMailbox`, `after`
+/// and `before`
 /// on `receivedAt` (#277's look-back, oldest first, `position` and `limit`
 /// honoured so a recovery pages), and `header: ["Message-ID", "<…>"]` to
 /// find the mail a reply answers (#278).
@@ -761,6 +781,9 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
             ))
         });
     let after = filter.get("after").and_then(Value::as_str);
+    // `before` on `receivedAt`: the sweep that finds mail old enough for an
+    // `older_than_days` rule (#417).
+    let before = filter.get("before").and_then(Value::as_str);
     // A server whose index holds no headers answers an empty list, not a
     // refusal (#331): the shape TMail showed on the reference deployment.
     if store.no_header_filter && header.is_some() {
@@ -777,6 +800,7 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
         .filter(|(_, (mailbox, _, mail))| {
             in_mailbox.is_none_or(|wanted| wanted == mailbox)
                 && after.is_none_or(|after| mail.received_at.as_str() >= after)
+                && before.is_none_or(|before| mail.received_at.as_str() < before)
                 && header.as_ref().is_none_or(|(name, value)| {
                     if name == "message-id" {
                         // Exactly as this server indexes it, and not both
@@ -949,13 +973,41 @@ fn email_set(args: &Value, store: &mut MailStore, created: &mut BTreeMap<String,
             destroyed.push(id.to_owned());
         }
     }
+    // `update` with a whole `mailboxIds` map: the move triage makes (#417).
+    // The map replaces rather than patches, which is what makes it a filing
+    // instead of a copy — so the mail lands in exactly the named mailbox.
+    let mut updated = serde_json::Map::new();
+    let mut not_updated = serde_json::Map::new();
+    if let Some(updates) = args.get("update").and_then(Value::as_object) {
+        for (email_id, patch) in updates {
+            let Some(entry) = store.mails.get_mut(email_id) else {
+                not_updated.insert(email_id.clone(), json!({ "type": "notFound" }));
+                continue;
+            };
+            if let Some(target) = patch
+                .get("mailboxIds")
+                .and_then(Value::as_object)
+                .and_then(|map| map.keys().next().cloned())
+            {
+                entry.0 = target;
+                store.state += 1;
+                updated.insert(email_id.clone(), Value::Null);
+            } else {
+                not_updated.insert(
+                    email_id.clone(),
+                    json!({ "type": "invalidProperties", "properties": ["mailboxIds"] }),
+                );
+            }
+        }
+    }
     json!({
         "accountId": ACCOUNT_ID,
         "oldState": (store.state.saturating_sub(1)).to_string(),
         "newState": store.state(),
         "created": created_out,
         "notCreated": not_created,
-        "updated": null,
+        "updated": if updated.is_empty() { Value::Null } else { Value::Object(updated) },
+        "notUpdated": not_updated,
         "destroyed": destroyed
     })
 }

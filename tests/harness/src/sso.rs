@@ -112,6 +112,13 @@ struct State {
     /// `/api/settings/collection` answers it. `false` unless a test opens
     /// it, which is how a deployment ships.
     calendar_location: bool,
+    /// The owner's mail triage rules, as the collection seam serves them
+    /// (#416), and the undos they asked for (#418). `None` is a deployment
+    /// where nobody wrote a rule, which is how every one ships.
+    mail_triage: Option<Value>,
+    mail_undos: Option<Value>,
+    /// What the collector reported moving, in the order it reported it.
+    reported_moves: Vec<Value>,
     /// One counter for every CTag and ETag the fake ever hands out, so no
     /// two versions of anything share one.
     versions: u64,
@@ -415,6 +422,31 @@ impl FakeSso {
     /// otherwise, which is how a deployment ships.
     pub fn set_calendar_location(&self, enabled: bool) {
         self.lock().calendar_location = enabled;
+    }
+
+    /// The owner's mail triage rules, as `GET /api/settings/collection`
+    /// serves them to the collector (#416, ADR 0042). Empty until a test
+    /// writes some, which is how every deployment ships.
+    pub fn set_mail_triage(&self, triage: Value) {
+        self.lock().mail_triage = Some(triage);
+    }
+
+    /// The undos the owner asked for and this collector has not performed
+    /// (#418), on the same seam.
+    pub fn set_mail_undos(&self, undos: Value) {
+        self.lock().mail_undos = Some(undos);
+    }
+
+    /// Which mailbox this mail is in now — the one assertion triage is about
+    /// (#417). `None` when the fake has never heard of it.
+    pub fn mailbox_of(&self, email_id: &str) -> Option<String> {
+        self.lock().mails.mailbox_of(email_id)
+    }
+
+    /// What the collector reported to `POST /api/internal/mail-moves` — the
+    /// owner's record of what triage filed, as the fake Gateway received it.
+    pub fn reported_moves(&self) -> Vec<Value> {
+        self.lock().reported_moves.clone()
     }
 
     /// Delivers a mail into the owner's INBOX on the fake JMAP server:
@@ -818,13 +850,34 @@ fn respond_json(
         ("GET", "/api/settings/collection") => Some(match guard.gateway_snapshot.is_some() {
             true => (
                 "200 OK",
-                json!({ "calendar_location": { "enabled": guard.calendar_location } }),
+                json!({
+                    "calendar_location": { "enabled": guard.calendar_location },
+                    "mail_triage": guard
+                        .mail_triage
+                        .clone()
+                        .unwrap_or_else(|| json!({ "destinations": [], "rules": [] })),
+                    "mail_undos": guard.mail_undos.clone().unwrap_or_else(|| json!([])),
+                }),
             ),
             false => (
                 "404 Not Found",
                 json!({ "error": "not_found", "detail": "this fake stands in for no Companion Gateway" }),
             ),
         }),
+        // What the collector reports it moved (#418). Kept whole, so a test
+        // asserts the record the owner would read rather than a count.
+        ("POST", "/api/internal/mail-moves") => {
+            if let Some(moves) = serde_json::from_str::<Value>(&request.body)
+                .ok()
+                .and_then(|body| body.get("moves").and_then(Value::as_array).cloned())
+            {
+                guard.reported_moves.extend(moves);
+            }
+            Some((
+                "201 Created",
+                json!({ "recorded": guard.reported_moves.len(), "reported": guard.reported_moves.len() }),
+            ))
+        }
         ("GET", "/api/user") => service(
             "caldav",
             request,
@@ -1301,7 +1354,10 @@ fn local_instant(after_dtstart: &str) -> String {
     else {
         return value;
     };
-    let Ok(zone) = zone.parse::<chrono_tz::Tz>().or_else(|_| windows_zone(zone)) else {
+    let Ok(zone) = zone
+        .parse::<chrono_tz::Tz>()
+        .or_else(|_| windows_zone(zone))
+    else {
         return value;
     };
     let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&value, "%Y%m%dT%H%M%S") else {

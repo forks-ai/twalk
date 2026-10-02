@@ -1185,6 +1185,161 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/mail-moves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The collector reporting what its rules moved.
+         * @description The other half of `/api/settings/collection`, and it takes the same
+         *     service token. Idempotent on (connection, mail, instant), so a
+         *     collector retrying a batch after a lost response records it once.
+         *
+         *     A move reported for a mail this Gateway has never heard of is recorded
+         *     all the same: **the collector is the authority on what it moved**, and
+         *     a Gateway that second-guessed it would lose the record of a real move.
+         */
+        post: operations["reportMailMoves"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-moves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the owner's triage rules moved, newest first.
+         * @description The record of what triage did (#418, ADR 0042).
+         *
+         *     Without it, triage is a thing that happens to the owner's mailbox and
+         *     leaves no account of itself; with it, a rule that turned out wrong
+         *     costs a minute rather than an afternoon of searching.
+         *
+         *     What is **not** here is a contact's words. The mail's id, the two
+         *     mailboxes, the rule and the instant — nothing a sender wrote.
+         *
+         *     An **undo is a row of its own** pointing at the move it reverses, and
+         *     never an erasure: a journal that could be rewritten would answer *what
+         *     happened* with *what somebody last said happened*.
+         */
+        get: operations["getMailMoves"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-moves/{sequence}/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Put one filed mail back where it came from.
+         * @description `202`, not `200`: **this Gateway cannot move a mail.** The collector
+         *     can, and does — it holds the mailbox. So this records that the owner
+         *     asked, and the move happens on the collector's next round and arrives
+         *     as a new row pointing at this one.
+         *
+         *     `409 not_undoable` when there is no such move, when one has already
+         *     been asked for, or when the move is itself an undo — undoing an undo
+         *     is asking for the first move again, which the owner does by asking for
+         *     the first move again.
+         */
+        post: operations["undoMailMove"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-rule-proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Triage rules the assistant proposed, newest first.
+         * @description Where the drafting agent's judgement is worth having and harmless
+         *     (#420, ADR 0042): recognising a pattern across weeks of mail is what a
+         *     rule cannot do and a model can — and a proposal is text until the owner
+         *     acts on it.
+         *
+         *     A refused proposal stays refused and readable: *the assistant suggested
+         *     this and I said no* is a thing the owner may want to see again when it
+         *     suggests the same thing a second time.
+         */
+        get: operations["getMailRuleProposals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-rule-proposals/{sequence}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a proposed rule, which writes it as the owner's.
+         * @description Writes the rule through the same journal the Companion writes to, with
+         *     **the owner as the actor** — never the agent.
+         *
+         *     Checked against the allowlist as it stands *now* rather than as it
+         *     stood when the agent proposed: a destination withdrawn in between
+         *     refuses the approval, which is the honest answer rather than a rule
+         *     that files nowhere.
+         */
+        post: operations["approveMailRuleProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mail-rule-proposals/{sequence}/refuse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Refuse a proposed rule. Nothing is written but the refusal. */
+        post: operations["refuseMailRuleProposal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/portals": {
         parameters: {
             query?: never;
@@ -1627,6 +1782,64 @@ export interface paths {
          *     refused here rather than discovered later by a persona.
          */
         put: operations["putLanguagePreference"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/mail-triage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The owner's mail triage rules, and the mailboxes a rule may file into.
+         * @description The owner's rules for sorting their own mailbox (#416, ADR 0042).
+         *
+         *     A rule is a **match** on an envelope field and one **destination**.
+         *     The destination must be one of the mailboxes the owner declared;
+         *     nothing else can be named, which is what keeps a typo — or a rule the
+         *     drafting agent proposed (#420) — from inventing one.
+         *
+         *     No model is in the execution path, and that is the decision rather
+         *     than a precaution. ADR 0039 says the drafting lane is the one place in
+         *     this project where *the input is written by a stranger*; triage is
+         *     that lane with a side effect, since an agent sorting the inbox reads
+         *     text composed outside the deployment and then acts on the mailbox it
+         *     read it from. A rule is matched by code, against fields a sender
+         *     cannot forge into an instruction.
+         *
+         *     Matches are on the **envelope** — sender, subject, `List-Id`, age —
+         *     and never on the body. A rule that read the body would be a rule a
+         *     stranger could write.
+         *
+         *     Empty `destinations` and empty `rules` is every deployment's starting
+         *     state: nothing is triaged and the collector does nothing.
+         */
+        get: operations["getMailTriage"];
+        /**
+         * Set the triage rules, or clear them.
+         * @description `{"triage": {...}}` sets the whole set; `{"triage": null}` goes back
+         *     to triaging nothing.
+         *
+         *     Whole or not at all: a rule is only valid against the allowlist it was
+         *     written for, so there is no such thing as accepting half of a set. A
+         *     destination outside the allowlist is a `422` naming the rule, never a
+         *     rule quietly dropped — a rule the owner believes is running and is not
+         *     is worse than no rule at all.
+         *
+         *     The **trash and the spam folder can never be a destination**, and
+         *     cannot enter the allowlist either. Most servers purge them on a timer,
+         *     so a move there has an expiry date, and a reversible act that stops
+         *     being reversible is not reversible. This Gateway refuses them by name,
+         *     in the five languages the Companion speaks; the collector refuses them
+         *     by JMAP `role` and is the authority (#417).
+         */
+        put: operations["setMailTriage"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2630,6 +2843,18 @@ export interface components {
                 enabled: boolean;
             };
             /**
+             * @description The owner's triage rules, as the collector applies them (#416).
+             *     Served here rather than on a route of its own: it is one more
+             *     thing a service collecting the owner's data needs before it acts,
+             *     and a second fetch would be a second thing to get out of step.
+             */
+            mail_triage: components["schemas"]["MailTriage"];
+            /**
+             * @description The undos the owner asked for and this collector has not performed
+             *     (#418). On the same seam as the rules, for the same reason.
+             */
+            mail_undos: components["schemas"]["MailMove"][];
+            /**
              * @description The owner's working day (#381), or `null` when they have said
              *     nothing — in which case a free/busy read offers every gap, as it
              *     did before the decision existed. A collector that finds `null`
@@ -3612,6 +3837,104 @@ export interface components {
         LanguagePreferenceRequest: {
             /** @enum {string|null} */
             language: "en" | "fr" | "it" | "es" | "de" | null;
+        };
+        MailMove: components["schemas"]["MailMoveReport"] & {
+            /**
+             * Format: int64
+             * @description Its position in the journal, and what an undo names.
+             */
+            sequence: number;
+            /**
+             * Format: date-time
+             * @description Set when the owner asked for this move to be put back and the
+             *     collector has not done it yet.
+             */
+            undo_requested_at: string | null;
+        };
+        /** @description One move, as the collector reports it. */
+        MailMoveReport: {
+            connection: string;
+            email_id: string;
+            from_mailbox_id: string;
+            from_mailbox_name: string;
+            /** Format: date-time */
+            occurred_at: string;
+            /** @description The rule that caused it, or `undo` when the owner asked for it back. */
+            rule_id: string;
+            to_mailbox_id: string;
+            to_mailbox_name: string;
+            /**
+             * Format: int64
+             * @description The move this one reverses, when it is an undo.
+             */
+            undoes?: number | null;
+        };
+        /**
+         * @description One triage rule: what it looks at, and the mailbox a match files into.
+         *
+         *     The match is a tagged union — `field` says which envelope field, and
+         *     `value` is what to compare. Every field is one the **server parsed**
+         *     rather than prose a sender wrote, which is what makes a rule something
+         *     a stranger cannot author (ADR 0042).
+         */
+        MailRule: {
+            /**
+             * @description A mailbox from the owner's allowlist, by name. Resolved to a JMAP
+             *     id by the collector, which is the only component holding the
+             *     mailbox (#417).
+             */
+            destination: string;
+            /**
+             * @description `sender` matches the address, whole or by a `*@domain` /
+             *     `local@*` wildcard on one side, lower-cased on both.
+             *     `subject` is a case-insensitive fragment — a fragment and not a
+             *     pattern, because a regular expression in a rule is a denial of
+             *     service the owner writes by accident.
+             *     `list_id` is the header a mailing list stamps, and is the most
+             *     useful of the four.
+             *     `older_than_days` is the one match about time, and the only one
+             *     that can act on a mail already seen.
+             * @enum {string}
+             */
+            field: "sender" | "subject" | "list_id" | "older_than_days";
+            /**
+             * @description Stable across amendments, so the journal can say *this* rule
+             *     changed rather than *a* rule was removed and another added.
+             */
+            id: string;
+            /** @description A string for the first three fields, a count of days for the fourth. */
+            value: string | number;
+        };
+        /**
+         * @description A rule the drafting agent proposed. **It is not a rule**: it is text
+         *     until the owner approves it, and approving writes the rule with the
+         *     owner as the actor (ADR 0042).
+         */
+        MailRuleProposal: {
+            /** @description The agent's own words for why. Shown to the owner, never acted on. */
+            because: string | null;
+            /** Format: date-time */
+            decided_at: string | null;
+            /** Format: date-time */
+            proposed_at: string;
+            rule: components["schemas"]["MailRule"];
+            /** Format: int64 */
+            sequence: number;
+            /** @enum {string} */
+            state: "proposed" | "approved" | "refused";
+        };
+        /** @description The mailboxes a rule may file into, and the rules themselves. */
+        MailTriage: {
+            /**
+             * @description The mailboxes a rule may name. Empty means triage does nothing,
+             *     which is how every deployment starts. The trash and the spam
+             *     folder cannot be in it, whatever is written.
+             */
+            destinations: string[];
+            rules: components["schemas"]["MailRule"][];
+        };
+        MailTriageState: {
+            triage: components["schemas"]["MailTriage"];
         };
         /**
          * @description The homeserver's OpenID token document, forwarded unchanged. The
@@ -7376,6 +7699,214 @@ export interface operations {
             503: components["responses"]["SignInNotConfigured"];
         };
     };
+    reportMailMoves: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    moves: components["schemas"]["MailMoveReport"][];
+                };
+            };
+        };
+        responses: {
+            /** @description How many were new, and how many were reported. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        recorded: number;
+                        reported: number;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description The report could not be read. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description This Gateway records no moves. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getMailMoves: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The moves, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        moves: components["schemas"]["MailMove"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    undoMailMove: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The move's position in the journal. */
+                sequence: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The request is recorded; the collector performs it. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: date-time */
+                        undo_requested_at: string;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description There is no such move, or it cannot be undone. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    getMailRuleProposals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The proposals, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        proposals: components["schemas"]["MailRuleProposal"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    approveMailRuleProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sequence: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The triage set the approval left behind. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailTriageState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description No such proposal, or it was already decided. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The rule is not one this deployment will apply. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    refuseMailRuleProposal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sequence: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The triage set, unchanged. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailTriageState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description No such proposal, or it was already decided. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
     listPortals: {
         parameters: {
             query?: never;
@@ -7980,6 +8511,70 @@ export interface operations {
             401: components["responses"]["Unauthenticated"];
             500: components["responses"]["SettingsStoreUnavailable"];
             503: components["responses"]["SettingsNotConfigured"];
+        };
+    };
+    getMailTriage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The triage set as it stands. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailTriageState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    setMailTriage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description Why, for the journal. Never shown to a contact. */
+                    reason?: string | null;
+                    triage: components["schemas"]["MailTriage"] | null;
+                };
+            };
+        };
+        responses: {
+            /** @description The triage set the decision left behind. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MailTriageState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description The set is not one this deployment will apply. The code says which
+             *     of the eleven reasons, and names the rule when one is at fault.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            503: components["responses"]["ConsentNotConfigured"];
         };
     };
     getModelConfiguration: {

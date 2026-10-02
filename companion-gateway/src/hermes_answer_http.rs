@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::json;
-use tracing::warn;
+use tracing::{error, info, warn};
 
 use crate::hermes_answer::{AnswerRefusal, Received, MAX_PUSH_BYTES, SIGNATURE_HEADER};
 use crate::http::Gateway;
@@ -33,7 +33,12 @@ pub fn routes() -> Router<Gateway> {
     // and fails on a path it cannot see — which is how a route added without a
     // description is caught. The constant and the literal are asserted equal by
     // `hermes_answer_http::tests`.
-    Router::new().route("/_twalk/hermes/answers", post(receive_answer))
+    Router::new()
+        .route("/_twalk/hermes/answers", post(receive_answer))
+        .route(
+            "/_twalk/hermes/mail-rule-proposals",
+            post(propose_mail_rule),
+        )
 }
 
 async fn receive_answer(
@@ -132,5 +137,125 @@ mod tests {
         // drifting, which would leave the guard's table classifying a path the
         // router does not serve.
         assert_eq!(crate::hermes_answer::ANSWER_PATH, "/_twalk/hermes/answers");
+    }
+}
+
+/// `POST /_twalk/hermes/mail-rule-proposals` — the drafting agent proposing a
+/// triage rule (#420, ADR 0042).
+///
+/// **Proposing is the only thing it can do here.** There is no route by which
+/// the agent writes a rule or moves a mail, and that is the ticket rather than
+/// a precaution: the agent reads text written by strangers, and a proposal is
+/// the only shape in which that reading cannot become an action. Approving is
+/// the owner's, on their own screen, and the rule is then written with the
+/// owner as the actor.
+///
+/// Signed with the same secret the answers hook uses, and verified before a
+/// byte of the body is looked at.
+async fn propose_mail_rule(
+    State(gateway): State<Gateway>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(answers) = gateway.answers() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "code": "hermes_seam_not_configured",
+                "detail": "this Gateway takes no proposals: set GATEWAY_HERMES_ANSWER_SECRET"
+            })),
+        )
+            .into_response();
+    };
+    if body.len() > MAX_PUSH_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "code": "too_large", "detail": "a proposal is one rule and a sentence" })),
+        )
+            .into_response();
+    }
+    let signature = headers
+        .get(SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if !answers.authenticates(signature, &body) {
+        warn!("refused a rule proposal: the signature is missing or wrong");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "code": "unauthenticated", "detail": "the proposal is not signed by this deployment's Hermes" })),
+        )
+            .into_response();
+    }
+    let Some(consent) = gateway.consent() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "code": "consent_not_configured", "detail": "no store to journal a proposal in" })),
+        )
+            .into_response();
+    };
+    #[derive(serde::Deserialize)]
+    struct Body {
+        rule: crate::mail_rules::Rule,
+        #[serde(default)]
+        because: Option<String>,
+    }
+    let proposal: Body = match serde_json::from_slice(&body) {
+        Ok(proposal) => proposal,
+        Err(error) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "code": "malformed_request", "detail": format!("the proposal could not be read: {error}") })),
+            )
+                .into_response();
+        }
+    };
+    // The rule's own shape is checked now — an empty match, an age out of
+    // range — so a proposal the owner could never approve is refused at the
+    // door rather than shown to them. The **allowlist** is deliberately not
+    // checked here: a destination the owner has not declared yet is a
+    // reasonable thing to propose, and they declare it when they approve.
+    // The **allowlist** is deliberately not checked — a destination the owner
+    // has not declared yet is a reasonable thing to propose, and they declare
+    // it when they approve. The trash is not: ADR 0042 says neither a typo nor
+    // a proposal can invent one, so it is refused at the door rather than
+    // shown to the owner as something they might approve (found in review).
+    if let Err(why) = crate::mail_rules::check_destination(&proposal.rule.destination) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "code": why.code(), "detail": "this rule is not one this deployment could apply" })),
+        )
+            .into_response();
+    }
+    if let Err(why) = proposal.rule.matches.check() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "code": why.code(), "detail": "this rule is not one this deployment could apply" })),
+        )
+            .into_response();
+    }
+    let at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+    let because = proposal
+        .because
+        .as_deref()
+        .map(|words| words.chars().take(500).collect::<String>());
+    match consent
+        .store()
+        .record_rule_proposal(&proposal.rule, because.as_deref(), &at)
+    {
+        Ok(sequence) => {
+            info!(sequence, rule = %proposal.rule.id, "the assistant proposed a triage rule; nothing is applied until the owner says so");
+            (
+                StatusCode::CREATED,
+                Json(json!({ "sequence": sequence, "state": "proposed" })),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            error!(%error, "failed to record a rule proposal");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "code": "store_unavailable", "detail": "the proposal could not be recorded" })),
+            )
+                .into_response()
+        }
     }
 }

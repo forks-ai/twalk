@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use twalk_consent_cache::ConsentCache;
 
 use crate::jmap::{self, Changes, Dropped, Envelopes, Mail, Session};
@@ -35,6 +35,29 @@ pub struct Mailbox {
     pub state_dir: PathBuf,
     pub consent: ConsentCache,
     http: reqwest::Client,
+    /// What the Companion Gateway tells this mailbox about triage (#416-#418).
+    pub governed: FromTheGateway,
+    /// When the inbox was last swept for mail old enough for an
+    /// `older_than_days` rule. `None` until the first sweep, which is why one
+    /// happens at start.
+    swept_at: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+/// What the Companion Gateway tells this mailbox: the owner's triage rules,
+/// the undos they asked for, and where to report what moved.
+///
+/// One value rather than three parameters because they travel together and
+/// come from one place — the collection seam, re-read before each round. The
+/// two shared cells are shared rather than passed for the reason the working
+/// day is (#381): a decision taken on the settings screen reaches the next
+/// round rather than the next restart.
+#[derive(Clone, Default)]
+pub struct FromTheGateway {
+    pub triage: crate::triage::SharedTriage,
+    pub undos: crate::triage::SharedUndos,
+    /// Where to report what was moved, and with what. `None` on a deployment
+    /// with no Gateway: it still files, and the record is what it loses.
+    pub report_to: Option<(String, String)>,
 }
 
 /// What the collector holds about the mailbox between polls: the account,
@@ -100,12 +123,48 @@ fn look_back_from(last_read_at: &str) -> Option<String> {
         .ok()
 }
 
+/// How often the inbox is swept for mail old enough for an `older_than_days`
+/// rule (#417).
+///
+/// Not every poll: the poll runs every few seconds and a sweep is a query over
+/// the whole inbox, so sweeping at that rate would ask the owner's server for
+/// the same answer hundreds of times an hour to move nothing. An hour is the
+/// grain the rule itself works at — a rule about *days* does not need
+/// minutes — and the first sweep happens at start, so a deployment that has
+/// just been given a rule does not wait an hour to honour it.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// One mail the owner's rules filed: what moved, by which rule, and from
+/// where (#417).
+///
+/// The mailbox it came from is the whole point of recording this: an undo is a
+/// second move rather than a recovery (#418, ADR 0042). No subject, no sender
+/// — the identity of the mail and the mailboxes, and nothing a contact wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Filed {
+    pub email_id: String,
+    pub rule_id: String,
+    pub from_mailbox_id: String,
+    pub from_mailbox_name: String,
+    pub to_mailbox_id: String,
+    pub to_mailbox_name: String,
+    /// The move this one reverses, when the owner asked for it back (#418).
+    pub undoes: Option<i64>,
+}
+
 /// What one poll found. No `Debug`: the envelopes hold the senders' words.
 #[derive(Default)]
 pub struct MailPoll {
     pub envelopes: Vec<Value>,
     /// The mails the frontier dropped, by reason — counted, never named.
     pub dropped: Vec<Dropped>,
+    /// What the owner's rules filed, and where from (#417). Reported to the
+    /// Gateway so the owner can read it back and undo it (#418).
+    pub filed: Vec<Filed>,
+    /// A rule that matched and could not be applied, with the reason. Counted
+    /// and logged rather than swallowed: a rule that silently does nothing is
+    /// the one failure an owner cannot see.
+    pub unusable: Vec<(String, crate::triage::Unusable)>,
     /// The state to write once the envelopes are on the bus; `None` when
     /// nothing moved.
     pub state: Option<MailState>,
@@ -117,6 +176,7 @@ impl Mailbox {
         owner: &crate::owner::Owner,
         session_url: &str,
         state_dir: &std::path::Path,
+        governed: FromTheGateway,
         consent: ConsentCache,
     ) -> Result<Self> {
         Ok(Self {
@@ -125,6 +185,8 @@ impl Mailbox {
             session_url: session_url.to_owned(),
             state_dir: state_dir.to_owned(),
             consent,
+            governed,
+            swept_at: std::sync::Mutex::new(None),
             http: side::client()?,
         })
     }
@@ -321,13 +383,14 @@ impl Mailbox {
             last_read_at: now.to_owned(),
             ..previous.clone()
         };
-        if created.is_empty() {
-            if next.state != previous.state || recovered {
-                poll.state = Some(next);
-            }
-            return Ok(poll);
-        }
-        let in_inbox = if recovered {
+        // A round where nothing new arrived still sweeps and still files: an
+        // `older_than_days` rule matters most on a quiet mailbox, and an early
+        // return here would have meant it never ran there at all (found by the
+        // end-to-end test, which is what it is for).
+        let nothing_new = created.is_empty();
+        let in_inbox = if nothing_new {
+            Vec::new()
+        } else if recovered {
             // The query was already the INBOX's.
             created
         } else {
@@ -347,6 +410,9 @@ impl Mailbox {
             &previous.inbox_id,
             &self.owner,
         );
+        // Every mail this round read, for the rules to be asked about after
+        // the envelopes are built.
+        let mut triaged: Vec<Mail> = Vec::new();
         if !in_inbox.is_empty() {
             let response = self
                 .call(
@@ -380,10 +446,395 @@ impl Mailbox {
                     }
                     Err(why) => poll.dropped.push(why),
                 }
+                // Triage is asked about **every** mail of the inbox, including
+                // the ones the frontier dropped (#417). That is the point: a
+                // newsletter is exactly what the owner wants filed, and it is
+                // exactly what the frontier refuses to publish. The two
+                // decisions are about different things — what reaches the bus,
+                // and where the mail lives — and conflating them would make
+                // triage useless on the mail it exists for.
+                triaged.push(mail);
             }
         }
-        poll.state = Some(next);
+        // The sweep: mail already in the inbox and old enough for an
+        // `older_than_days` rule (#417). Added to what this round triages and
+        // **never** to what it publishes — `poll.envelopes` is built above and
+        // is not touched here.
+        //
+        // That separation is the whole of it. The collector does no backfill
+        // (#251): what the inbox held before it started is the past and is not
+        // news. Reading an old mail to decide where it lives is a different
+        // act from announcing it, and conflating the two would put months of
+        // the owner's old mail on the bus the first time they wrote a rule
+        // about age.
+        triaged.extend(
+            self.sweep(&session, credential, account, &previous.inbox_id, now)
+                .await,
+        );
+        // Filed after the envelopes are built, never before: a mail is
+        // published as a trigger from the inbox it arrived in, and a move that
+        // raced the read would publish a source that had already changed.
+        self.file(&session, credential, account, &triaged, &mut poll, now)
+            .await;
+        // On a quiet round the state is written only when it actually moved,
+        // which is what the early return used to do: rewriting it every second
+        // for nothing is a write the owner's disk does not need.
+        if !nothing_new || next.state != previous.state || recovered {
+            poll.state = Some(next);
+        }
         Ok(poll)
+    }
+
+    /// The inbox's mail old enough for an `older_than_days` rule, for this
+    /// round to triage (#417).
+    ///
+    /// Empty — and not one request — unless a rule is actually about age, and
+    /// at most once an hour ([`SWEEP_EVERY`]): a poll runs every few seconds
+    /// and this is a query over the whole inbox.
+    ///
+    /// **Nothing read here is ever published.** The caller adds these to what
+    /// it triages, never to what it publishes: the collector does no backfill
+    /// (#251), and a rule about age must not put months of the owner's old
+    /// mail on the bus the first time they write one.
+    ///
+    /// A failure gives up on this round and says so at debug. The mail is
+    /// still in the inbox and still old; the next sweep finds it.
+    async fn sweep(
+        &self,
+        session: &Session,
+        credential: &crate::side::Credential,
+        account: &str,
+        inbox_id: &str,
+        now: &str,
+    ) -> Vec<Mail> {
+        let triage = match self.governed.triage.lock() {
+            Ok(triage) => triage.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let Some(days) = crate::triage::oldest_age_wanted(&triage) else {
+            return Vec::new();
+        };
+        {
+            let mut swept = match self.swept_at.lock() {
+                Ok(swept) => swept,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if swept.is_some_and(|last| last.elapsed() < SWEEP_EVERY) {
+                return Vec::new();
+            }
+            *swept = Some(std::time::Instant::now());
+        }
+        let Some(before) = crate::triage::days_before(now, days) else {
+            warn!(%now, "this round's instant cannot be read; the inbox is not swept");
+            return Vec::new();
+        };
+        let ids = match self
+            .call(
+                &session.api_url,
+                credential,
+                vec![jmap::email_received_before(account, inbox_id, &before)],
+            )
+            .await
+            .ok()
+            .as_ref()
+            .and_then(|response| method(response, 0).ok())
+            .map(|query| {
+                query
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            }) {
+            Some(ids) if !ids.is_empty() => ids,
+            _ => return Vec::new(),
+        };
+        let Ok(response) = self
+            .call(
+                &session.api_url,
+                credential,
+                vec![jmap::email_get(account, &ids)],
+            )
+            .await
+        else {
+            debug!(
+                wanted = ids.len(),
+                "the swept mails could not be read this round"
+            );
+            return Vec::new();
+        };
+        let Ok(list) = method(&response, 0) else {
+            return Vec::new();
+        };
+        let swept: Vec<Mail> = list
+            .get("list")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|email| Mail::parse(email).ok())
+            .collect();
+        if !swept.is_empty() {
+            info!(
+                swept = swept.len(),
+                older_than_days = days,
+                "swept the inbox for mail old enough for a rule about age; nothing read here is \
+                 published"
+            );
+        }
+        swept
+    }
+
+    /// Files what the owner's rules match, and records what moved (#417).
+    ///
+    /// Nothing happens on a deployment with no rules, which is every
+    /// deployment until somebody writes one — not one request, not one log
+    /// line. The mailboxes are read only when there is a rule to resolve.
+    ///
+    /// **A failure here never fails the poll.** The envelopes are already
+    /// built and the bus is what the deployment is for; a mailbox that cannot
+    /// be moved is a counted warning, and the next round tries again because
+    /// the mail is still in the inbox and still matches.
+    async fn file(
+        &self,
+        session: &Session,
+        credential: &crate::side::Credential,
+        account: &str,
+        mails: &[Mail],
+        poll: &mut MailPoll,
+        now: &str,
+    ) {
+        let triage = match self.governed.triage.lock() {
+            Ok(triage) => triage.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let undos = match self.governed.undos.lock() {
+            Ok(undos) => undos.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        // An undo is performed even on a deployment whose rules were since
+        // cleared: the owner asked for a mail to come back, and withdrawing
+        // the rule that filed it does not withdraw that.
+        let undos: Vec<_> = undos
+            .into_iter()
+            .filter(|undo| undo.connection == self.connection)
+            .collect();
+        if (triage.is_empty() || mails.is_empty()) && undos.is_empty() {
+            return;
+        }
+        // The mailboxes, for this round. Read per round rather than cached:
+        // the owner renames and creates mailboxes from their own client, and
+        // a cached id is how a rule quietly stops working.
+        let mailboxes = match self
+            .call(
+                &session.api_url,
+                credential,
+                vec![jmap::mailbox_get(account)],
+            )
+            .await
+            .ok()
+            .as_ref()
+            .and_then(|response| method(response, 0).ok())
+            .and_then(|list| {
+                serde_json::from_value::<Vec<crate::triage::Mailbox>>(list.get("list")?.clone())
+                    .ok()
+            }) {
+            Some(mailboxes) => mailboxes,
+            None => {
+                warn!("the mailboxes could not be read; nothing is filed this round");
+                return;
+            }
+        };
+        let at = time::OffsetDateTime::parse(now, &time::format_description::well_known::Rfc3339)
+            .map(std::time::SystemTime::from)
+            .unwrap_or_else(|_| std::time::SystemTime::now());
+        let inbox = mailboxes
+            .iter()
+            .find(|mailbox| mailbox.role.as_deref() == Some("inbox"));
+        let mut moves: Vec<(String, String)> = Vec::new();
+        let mut filed: Vec<Filed> = Vec::new();
+        // The undos first: a mail the owner asked back must not be filed
+        // again by the same rule in the same round, and putting it back first
+        // then re-reading it next round is the behaviour they would expect to
+        // see argued. It is not — see the note on `undone` below.
+        for undo in &undos {
+            moves.push((undo.email_id.clone(), undo.from_mailbox_id.clone()));
+            filed.push(Filed {
+                email_id: undo.email_id.clone(),
+                rule_id: crate::triage::UNDO_RULE.to_owned(),
+                from_mailbox_id: undo.to_mailbox_id.clone(),
+                from_mailbox_name: undo.to_mailbox_name.clone(),
+                to_mailbox_id: undo.from_mailbox_id.clone(),
+                to_mailbox_name: undo.from_mailbox_name.clone(),
+                undoes: Some(undo.sequence),
+            });
+        }
+        let undone: std::collections::BTreeSet<&str> =
+            undos.iter().map(|undo| undo.email_id.as_str()).collect();
+        for mail in mails {
+            // A mail the owner just asked back is left alone this round. Not
+            // for ever — if a rule still matches it, the next round files it
+            // again, and that is the honest behaviour: the rule is still the
+            // owner's. What this prevents is undoing and re-filing in one
+            // round, which would make the undo look like it did nothing.
+            if undone.contains(mail.id.as_str()) {
+                continue;
+            }
+            match crate::triage::file(&triage, &mailboxes, mail, at) {
+                Ok(Some(filing)) => {
+                    moves.push((mail.id.clone(), filing.mailbox_id.clone()));
+                    // Where this mail actually is, not "the inbox": a
+                    // deployment whose inbox has no `inbox` role, or a mail
+                    // the owner had already filed somewhere, would otherwise
+                    // record an origin that is not the one an undo must
+                    // restore — and an empty one makes the move un-undoable
+                    // (#418, found in review).
+                    let (from_id, from_name) = mail
+                        .mailbox_ids
+                        .first()
+                        .and_then(|id| mailboxes.iter().find(|mb| &mb.id == id))
+                        .map(|mb| (mb.id.clone(), mb.name.clone()))
+                        .or_else(|| inbox.map(|mb| (mb.id.clone(), mb.name.clone())))
+                        .unwrap_or_default();
+                    filed.push(Filed {
+                        email_id: mail.id.clone(),
+                        rule_id: filing.rule_id,
+                        from_mailbox_id: from_id,
+                        from_mailbox_name: from_name,
+                        to_mailbox_id: filing.mailbox_id,
+                        to_mailbox_name: filing.mailbox_name,
+                        undoes: None,
+                    });
+                }
+                Ok(None) => {}
+                Err((rule, why)) => {
+                    // Said once per rule per round, not once per mail: a
+                    // renamed mailbox would otherwise print a line for every
+                    // message that matched it.
+                    if !poll.unusable.iter().any(|(held, _)| held == &rule) {
+                        warn!(
+                            rule = %rule,
+                            why = why.as_str(),
+                            "a triage rule matched and could not be applied; the mail stays where \
+                             it is"
+                        );
+                        poll.unusable.push((rule, why));
+                    }
+                }
+            }
+        }
+        if moves.is_empty() {
+            return;
+        }
+        let response = match self
+            .call(
+                &session.api_url,
+                credential,
+                vec![jmap::email_moves(account, &moves)],
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(
+                    moves = moves.len(),
+                    error = %format!("{error:#}"),
+                    "the owner's rules matched and the mailbox refused the move; the mail stays \
+                     where it is and the next round tries again"
+                );
+                return;
+            }
+        };
+        // `Email/set` answers which updates it took and which it refused;
+        // only what the server says it moved is reported as moved.
+        let updated = method(&response, 0)
+            .ok()
+            .and_then(|set| set.get("updated").cloned())
+            .and_then(|updated| {
+                updated
+                    .as_object()
+                    .map(|taken| taken.keys().cloned().collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
+        for one in filed {
+            if updated.contains(&one.email_id) {
+                info!(
+                    rule = %one.rule_id,
+                    to = %one.to_mailbox_name,
+                    "the owner's rule filed a mail"
+                );
+                poll.filed.push(one);
+            } else {
+                warn!(
+                    rule = %one.rule_id,
+                    "the mailbox did not take this move; the mail stays where it is"
+                );
+            }
+        }
+        self.report(&poll.filed, now).await;
+    }
+
+    /// Tells the Gateway what moved (#418).
+    ///
+    /// **Never fails the poll.** The mail has already been filed; what a
+    /// failure here costs is the owner's record of it, which the next round
+    /// does not recover — stated rather than hidden, and the reason the
+    /// warning names how many moves went unrecorded.
+    ///
+    /// Reported in one request rather than one per move: a round that files
+    /// forty newsletters must not make forty calls.
+    async fn report(&self, filed: &[Filed], now: &str) {
+        let Some((gateway_url, token)) = &self.governed.report_to else {
+            return;
+        };
+        if filed.is_empty() {
+            return;
+        }
+        let moves: Vec<Value> = filed
+            .iter()
+            .map(|one| {
+                serde_json::json!({
+                    "connection": self.connection,
+                    "email_id": one.email_id,
+                    "rule_id": one.rule_id,
+                    "from_mailbox_id": one.from_mailbox_id,
+                    "from_mailbox_name": one.from_mailbox_name,
+                    "to_mailbox_id": one.to_mailbox_id,
+                    "to_mailbox_name": one.to_mailbox_name,
+                    "occurred_at": now,
+                    "undoes": one.undoes,
+                })
+            })
+            .collect();
+        let url = format!(
+            "{}/api/internal/mail-moves",
+            gateway_url.trim_end_matches('/')
+        );
+        match self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "moves": moves }))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => warn!(
+                status = %response.status(),
+                unrecorded = filed.len(),
+                "the Companion Gateway refused the move report: the mail moved and the owner's \
+                 record of it is missing"
+            ),
+            Err(error) => warn!(
+                error = %error.without_url(),
+                unrecorded = filed.len(),
+                "the Companion Gateway did not answer the move report: the mail moved and the \
+                 owner's record of it is missing"
+            ),
+        }
     }
 
     /// Sends an approved reply from the owner's mailbox (#278). The mailbox

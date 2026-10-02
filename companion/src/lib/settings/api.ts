@@ -16,6 +16,7 @@ import type {
 	Probe,
 	WorkingDayState
 } from './model';
+import type { MailMove, Triage } from './triage';
 
 /** A refusal: which kind of trouble, the Gateway's code when it gave one, and its own words. */
 export interface Refused {
@@ -205,6 +206,68 @@ export async function saveDisclosure(enabled: boolean, reason?: string): Promise
 		.catch(() => null);
 	if (answer?.data !== undefined) {
 		return { ok: true, state: answer.data };
+	}
+	return refused(answer);
+}
+
+// ---------------------------------------------------------------------------
+// Mail triage (#419, ADR 0042)
+// ---------------------------------------------------------------------------
+
+export type TriageAnswer = { ok: true; triage: Triage } | Refused;
+export type MovesAnswer = { ok: true; moves: MailMove[] } | Refused;
+
+/** The owner's rules, and the mailboxes a rule may file into. */
+export async function loadTriage(): Promise<TriageAnswer> {
+	const answer = await gateway.GET('/api/settings/mail-triage').catch(() => null);
+	if (answer?.data !== undefined) {
+		return { ok: true, triage: answer.data.triage };
+	}
+	return refused(answer);
+}
+
+/**
+ * One decision about the whole set: these destinations and these rules, or
+ * `null` to triage nothing again.
+ *
+ * Whole or not at all — a rule is only valid against the allowlist it was
+ * written for (ADR 0042), so there is no such thing as saving half of it. A
+ * refusal names the rule at fault in its `detail` and the reason in its
+ * `code`, and nothing is written.
+ */
+export async function saveTriage(triage: Triage | null, reason?: string): Promise<TriageAnswer> {
+	const note = reason?.trim() ?? '';
+	const body = { triage, ...(note === '' ? {} : { reason: note }) };
+	const answer = await gateway.PUT('/api/settings/mail-triage', { body }).catch(() => null);
+	if (answer?.data !== undefined) {
+		return { ok: true, triage: answer.data.triage };
+	}
+	return refused(answer);
+}
+
+/** What the rules moved, newest first (#418). */
+export async function loadMoves(): Promise<MovesAnswer> {
+	const answer = await gateway.GET('/api/mail-moves').catch(() => null);
+	if (answer?.data !== undefined) {
+		return { ok: true, moves: answer.data.moves };
+	}
+	return refused(answer);
+}
+
+/**
+ * Asks for one filed mail to be put back.
+ *
+ * `202`, not `200`: the Gateway holds no mailbox, so it records the request
+ * and the collector performs it on its next round. The screen says so rather
+ * than showing the mail as already back, because a screen that claimed a move
+ * had happened would be the defect this project keeps closing.
+ */
+export async function undoMove(sequence: number): Promise<{ ok: true } | Refused> {
+	const answer = await gateway
+		.POST('/api/mail-moves/{sequence}/undo', { params: { path: { sequence } } })
+		.catch(() => null);
+	if (answer?.error === undefined) {
+		return { ok: true };
 	}
 	return refused(answer);
 }

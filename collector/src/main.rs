@@ -229,11 +229,21 @@ async fn run(config: Config) -> Result<()> {
     // The owner's working day (#381), read from the same document as the
     // switch above and refreshed on the same rounds. `None` until they say.
     let working_day: twalk_collector::calendars::SharedWorkingDay = Default::default();
+    // The owner's triage rules, re-read with the switch before each round.
+    let triage: twalk_collector::triage::SharedTriage = Default::default();
+    // The undos the owner asked for, read with the rules (#418).
+    let undos: twalk_collector::triage::SharedUndos = Default::default();
     let snapshot = match (&config.gateway_url, &config.gateway_service_token) {
         (Some(url), Some(token)) => {
             let document = consent_snapshot(url, token).await?;
             config.refuse_unknown_connections(&registry_ids(&document))?;
-            let (enabled, day) = collection_settings(url, token).await?;
+            let collected = collection_settings(url, token).await?;
+            let (enabled, day, rules, pending) = (
+                collected.location_enabled,
+                collected.working_day,
+                collected.triage,
+                collected.undos,
+            );
             location_enabled.store(enabled, Ordering::Relaxed);
             match &day {
                 Some(day) => info!(
@@ -249,6 +259,16 @@ async fn run(config: Config) -> Result<()> {
             *working_day
                 .lock()
                 .expect("the working day mutex is never poisoned") = day;
+            if !rules.is_empty() {
+                info!(
+                    rules = rules.rules.len(),
+                    destinations = rules.destinations.len(),
+                    "the owner's mail triage rules are in force: a mail this inbox receives is \
+                     filed where they say, and nowhere a rule did not name"
+                );
+            }
+            *triage.lock().expect("the triage mutex is never poisoned") = rules;
+            *undos.lock().expect("the undo mutex is never poisoned") = pending;
             if enabled {
                 warn!("the calendar location is ON: published events carry where a meeting is, by a decision recorded on the Companion Gateway. Turn it off there to stop it");
             } else {
@@ -329,6 +349,14 @@ async fn run(config: Config) -> Result<()> {
                     .as_deref()
                     .context("a mail connection is held with no COLLECTOR_JMAP_SESSION_URL")?,
                 &config.state_dir,
+                twalk_collector::mails::FromTheGateway {
+                    triage: triage.clone(),
+                    undos: undos.clone(),
+                    report_to: config
+                        .gateway_url
+                        .clone()
+                        .zip(config.gateway_service_token.clone()),
+                },
                 consent.clone(),
             )
         })
@@ -684,7 +712,13 @@ async fn run(config: Config) -> Result<()> {
             let mut may_publish = true;
             if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
                 match collection_settings(url, token).await {
-                    Ok((enabled, day)) => {
+                    Ok(collected) => {
+                        let (enabled, day, rules, undos_now) = (
+                            collected.location_enabled,
+                            collected.working_day,
+                            collected.triage,
+                            collected.undos,
+                        );
                         location_unreadable = false;
                         // The working day as it stands, beside the switch: an
                         // owner who narrows their hours at noon has narrowed
@@ -692,6 +726,8 @@ async fn run(config: Config) -> Result<()> {
                         *working_day
                             .lock()
                             .expect("the working day mutex is never poisoned") = day;
+                        *triage.lock().expect("the triage mutex is never poisoned") = rules;
+                        *undos.lock().expect("the undo mutex is never poisoned") = undos_now;
                         if location_enabled.swap(enabled, Ordering::Relaxed) != enabled {
                             if enabled {
                                 warn!("the calendar location was turned ON: published events now carry where a meeting is");
@@ -800,6 +836,33 @@ async fn run(config: Config) -> Result<()> {
             (&mailbox, &credential, mail_is_connected, mail_poll_is_due)
         {
             last_mail_poll = Some(std::time::Instant::now());
+            // The owner's triage rules and the undos they asked for, before
+            // the round that would act on them (#416, #418).
+            //
+            // Read **here** and not only beside the calendar's switch: a
+            // deployment with no calendar connection never reaches that
+            // branch, so its rules would have been read once at start and
+            // never again — an owner who wrote a rule at noon would have
+            // waited for a restart. Found by the end-to-end undo test, which
+            // is what it is for.
+            if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
+                match collection_settings(url, token).await {
+                    Ok(collected) => {
+                        *triage.lock().expect("the triage mutex is never poisoned") =
+                            collected.triage;
+                        *undos.lock().expect("the undo mutex is never poisoned") = collected.undos;
+                    }
+                    // Not fatal, and nothing is withheld: the rules as they
+                    // stand are the ones last read, which is the owner's own
+                    // decision rather than a guess. A Gateway that is down
+                    // stops rules changing, never applies them wrongly
+                    // (ADR 0042).
+                    Err(error) => debug!(
+                        error = %format!("{error:#}"),
+                        "the triage rules could not be re-read this round; the ones in force stand"
+                    ),
+                }
+            }
             match mailbox.poll(credential, &occurred_at).await {
                 Ok(found) => {
                     debug!(
@@ -1017,10 +1080,7 @@ async fn publish(
 /// leaves its cursor where it is. Publishing with the switch shut would put
 /// `location` in `changed_fields` for a meeting nobody moved, and the
 /// owner's journal would say something untrue. The next round reads both.
-async fn collection_settings(
-    gateway_url: &str,
-    service_token: &str,
-) -> Result<(bool, Option<twalk_collector::freebusy::WorkingDay>)> {
+async fn collection_settings(gateway_url: &str, service_token: &str) -> Result<Collected> {
     let url = format!(
         "{}/api/settings/collection",
         gateway_url.trim_end_matches('/')
@@ -1083,7 +1143,52 @@ async fn collection_settings(
         })
         .filter(|day| !day.days.is_empty())
     });
-    Ok((enabled, day))
+    // The owner's triage rules (#416, ADR 0042). Absent from a Gateway older
+    // than the decision, and from one where nobody wrote a rule — both mean
+    // the same thing and both triage nothing. A set this build cannot read is
+    // an empty set for the same reason the working day treats a half-read
+    // value as none: a rule applied from a value nobody checked is worse than
+    // no rule.
+    let triage = document
+        .get("mail_triage")
+        .cloned()
+        .and_then(|set| serde_json::from_value::<twalk_collector::triage::Triage>(set).ok())
+        .unwrap_or_default();
+    // The undos the owner asked for and this collector has not performed
+    // (#418). A move the Gateway cannot make itself: it records the request,
+    // this reads it on the seam it already fetches, and the reverse move is
+    // reported as a move of its own.
+    let undos: Vec<twalk_collector::triage::PendingUndo> = document
+        .get("mail_undos")
+        .and_then(serde_json::Value::as_array)
+        .map(|listed| {
+            listed
+                .iter()
+                .filter_map(|one| serde_json::from_value(one.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Collected {
+        location_enabled: enabled,
+        working_day: day,
+        triage,
+        undos,
+    })
+}
+
+/// What `GET /api/settings/collection` tells a service that collects the
+/// owner's data: the decisions it must honour before it publishes or acts.
+///
+/// A named value rather than a tuple, because four members destructured at
+/// three call sites is a shape nobody can read — and because the next decision
+/// added here should not change three signatures.
+struct Collected {
+    location_enabled: bool,
+    working_day: Option<twalk_collector::freebusy::WorkingDay>,
+    triage: twalk_collector::triage::Triage,
+    /// Parsed here rather than at each call site, so a malformed entry is
+    /// dropped once, in one place, instead of silently three times.
+    undos: Vec<twalk_collector::triage::PendingUndo>,
 }
 
 /// The Companion Gateway's consent snapshot, the document the Sensor reads too

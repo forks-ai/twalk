@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 19] = [
+pub const MIGRATIONS: [&str; 22] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -941,6 +941,142 @@ pub const MIGRATIONS: [&str; 19] = [
         WHERE d.sequence <= (SELECT decision_sequence FROM consent_snapshot_horizon)
     )
     WHERE recency = 1;
+    "#,
+    // v20 — the owner's mail triage rules (#416, ADR 0042): the mailboxes a
+    // rule may file into, and the rules themselves. One journal rather than
+    // two tables of current state, for the reason every other owner decision
+    // here is journalled — a rule that runs while nobody is watching has to
+    // be able to say when it was written and by whom.
+    //
+    // A row is the WHOLE set, not one rule. Two reasons. A rule is only valid
+    // against the allowlist it was written for, so a row that held one rule
+    // could be read beside an allowlist that no longer admits it; and the
+    // owner's screen edits the set, so a set is what they decided. The cost is
+    // stated: the journal grows by the size of the set on every edit, which is
+    // bounded by `mail_rules::MAX_RULES` and is what the consent journal does
+    // per decision anyway.
+    r#"
+    CREATE TABLE mail_triage_decision (
+        sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- 'set' or 'cleared'. On 'cleared' `triage` is NULL and the deployment
+        -- is back to triaging nothing, which is how it shipped.
+        new_state   TEXT NOT NULL CHECK (new_state IN ('set', 'cleared')),
+        -- The whole `mail_rules::Triage`, as the API serves it. JSON because
+        -- the shape is the contract's and is pinned by a test, not because
+        -- SQLite is being used as a document store: nothing queries inside it.
+        triage      TEXT,
+        occurred_at TEXT NOT NULL,
+        -- The deployment's owner, as every other decision's actor is.
+        actor       TEXT NOT NULL,
+        reason      TEXT,
+        CHECK ((new_state = 'set') = (triage IS NOT NULL))
+    );
+    CREATE TRIGGER mail_triage_decision_no_delete BEFORE DELETE ON mail_triage_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the mail triage journal is append-only');
+    END;
+    CREATE TRIGGER mail_triage_decision_no_update BEFORE UPDATE ON mail_triage_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the mail triage journal is append-only');
+    END;
+    "#,
+    // v21 — what the owner's rules actually moved (#418, ADR 0042). The
+    // collector reports each move it made; this is the record, and the record
+    // is the point: triage that left no account of itself would be a thing
+    // happening to the owner's mailbox that they cannot audit or put back.
+    //
+    // Append-only, like every other journal here. An **undo is a second move**
+    // and not an erasure — the row stays, and the row that reverses it points
+    // at it — because a record that could be rewritten would answer "what
+    // happened" with "what somebody last said happened".
+    //
+    // No subject, no sender, no body: the mail's id, the mailboxes and the
+    // rule. A contact's words have no business in a triage record.
+    r#"
+    CREATE TABLE mail_move (
+        sequence          INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection        TEXT NOT NULL,
+        email_id          TEXT NOT NULL,
+        rule_id           TEXT NOT NULL,
+        from_mailbox_id   TEXT NOT NULL,
+        from_mailbox_name TEXT NOT NULL,
+        to_mailbox_id     TEXT NOT NULL,
+        to_mailbox_name   TEXT NOT NULL,
+        occurred_at       TEXT NOT NULL,
+        -- The move this one reverses, when it is an undo. NULL for a move a
+        -- rule made.
+        undoes            INTEGER REFERENCES mail_move(sequence),
+        -- Set when the owner asked for this move to be undone and the
+        -- collector has not yet done it. Cleared by the undo being recorded,
+        -- which is itself a row — so this is a queue of one step, not a state
+        -- anybody edits.
+        undo_requested_at TEXT
+    );
+    CREATE UNIQUE INDEX mail_move_once ON mail_move (connection, email_id, occurred_at);
+    CREATE TRIGGER mail_move_no_delete BEFORE DELETE ON mail_move
+    BEGIN
+        SELECT RAISE(ABORT, 'the mail move journal is append-only');
+    END;
+    -- The one column that may change after the fact is `undo_requested_at`,
+    -- and only from NULL to a time and back: asking for an undo, and the undo
+    -- being done. Everything else is what happened and cannot be rewritten.
+    CREATE TRIGGER mail_move_no_rewrite BEFORE UPDATE ON mail_move
+    BEGIN
+        SELECT RAISE(ABORT, 'a recorded move cannot be rewritten')
+        WHERE OLD.connection IS NOT NEW.connection
+           OR OLD.email_id IS NOT NEW.email_id
+           OR OLD.rule_id IS NOT NEW.rule_id
+           OR OLD.from_mailbox_id IS NOT NEW.from_mailbox_id
+           OR OLD.from_mailbox_name IS NOT NEW.from_mailbox_name
+           OR OLD.to_mailbox_id IS NOT NEW.to_mailbox_id
+           OR OLD.to_mailbox_name IS NOT NEW.to_mailbox_name
+           OR OLD.occurred_at IS NOT NEW.occurred_at
+           OR OLD.undoes IS NOT NEW.undoes;
+    END;
+    "#,
+    // v22 — rules the drafting agent proposed, and what the owner did with
+    // them (#420, ADR 0042).
+    //
+    // A proposal is **not** a rule. It is text until the owner approves it,
+    // and approving appends to `mail_triage_decision` with the owner as the
+    // actor — never the agent. That separation is the whole ticket: the agent
+    // reads mail written by strangers, and a proposal is the only shape in
+    // which that reading cannot become an action.
+    //
+    // Append-only like its neighbours, with the decision as its own row: a
+    // proposal that was refused stays refused and readable, because "the agent
+    // suggested this and I said no" is a thing the owner may want to see again
+    // when it suggests it a second time.
+    r#"
+    CREATE TABLE mail_rule_proposal (
+        sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- The proposed rule, in the same shape `mail_triage_decision` holds a
+        -- set's rules. Validated when it arrives and again when it is
+        -- approved, because the allowlist may have moved in between.
+        rule        TEXT NOT NULL,
+        -- The agent's own words for why. Shown to the owner, never acted on.
+        because     TEXT,
+        proposed_at TEXT NOT NULL,
+        state       TEXT NOT NULL DEFAULT 'proposed'
+                    CHECK (state IN ('proposed', 'approved', 'refused')),
+        decided_at  TEXT,
+        CHECK ((state = 'proposed') = (decided_at IS NULL))
+    );
+    CREATE TRIGGER mail_rule_proposal_no_delete BEFORE DELETE ON mail_rule_proposal
+    BEGIN
+        SELECT RAISE(ABORT, 'the rule proposal journal is append-only');
+    END;
+    -- Only the decision may be written after the fact, and only once: a
+    -- proposal cannot be un-decided, and the rule it proposed cannot change
+    -- under the decision the owner took on it.
+    CREATE TRIGGER mail_rule_proposal_decide_once BEFORE UPDATE ON mail_rule_proposal
+    BEGIN
+        SELECT RAISE(ABORT, 'a proposal is decided once, and its rule never changes')
+        WHERE OLD.rule IS NOT NEW.rule
+           OR OLD.because IS NOT NEW.because
+           OR OLD.proposed_at IS NOT NEW.proposed_at
+           OR OLD.state <> 'proposed';
+    END;
     "#,
 ];
 
@@ -2020,7 +2156,10 @@ impl Store {
     /// The join is the one `hermes_path` uses and for the same reason: a read
     /// records the delivery its caller named it by, and the skill tells the
     /// agent to put the reference there (#363).
-    pub fn windows_read_for(&self, trigger_event_id: &str) -> Result<Vec<(String, String, String)>> {
+    pub fn windows_read_for(
+        &self,
+        trigger_event_id: &str,
+    ) -> Result<Vec<(String, String, String)>> {
         let connection = self.connection();
         let named = format!("%{trigger_event_id}%");
         let mut statement = connection.prepare(
@@ -2601,6 +2740,298 @@ impl Store {
         reason: Option<&str>,
     ) -> Result<SwitchState> {
         self.record_switch_decision(CALENDAR_LOCATION, enabled, occurred_at, actor, reason)
+    }
+
+    // -----------------------------------------------------------------
+    // The owner's mail triage rules (#416, ADR 0042)
+    // -----------------------------------------------------------------
+
+    /// Appends one decision to the triage journal and answers what it leaves
+    /// behind. `None` clears: the deployment goes back to triaging nothing.
+    ///
+    /// The set is checked **before** it is written, so the journal never holds
+    /// a set the collector would refuse to apply — a rule filing into a
+    /// mailbox the allowlist does not admit, or into the trash.
+    pub fn record_mail_triage_decision(
+        &self,
+        triage: Option<&crate::mail_rules::Triage>,
+        occurred_at: &str,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<crate::mail_rules::Triage> {
+        if let Some(triage) = triage {
+            if let Err((rule, why)) = triage.check() {
+                anyhow::bail!(
+                    "the triage set is not one this deployment will apply: {}{}",
+                    why.code(),
+                    rule.map(|id| format!(" (rule {id})")).unwrap_or_default()
+                );
+            }
+        }
+        let document = triage
+            .map(|triage| serde_json::to_string(triage))
+            .transpose()
+            .context("failed to serialize the triage set")?;
+        let connection = self.connection();
+        connection.execute(
+            "INSERT INTO mail_triage_decision (new_state, triage, occurred_at, actor, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                if triage.is_some() { "set" } else { "cleared" },
+                document,
+                occurred_at,
+                actor,
+                reason
+            ],
+        )?;
+        self.mail_triage()
+    }
+
+    /// The triage set as it stands: the journal's last row, or an empty set
+    /// when the journal is empty — every deployment ships triaging nothing,
+    /// and an empty set is a true answer rather than a seeded row pretending
+    /// somebody decided.
+    ///
+    /// A row this build cannot read is **not** fatal and is **not** silently
+    /// an empty set either: it is an error, so a Gateway downgraded below the
+    /// shape that wrote it refuses to serve rules rather than serving none and
+    /// letting the collector stop triaging without a word.
+    pub fn mail_triage(&self) -> Result<crate::mail_rules::Triage> {
+        let connection = self.connection();
+        let row: Option<(String, Option<String>)> = connection
+            .query_row(
+                "SELECT new_state, triage FROM mail_triage_decision
+                 ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((state, Some(document))) if state == "set" => {
+                serde_json::from_str(&document).context("the recorded triage set cannot be read")
+            }
+            _ => Ok(crate::mail_rules::Triage::default()),
+        }
+    }
+
+    /// One move the owner's rules made, as the collector reports it (#418).
+    ///
+    /// Idempotent on (connection, mail, instant): a collector that reports a
+    /// batch twice — a lost response, a retry — records it once. `Ok(false)`
+    /// is "already known", which is a success and not an error.
+    pub fn record_mail_move(&self, moved: &crate::mail_moves::Move) -> Result<bool> {
+        let connection = self.connection();
+        let changed = connection.execute(
+            "INSERT OR IGNORE INTO mail_move
+               (connection, email_id, rule_id, from_mailbox_id, from_mailbox_name,
+                to_mailbox_id, to_mailbox_name, occurred_at, undoes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                moved.connection,
+                moved.email_id,
+                moved.rule_id,
+                moved.from_mailbox_id,
+                moved.from_mailbox_name,
+                moved.to_mailbox_id,
+                moved.to_mailbox_name,
+                moved.occurred_at,
+                moved.undoes,
+            ],
+        )?;
+        // An undo being recorded is what takes the request off the queue: the
+        // row it reverses stops asking.
+        if let Some(undone) = moved.undoes {
+            connection.execute(
+                "UPDATE mail_move SET undo_requested_at = NULL WHERE sequence = ?1",
+                rusqlite::params![undone],
+            )?;
+        }
+        Ok(changed > 0)
+    }
+
+    /// The eleven columns a recorded move is read from — one reader, because
+    /// the two queries below differ only in their WHERE and their order, and
+    /// two copies of a column list is how one of them silently stops matching.
+    const MOVE_COLUMNS: &'static str =
+        "sequence, connection, email_id, rule_id, from_mailbox_id, from_mailbox_name,
+         to_mailbox_id, to_mailbox_name, occurred_at, undoes, undo_requested_at";
+
+    fn recorded_move(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::mail_moves::Recorded> {
+        Ok(crate::mail_moves::Recorded {
+            sequence: row.get(0)?,
+            moved: crate::mail_moves::Move {
+                connection: row.get(1)?,
+                email_id: row.get(2)?,
+                rule_id: row.get(3)?,
+                from_mailbox_id: row.get(4)?,
+                from_mailbox_name: row.get(5)?,
+                to_mailbox_id: row.get(6)?,
+                to_mailbox_name: row.get(7)?,
+                occurred_at: row.get(8)?,
+                undoes: row.get(9)?,
+            },
+            undo_requested_at: row.get(10)?,
+        })
+    }
+
+    /// The moves, newest first. What the owner reads back.
+    pub fn mail_moves(&self, limit: usize) -> Result<Vec<crate::mail_moves::Recorded>> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(&format!(
+            "SELECT {} FROM mail_move ORDER BY sequence DESC LIMIT ?1",
+            Self::MOVE_COLUMNS
+        ))?;
+        let rows = statement
+            .query_map(rusqlite::params![limit as i64], Self::recorded_move)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Asks for one move to be put back. The collector does the work; this
+    /// only records that the owner asked.
+    ///
+    /// `Ok(false)` when there is no such move, or when it is itself an undo —
+    /// undoing an undo is asking for the first move again, which the owner
+    /// does by asking for the first move again.
+    pub fn request_mail_undo(&self, sequence: i64, at: &str) -> Result<bool> {
+        let connection = self.connection();
+        let changed = connection.execute(
+            "UPDATE mail_move SET undo_requested_at = ?2
+             WHERE sequence = ?1 AND undoes IS NULL AND undo_requested_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM mail_move AS back WHERE back.undoes = ?1)",
+            rusqlite::params![sequence, at],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// The undos the collector has not performed yet, oldest first — the
+    /// queue it reads on the seam it already fetches.
+    pub fn pending_mail_undos(&self) -> Result<Vec<crate::mail_moves::Recorded>> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(&format!(
+            "SELECT {} FROM mail_move WHERE undo_requested_at IS NOT NULL ORDER BY sequence",
+            Self::MOVE_COLUMNS
+        ))?;
+        let rows = statement
+            .query_map([], Self::recorded_move)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Records a rule the drafting agent proposed (#420). It is text until
+    /// the owner approves it; nothing is applied here.
+    pub fn record_rule_proposal(
+        &self,
+        rule: &crate::mail_rules::Rule,
+        because: Option<&str>,
+        proposed_at: &str,
+    ) -> Result<i64> {
+        let document = serde_json::to_string(rule).context("failed to serialize the rule")?;
+        let connection = self.connection();
+        connection.execute(
+            "INSERT INTO mail_rule_proposal (rule, because, proposed_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![document, because, proposed_at],
+        )?;
+        Ok(connection.last_insert_rowid())
+    }
+
+    /// Every proposal, newest first — undecided ones included, which is what
+    /// the owner's screen shows first.
+    ///
+    /// A row this build cannot read is left out rather than shown as an empty
+    /// rule the owner might approve.
+    pub fn rule_proposals(&self, limit: usize) -> Result<Vec<crate::mail_rules::Proposal>> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(
+            "SELECT sequence, rule, because, proposed_at, state, decided_at
+             FROM mail_rule_proposal ORDER BY sequence DESC LIMIT ?1",
+        )?;
+        let rows = statement
+            .query_map(rusqlite::params![limit as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(
+                |(sequence, document, because, proposed_at, state, decided_at)| {
+                    Some(crate::mail_rules::Proposal {
+                        sequence,
+                        rule: serde_json::from_str(&document).ok()?,
+                        because,
+                        proposed_at,
+                        state,
+                        decided_at,
+                    })
+                },
+            )
+            .collect())
+    }
+
+    /// The owner's decision on one proposal.
+    ///
+    /// Approving **appends the rule to the triage set** through the same
+    /// journal the Companion writes to, with the owner as the actor — never
+    /// the agent. It is checked against the allowlist as it stands now, not as
+    /// it stood when the agent proposed: a destination withdrawn in between
+    /// refuses the approval, which is the honest answer.
+    pub fn decide_rule_proposal(
+        &self,
+        sequence: i64,
+        approve: bool,
+        at: &str,
+        actor: &str,
+    ) -> Result<Option<crate::mail_rules::Triage>> {
+        let proposal = {
+            let connection = self.connection();
+            let held: Option<(String, String)> = connection
+                .query_row(
+                    "SELECT rule, state FROM mail_rule_proposal WHERE sequence = ?1",
+                    rusqlite::params![sequence],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            match held {
+                Some((rule, state)) if state == "proposed" => rule,
+                _ => return Ok(None),
+            }
+        };
+        let decided = if approve { "approved" } else { "refused" };
+        let triage = if approve {
+            let rule: crate::mail_rules::Rule =
+                serde_json::from_str(&proposal).context("the proposed rule cannot be read")?;
+            let mut triage = self.mail_triage()?;
+            triage.rules.retain(|held| held.id != rule.id);
+            triage.rules.push(rule);
+            Some(self.record_mail_triage_decision(
+                Some(&triage),
+                at,
+                actor,
+                Some("approved a rule the assistant proposed"),
+            )?)
+        } else {
+            None
+        };
+        self.connection().execute(
+            "UPDATE mail_rule_proposal SET state = ?2, decided_at = ?3 WHERE sequence = ?1",
+            rusqlite::params![sequence, decided, at],
+        )?;
+        // On a refusal the set is unchanged, so the set as it STANDS is the
+        // answer — not an empty one, which the screen would read as "you have
+        // no rules" and which is how a refusal would appear to wipe them
+        // (found in review).
+        match triage {
+            Some(triage) => Ok(Some(triage)),
+            None => Ok(Some(self.mail_triage()?)),
+        }
     }
 
     /// The owner's working day, recorded (#381): the days they accept
@@ -3838,6 +4269,168 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // The owner's mail triage rules (#416)
+    // -----------------------------------------------------------------
+
+    fn triage(destination: &str) -> crate::mail_rules::Triage {
+        crate::mail_rules::Triage {
+            destinations: vec![destination.to_owned()],
+            rules: vec![crate::mail_rules::Rule {
+                id: "newsletters".to_owned(),
+                matches: crate::mail_rules::Match::ListId("<ml.example.com>".to_owned()),
+                destination: destination.to_owned(),
+            }],
+        }
+    }
+
+    /// Every deployment ships triaging nothing, and that is a true answer
+    /// rather than a seeded row pretending somebody decided (ADR 0042).
+    #[test]
+    fn a_deployment_that_decided_nothing_has_no_rules() {
+        let store = store("triage-empty");
+        let held = store.mail_triage().unwrap();
+        assert!(held.is_empty());
+        assert!(held.destinations.is_empty());
+    }
+
+    /// The set round-trips, and amending it is a new row rather than a
+    /// rewrite — the journal is what lets a rule running unattended say when
+    /// it was written.
+    #[test]
+    fn the_set_round_trips_and_amending_it_appends() {
+        let store = store("triage-round-trip");
+        let written = store
+            .record_mail_triage_decision(
+                Some(&triage("Veille")),
+                "2026-10-02T10:00:00.000Z",
+                OWNER,
+                Some("les lettres d information"),
+            )
+            .unwrap();
+        assert_eq!(written, triage("Veille"));
+        assert_eq!(store.mail_triage().unwrap(), triage("Veille"));
+
+        let amended = store
+            .record_mail_triage_decision(
+                Some(&triage("Archive")),
+                "2026-10-02T11:00:00.000Z",
+                OWNER,
+                None,
+            )
+            .unwrap();
+        assert_eq!(amended, triage("Archive"));
+        let rows: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM mail_triage_decision", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 2, "amending appends; it never rewrites");
+    }
+
+    /// Clearing goes back to triaging nothing, and says so as its own state
+    /// rather than as an empty set that could be mistaken for a bad read.
+    #[test]
+    fn clearing_puts_the_deployment_back_to_triaging_nothing() {
+        let store = store("triage-cleared");
+        store
+            .record_mail_triage_decision(
+                Some(&triage("Veille")),
+                "2026-10-02T10:00:00.000Z",
+                OWNER,
+                None,
+            )
+            .unwrap();
+        let cleared = store
+            .record_mail_triage_decision(None, "2026-10-02T12:00:00.000Z", OWNER, None)
+            .unwrap();
+        assert!(cleared.is_empty());
+        assert_eq!(
+            store.mail_triage().unwrap(),
+            crate::mail_rules::Triage::default()
+        );
+        let state: String = store
+            .connection()
+            .query_row(
+                "SELECT new_state FROM mail_triage_decision ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "cleared");
+    }
+
+    /// A set the collector would refuse never reaches the journal: the check
+    /// is at the writer, which is where #416 says it belongs, so no later
+    /// reader has to defend against a row that should not exist.
+    #[test]
+    fn a_set_this_deployment_would_not_apply_is_never_written() {
+        let store = store("triage-refused");
+        let destructive = crate::mail_rules::Triage {
+            destinations: vec!["Corbeille".to_owned()],
+            rules: vec![],
+        };
+        let refused = store.record_mail_triage_decision(
+            Some(&destructive),
+            "2026-10-02T10:00:00.000Z",
+            OWNER,
+            None,
+        );
+        assert!(refused.is_err(), "the trash can never be a destination");
+        assert!(format!("{:#}", refused.unwrap_err()).contains("destination_is_destructive"));
+
+        let undeclared = crate::mail_rules::Triage {
+            destinations: vec!["Veille".to_owned()],
+            rules: vec![crate::mail_rules::Rule {
+                id: "r1".to_owned(),
+                matches: crate::mail_rules::Match::Subject("facture".to_owned()),
+                destination: "Archive".to_owned(),
+            }],
+        };
+        let refused = store.record_mail_triage_decision(
+            Some(&undeclared),
+            "2026-10-02T10:00:00.000Z",
+            OWNER,
+            None,
+        );
+        assert!(format!("{:#}", refused.unwrap_err()).contains("destination_not_allowed"));
+
+        let rows: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM mail_triage_decision", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "nothing refused was written");
+    }
+
+    #[test]
+    fn the_mail_triage_journal_is_append_only() {
+        let store = store("triage-append-only");
+        store
+            .record_mail_triage_decision(
+                Some(&triage("Veille")),
+                "2026-10-02T10:00:00.000Z",
+                OWNER,
+                None,
+            )
+            .unwrap();
+        let connection = store.connection();
+        assert!(
+            connection
+                .execute("DELETE FROM mail_triage_decision", [])
+                .is_err(),
+            "a triage decision cannot be deleted"
+        );
+        assert!(
+            connection
+                .execute("UPDATE mail_triage_decision SET reason = 'edited'", [])
+                .is_err(),
+            "a triage decision cannot be rewritten"
+        );
+    }
+
     #[test]
     fn the_disclosure_journal_is_append_only() {
         let store = store("disclosure-append-only");
@@ -4262,12 +4855,10 @@ mod tests {
             "one entry per connection the activation named: {:?}",
             snapshot.entries
         );
-        assert!(persona.iter().all(|entry| entry.subject.id == "assistant"
-            && entry.state == State::Granted));
-        let mut networks: Vec<&str> = persona
+        assert!(persona
             .iter()
-            .map(|entry| entry.network.as_str())
-            .collect();
+            .all(|entry| entry.subject.id == "assistant" && entry.state == State::Granted));
+        let mut networks: Vec<&str> = persona.iter().map(|entry| entry.network.as_str()).collect();
         networks.sort_unstable();
         assert_eq!(networks, ["signal", "whatsapp"]);
 

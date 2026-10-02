@@ -207,6 +207,34 @@ pub fn mailbox_get(account_id: &str) -> (&'static str, Value) {
     )
 }
 
+/// `Email/set` moving one mail into one mailbox (#417, ADR 0042).
+///
+/// JMAP has no "move": a mailbox membership *is* `mailboxIds`, so a move is an
+/// update that sets the whole map. Passing the map rather than a patch is
+/// deliberate — a patch (`mailboxIds/<id>`) would add the destination and
+/// leave the mail in the inbox too, which is a copy and not a filing.
+///
+/// `ifInState` is **not** sent. The owner's mailbox changes under this
+/// constantly — their phone marking something read is a state change — and a
+/// move that failed because of that would be retried for ever. The move is
+/// idempotent anyway: setting the same single mailbox twice is the same
+/// mailbox.
+pub fn email_moves(account_id: &str, moves: &[(String, String)]) -> (&'static str, Value) {
+    let update: serde_json::Map<String, Value> = moves
+        .iter()
+        .map(|(email_id, mailbox_id)| {
+            (
+                email_id.clone(),
+                json!({ "mailboxIds": { mailbox_id.as_str(): true } }),
+            )
+        })
+        .collect();
+    (
+        "Email/set",
+        json!({ "accountId": account_id, "update": update }),
+    )
+}
+
 /// `Email/get` with no ids: what answers the current Email state, which is
 /// the cursor a first start takes without reading a mail (no backfill).
 pub fn email_state(account_id: &str) -> (&'static str, Value) {
@@ -262,6 +290,34 @@ pub fn email_received_after(
             "filter": { "inMailbox": inbox_id, "after": after },
             "sort": [{ "property": "receivedAt", "isAscending": true }],
             "position": position,
+            "limit": QUERY_PAGE
+        }),
+    )
+}
+
+/// The inbox's mail older than an instant, oldest first (#417).
+///
+/// What an `older_than_days` rule needs and the poll cannot give it: the poll
+/// sees only what `Email/changes` just reported, and a mail that arrived a
+/// minute ago is never thirty days old. Without this the match would be
+/// offered by the API and by the screen and would move nothing — a rule that
+/// does nothing being worse than no rule.
+///
+/// Bounded by `QUERY_PAGE` and by one mailbox: this reads the **inbox** and
+/// never the rest of the account, because the inbox is the lane triage
+/// governs and a mail the owner already filed is theirs.
+pub fn email_received_before(
+    account_id: &str,
+    inbox_id: &str,
+    before: &str,
+) -> (&'static str, Value) {
+    (
+        "Email/query",
+        json!({
+            "accountId": account_id,
+            "filter": { "inMailbox": inbox_id, "before": before },
+            "sort": [{ "property": "receivedAt", "isAscending": true }],
+            "position": 0,
             "limit": QUERY_PAGE
         }),
     )
@@ -666,6 +722,11 @@ pub struct Attachment {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Mail {
     pub id: String,
+    /// The mailboxes this mail is in, as the server answers them. Read for
+    /// triage (#417): a move records where the mail actually was, which is
+    /// what an undo restores — "the inbox" would be a guess, and a wrong one
+    /// for a mail the owner had already filed.
+    pub mailbox_ids: Vec<String>,
     pub received_at: String,
     pub from: Person,
     pub to: Vec<Person>,
@@ -808,6 +869,15 @@ impl Mail {
             })
             .unwrap_or_default();
         Ok(Self {
+            // The order the server lists them in is not meaningful; the first
+            // is taken as "where it is" because a mail this collector triages
+            // is in one mailbox in every deployment it has met, and recording
+            // one honest origin beats recording none.
+            mailbox_ids: email
+                .get("mailboxIds")
+                .and_then(Value::as_object)
+                .map(|held| held.keys().cloned().collect())
+                .unwrap_or_default(),
             received_at: email
                 .get("receivedAt")
                 .and_then(Value::as_str)
