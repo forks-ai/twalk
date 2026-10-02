@@ -28,6 +28,7 @@ pub mod push;
 pub mod replies;
 pub mod side;
 pub mod status;
+pub mod triage;
 /// Windows time-zone names and the IANA zone each one means: CLDR's table,
 /// generated (see `collector/tools/generate-windows-zones.py`).
 mod windows_zones;

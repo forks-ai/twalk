@@ -111,6 +111,19 @@ pub fn routes() -> Router<Gateway> {
             "/api/settings/working-day",
             get(read_working_day).put(write_working_day),
         )
+        .route(
+            "/api/settings/mail-triage",
+            get(read_mail_triage).put(write_mail_triage),
+        )
+        .route("/api/mail-moves", get(read_mail_moves))
+        .route(
+            "/api/mail-moves/{sequence}/undo",
+            axum::routing::post(undo_mail_move),
+        )
+        .route(
+            "/api/internal/mail-moves",
+            axum::routing::post(report_mail_moves),
+        )
         .route("/api/settings/collection", get(collection_settings))
         .route("/api/settings/runtime", get(runtime_settings))
 }
@@ -672,6 +685,287 @@ fn day_json(day: &crate::working_day::WorkingDay) -> Value {
 
 /// `GET /api/settings/working-day`'s whole answer: the day above, and who
 /// decided it and when.
+/// `GET /api/settings/mail-triage` — the owner's triage rules, and the
+/// mailboxes a rule may file into (#416, ADR 0042).
+///
+/// ```json
+/// {
+///   "triage": {
+///     "destinations": ["Veille", "Archive"],
+///     "rules": [
+///       { "id": "newsletters", "field": "list_id",
+///         "value": "<ml.example.com>", "destination": "Veille" }
+///     ]
+///   }
+/// }
+/// ```
+///
+/// An empty `destinations` and an empty `rules` is every deployment's
+/// starting state: nothing is triaged, and the collector does nothing. The
+/// forbidden destinations are served beside them so the screen can say *why*
+/// a name will be refused before the owner presses anything, rather than
+/// discovering it in a `422`.
+async fn read_mail_triage(State(gateway): State<Gateway>) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no triage rules: it has no consent store to journal them in",
+        );
+    };
+    match consent.store().mail_triage() {
+        Ok(triage) => Json(json!({ "triage": triage })).into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the mail triage journal");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the mail triage journal could not be read",
+            )
+        }
+    }
+}
+
+/// `PUT /api/settings/mail-triage` — `{"triage": {"destinations": [...],
+/// "rules": [...]}}`, or `{"triage": null}` to triage nothing again.
+///
+/// Appends a row and answers the state it left behind, as the working day
+/// does. The set is refused whole or accepted whole: a rule is only valid
+/// against the allowlist it was written for (ADR 0042), so there is no such
+/// thing as accepting half of it.
+///
+/// Nothing is repaired on the way in. A destination that is not in the
+/// allowlist is a `422` naming the rule, not a destination quietly dropped —
+/// a rule the owner thinks is running and is not is worse than no rule.
+async fn write_mail_triage(
+    State(gateway): State<Gateway>,
+    // The owner is this deployment's one owner (ADR 0011), so the actor comes
+    // from the Gateway rather than from the device that happened to be used —
+    // the same way the working day and the two switches record it.
+    body: String,
+) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no triage rules: it has no consent store to journal them in",
+        );
+    };
+    #[derive(serde::Deserialize)]
+    struct Body {
+        triage: Option<crate::mail_rules::Triage>,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let body: Body = match serde_json::from_str(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "malformed_request",
+                &format!("the triage set could not be read: {error}"),
+            );
+        }
+    };
+    // Checked here as well as at the writer, so the answer can name the rule
+    // and the code: the store refuses with a sentence, and a screen needs the
+    // word to translate.
+    if let Some(triage) = &body.triage {
+        if let Err((rule, why)) = triage.check() {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                why.code(),
+                &match rule {
+                    Some(id) => format!("the rule {id} is not one this deployment will apply"),
+                    None => "the triage set is not one this deployment will apply".to_owned(),
+                },
+            );
+        }
+    }
+    let occurred_at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+    let actor = gateway.owner();
+    match consent.store().record_mail_triage_decision(
+        body.triage.as_ref(),
+        &occurred_at,
+        &actor,
+        body.reason.as_deref(),
+    ) {
+        Ok(triage) => {
+            info!(
+                %actor,
+                rules = triage.rules.len(),
+                destinations = triage.destinations.len(),
+                "the owner set their mail triage rules"
+            );
+            Json(json!({ "triage": triage })).into_response()
+        }
+        Err(error) => {
+            error!(%error, "failed to record a mail triage decision");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the triage decision could not be recorded",
+            )
+        }
+    }
+}
+
+/// `GET /api/mail-moves` — what the owner's rules moved, newest first (#418).
+///
+/// The record is the point of the ticket: triage that left no account of
+/// itself would be a thing happening to the owner's mailbox that they can
+/// neither audit nor put back. What is **not** here is a contact's words —
+/// the mail's id, the two mailboxes, the rule and the instant, and nothing
+/// else.
+async fn read_mail_moves(State(gateway): State<Gateway>, headers: HeaderMap) -> Response {
+    let _ = &headers;
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no mail moves: it has no consent store to journal them in",
+        );
+    };
+    match consent.store().mail_moves(crate::mail_moves::DEFAULT_LIMIT) {
+        Ok(moves) => Json(json!({ "moves": moves })).into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the mail move journal");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the mail move journal could not be read",
+            )
+        }
+    }
+}
+
+/// `POST /api/mail-moves/{sequence}/undo` — put one mail back where it was.
+///
+/// This Gateway cannot move a mail; the collector can, and does. So this
+/// records that the owner asked, and answers `202`: the request is taken, the
+/// move happens on the collector's next round, and it will be a **new row**
+/// pointing at this one. A journal that could be rewritten would answer "what
+/// happened" with "what somebody last said happened".
+async fn undo_mail_move(
+    State(gateway): State<Gateway>,
+    axum::extract::Path(sequence): axum::extract::Path<i64>,
+) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no mail moves: it has no consent store to journal them in",
+        );
+    };
+    let at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+    match consent.store().request_mail_undo(sequence, &at) {
+        Ok(true) => {
+            info!(sequence, "the owner asked for a filed mail to be put back");
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({ "undo_requested_at": at })),
+            )
+                .into_response()
+        }
+        Ok(false) => api_error(
+            StatusCode::CONFLICT,
+            "not_undoable",
+            "there is no such move, or it is already undone, already asked about, or is itself \
+             an undo — undoing an undo is asking for the first move again",
+        ),
+        Err(error) => {
+            error!(%error, sequence, "failed to record an undo request");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the undo could not be recorded",
+            )
+        }
+    }
+}
+
+/// `POST /api/internal/mail-moves` — the collector reporting what it moved.
+///
+/// Takes the service token, like the collection seam it is the other half of.
+/// Idempotent on (connection, mail, instant), so a collector that retries a
+/// batch after a lost response records it once.
+///
+/// A move reported for a mail this Gateway has never heard of is recorded all
+/// the same: the collector is the authority on what it moved, and a Gateway
+/// that second-guessed it would lose the record of a real move.
+async fn report_mail_moves(
+    State(gateway): State<Gateway>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let Some(service_token) = gateway.snapshots() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_token_not_configured",
+            "this Gateway records no mail moves: set GATEWAY_SERVICE_TOKEN to the same value the \
+             collector is configured with",
+        );
+    };
+    if !service_token.authenticates(&headers) {
+        warn!("refused a mail move report: the service token is missing or wrong");
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "reporting a mail move takes this Gateway's service token as an \
+             Authorization: Bearer credential",
+        );
+    }
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no mail moves: it has no consent store to journal them in",
+        );
+    };
+    #[derive(serde::Deserialize)]
+    struct Body {
+        moves: Vec<crate::mail_moves::Move>,
+    }
+    let body: Body = match serde_json::from_str(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "malformed_request",
+                &format!("the moves could not be read: {error}"),
+            );
+        }
+    };
+    let mut recorded = 0usize;
+    for moved in &body.moves {
+        match consent.store().record_mail_move(moved) {
+            Ok(true) => recorded += 1,
+            // Already known: a retry, which is a success.
+            Ok(false) => {}
+            Err(error) => {
+                error!(%error, "failed to record a mail move");
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "store_unavailable",
+                    "the move could not be recorded",
+                );
+            }
+        }
+    }
+    if recorded > 0 {
+        info!(
+            recorded,
+            reported = body.moves.len(),
+            "recorded what triage filed"
+        );
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({ "recorded": recorded, "reported": body.moves.len() })),
+    )
+        .into_response()
+}
+
 fn working_day_json(state: &crate::working_day::State) -> Value {
     json!({
         "day": state.day.as_ref().map(day_json),
@@ -751,8 +1045,39 @@ async fn collection_settings(State(gateway): State<Gateway>, headers: HeaderMap)
             None
         }
     };
+    // The owner's triage rules (#416), on the seam the collector already
+    // fetches rather than on a route of its own: it is one more thing a
+    // service that collects the owner's data needs before it acts, and a
+    // second fetch would be a second thing to get out of step.
+    let triage = match consent.store().mail_triage() {
+        Ok(triage) => triage,
+        Err(error) => {
+            error!(%error, "failed to read the mail triage journal");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the mail triage journal could not be read",
+            );
+        }
+    };
+    // The undos the owner asked for and the collector has not done (#418).
+    // On the same seam, for the same reason the rules are: it is one more
+    // thing a service that moves the owner's mail needs before it acts.
+    let undos = match consent.store().pending_mail_undos() {
+        Ok(undos) => undos,
+        Err(error) => {
+            error!(%error, "failed to read the pending mail undos");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the mail move journal could not be read",
+            );
+        }
+    };
     Json(json!({
         "calendar_location": { "enabled": location },
+        "mail_triage": triage,
+        "mail_undos": undos,
         "working_day": working_day.as_ref().map(day_json),
     }))
     .into_response()

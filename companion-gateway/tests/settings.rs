@@ -870,3 +870,148 @@ async fn a_malformed_configuration_says_which_part_is_wrong() -> Result<()> {
     deployment.gateway.stop().await;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// The owner's mail triage rules (#416, ADR 0042)
+// ---------------------------------------------------------------------------
+
+/// The rules the owner writes for sorting their own mailbox, through the real
+/// binary: written, read back, served to the collector on the seam it already
+/// fetches, and refused when they name a mailbox this deployment will not file
+/// into.
+///
+/// The refusals are the point of the ticket as much as the happy path. A rule
+/// the owner believes is running and is not is worse than no rule, so a
+/// destination outside the allowlist is a `422` naming the rule rather than a
+/// rule quietly dropped — and the trash can never be a destination at all,
+/// because a move there has an expiry date (ADR 0042).
+#[tokio::test]
+async fn the_owners_triage_rules_are_written_served_and_refused() -> Result<()> {
+    let deployment = Deployment::start("settings-mail-triage", None).await?;
+
+    // Every deployment starts triaging nothing, and that is a true answer
+    // rather than a seeded row pretending somebody decided.
+    let (status, body) = deployment.get("/api/settings/mail-triage").await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["triage"],
+        json!({ "destinations": [], "rules": [] }),
+        "a deployment that decided nothing triages nothing: {body}"
+    );
+
+    // The collector's seam says the same, with the service token.
+    let (status, collection) = answer(
+        deployment
+            .http
+            .get(format!("{}/api/settings/collection", deployment.base))
+            .bearer_auth(SERVICE_TOKEN),
+    )
+    .await?;
+    assert_eq!(status, 200, "{collection}");
+    assert_eq!(
+        collection["mail_triage"],
+        json!({ "destinations": [], "rules": [] })
+    );
+
+    // The owner declares two mailboxes and two rules.
+    let set = json!({
+        "destinations": ["Veille", "Archive"],
+        "rules": [
+            { "id": "newsletters", "field": "list_id",
+              "value": "<ml.example.com>", "destination": "Veille" },
+            { "id": "vieux", "field": "older_than_days",
+              "value": 30, "destination": "Archive" }
+        ]
+    });
+    let (status, body) = deployment
+        .put(
+            "/api/settings/mail-triage",
+            json!({ "triage": set, "reason": "le tri du matin" }),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["triage"], set);
+
+    // Read back by the owner, and served to the collector.
+    let (_, body) = deployment.get("/api/settings/mail-triage").await?;
+    assert_eq!(body["triage"], set);
+    let (_, collection) = answer(
+        deployment
+            .http
+            .get(format!("{}/api/settings/collection", deployment.base))
+            .bearer_auth(SERVICE_TOKEN),
+    )
+    .await?;
+    assert_eq!(
+        collection["mail_triage"], set,
+        "the collector reads the rules on the seam it already fetches: {collection}"
+    );
+
+    // A rule naming a mailbox the owner never declared is refused, and the
+    // refusal names the rule — not a rule silently dropped.
+    let (status, body) = deployment
+        .put(
+            "/api/settings/mail-triage",
+            json!({ "triage": {
+                "destinations": ["Veille"],
+                "rules": [{ "id": "factures", "field": "subject",
+                            "value": "facture", "destination": "Comptabilité" }]
+            }}),
+        )
+        .await?;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["code"], json!("destination_not_allowed"));
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("factures"),
+        "the refusal names the rule at fault: {body}"
+    );
+
+    // The trash can never be a destination, in any of the five languages, and
+    // it cannot enter the allowlist either.
+    for destination in [
+        "Corbeille",
+        "Trash",
+        "Papierkorb",
+        "Papelera",
+        "Cestino",
+        "Spam",
+    ] {
+        let (status, body) = deployment
+            .put(
+                "/api/settings/mail-triage",
+                json!({ "triage": {
+                    "destinations": ["Veille", destination],
+                    "rules": []
+                }}),
+            )
+            .await?;
+        assert_eq!(status, 422, "{destination}: {body}");
+        assert_eq!(
+            body["code"],
+            json!("destination_is_destructive"),
+            "{destination}: a move there has an expiry date: {body}"
+        );
+    }
+
+    // None of that disturbed what was written: a refusal writes nothing.
+    let (_, body) = deployment.get("/api/settings/mail-triage").await?;
+    assert_eq!(
+        body["triage"], set,
+        "a refused set never reaches the journal"
+    );
+
+    // And clearing goes back to triaging nothing.
+    let (status, body) = deployment
+        .put(
+            "/api/settings/mail-triage",
+            json!({ "triage": Value::Null }),
+        )
+        .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["triage"], json!({ "destinations": [], "rules": [] }));
+
+    Ok(())
+}

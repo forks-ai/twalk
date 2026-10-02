@@ -207,6 +207,34 @@ pub fn mailbox_get(account_id: &str) -> (&'static str, Value) {
     )
 }
 
+/// `Email/set` moving one mail into one mailbox (#417, ADR 0042).
+///
+/// JMAP has no "move": a mailbox membership *is* `mailboxIds`, so a move is an
+/// update that sets the whole map. Passing the map rather than a patch is
+/// deliberate — a patch (`mailboxIds/<id>`) would add the destination and
+/// leave the mail in the inbox too, which is a copy and not a filing.
+///
+/// `ifInState` is **not** sent. The owner's mailbox changes under this
+/// constantly — their phone marking something read is a state change — and a
+/// move that failed because of that would be retried for ever. The move is
+/// idempotent anyway: setting the same single mailbox twice is the same
+/// mailbox.
+pub fn email_moves(account_id: &str, moves: &[(String, String)]) -> (&'static str, Value) {
+    let update: serde_json::Map<String, Value> = moves
+        .iter()
+        .map(|(email_id, mailbox_id)| {
+            (
+                email_id.clone(),
+                json!({ "mailboxIds": { mailbox_id.as_str(): true } }),
+            )
+        })
+        .collect();
+    (
+        "Email/set",
+        json!({ "accountId": account_id, "update": update }),
+    )
+}
+
 /// `Email/get` with no ids: what answers the current Email state, which is
 /// the cursor a first start takes without reading a mail (no backfill).
 pub fn email_state(account_id: &str) -> (&'static str, Value) {

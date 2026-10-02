@@ -101,6 +101,14 @@ servers:
       There is no other: same-origin is what makes the cookie work.
 
 tags:
+  - name: internal
+    description: |
+      Seams between this deployment's own services, never a browser's. Each
+      takes the service token (`GATEWAY_SERVICE_TOKEN`) and refuses a device
+      token, and each exists because one service holds something another one
+      needs: the collector holds the owner's mailbox and reports what it moved
+      there (#418), as the Hermes runtime holds the model and reads its
+      settings.
   - name: session
     description: Signing in, the session's lifetime, and the user's devices.
   - name: bootstrap
@@ -2780,6 +2788,248 @@ paths:
         "503":
           $ref: "#/components/responses/SwitchNotConfigured"
 
+  /api/mail-moves:
+    get:
+      operationId: getMailMoves
+      tags: [settings]
+      summary: What the owner's triage rules moved, newest first.
+      description: |
+        The record of what triage did (#418, ADR 0042).
+
+        Without it, triage is a thing that happens to the owner's mailbox and
+        leaves no account of itself; with it, a rule that turned out wrong
+        costs a minute rather than an afternoon of searching.
+
+        What is **not** here is a contact's words. The mail's id, the two
+        mailboxes, the rule and the instant — nothing a sender wrote.
+
+        An **undo is a row of its own** pointing at the move it reverses, and
+        never an erasure: a journal that could be rewritten would answer *what
+        happened* with *what somebody last said happened*.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The moves, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [moves]
+                additionalProperties: false
+                properties:
+                  moves:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MailMove"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          $ref: "#/components/responses/ConsentNotConfigured"
+
+  /api/mail-moves/{sequence}/undo:
+    post:
+      operationId: undoMailMove
+      tags: [settings]
+      summary: Put one filed mail back where it came from.
+      description: |
+        `202`, not `200`: **this Gateway cannot move a mail.** The collector
+        can, and does — it holds the mailbox. So this records that the owner
+        asked, and the move happens on the collector's next round and arrives
+        as a new row pointing at this one.
+
+        `409 not_undoable` when there is no such move, when one has already
+        been asked for, or when the move is itself an undo — undoing an undo
+        is asking for the first move again, which the owner does by asking for
+        the first move again.
+      security:
+        - deviceToken: []
+      parameters:
+        - name: sequence
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: The move's position in the journal.
+      responses:
+        "202":
+          description: The request is recorded; the collector performs it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [undo_requested_at]
+                additionalProperties: false
+                properties:
+                  undo_requested_at:
+                    type: string
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          description: There is no such move, or it cannot be undone.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ConsentNotConfigured"
+
+  /api/internal/mail-moves:
+    post:
+      operationId: reportMailMoves
+      tags: [internal]
+      summary: The collector reporting what its rules moved.
+      description: |
+        The other half of `/api/settings/collection`, and it takes the same
+        service token. Idempotent on (connection, mail, instant), so a
+        collector retrying a batch after a lost response records it once.
+
+        A move reported for a mail this Gateway has never heard of is recorded
+        all the same: **the collector is the authority on what it moved**, and
+        a Gateway that second-guessed it would lose the record of a real move.
+      security:
+        - serviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [moves]
+              additionalProperties: false
+              properties:
+                moves:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/MailMoveReport"
+      responses:
+        "201":
+          description: How many were new, and how many were reported.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recorded, reported]
+                additionalProperties: false
+                properties:
+                  recorded: { type: integer }
+                  reported: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "422":
+          description: The report could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: This Gateway records no moves.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/settings/mail-triage:
+    get:
+      operationId: getMailTriage
+      tags: [settings]
+      summary: The owner's mail triage rules, and the mailboxes a rule may file into.
+      description: |
+        The owner's rules for sorting their own mailbox (#416, ADR 0042).
+
+        A rule is a **match** on an envelope field and one **destination**.
+        The destination must be one of the mailboxes the owner declared;
+        nothing else can be named, which is what keeps a typo — or a rule the
+        drafting agent proposed (#420) — from inventing one.
+
+        No model is in the execution path, and that is the decision rather
+        than a precaution. ADR 0039 says the drafting lane is the one place in
+        this project where *the input is written by a stranger*; triage is
+        that lane with a side effect, since an agent sorting the inbox reads
+        text composed outside the deployment and then acts on the mailbox it
+        read it from. A rule is matched by code, against fields a sender
+        cannot forge into an instruction.
+
+        Matches are on the **envelope** — sender, subject, `List-Id`, age —
+        and never on the body. A rule that read the body would be a rule a
+        stranger could write.
+
+        Empty `destinations` and empty `rules` is every deployment's starting
+        state: nothing is triaged and the collector does nothing.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The triage set as it stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailTriageState"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          $ref: "#/components/responses/ConsentNotConfigured"
+    put:
+      operationId: setMailTriage
+      tags: [settings]
+      summary: Set the triage rules, or clear them.
+      description: |
+        `{"triage": {...}}` sets the whole set; `{"triage": null}` goes back
+        to triaging nothing.
+
+        Whole or not at all: a rule is only valid against the allowlist it was
+        written for, so there is no such thing as accepting half of a set. A
+        destination outside the allowlist is a `422` naming the rule, never a
+        rule quietly dropped — a rule the owner believes is running and is not
+        is worse than no rule at all.
+
+        The **trash and the spam folder can never be a destination**, and
+        cannot enter the allowlist either. Most servers purge them on a timer,
+        so a move there has an expiry date, and a reversible act that stops
+        being reversible is not reversible. This Gateway refuses them by name,
+        in the five languages the Companion speaks; the collector refuses them
+        by JMAP `role` and is the authority (#417).
+      security:
+        - deviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [triage]
+              properties:
+                triage:
+                  oneOf:
+                    - $ref: "#/components/schemas/MailTriage"
+                    - type: "null"
+                reason:
+                  type: string
+                  nullable: true
+                  description: Why, for the journal. Never shown to a contact.
+      responses:
+        "200":
+          description: The triage set the decision left behind.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailTriageState"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "422":
+          description: |
+            The set is not one this deployment will apply. The code says which
+            of the eleven reasons, and names the rule when one is at fault.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          $ref: "#/components/responses/ConsentNotConfigured"
+
   /api/settings/collection:
     get:
       operationId: getCollectionSettings
@@ -5249,6 +5499,120 @@ components:
           example: "18:00"
         exceptions:
           $ref: "#/components/schemas/WorkingDayExceptions"
+    MailMoveReport:
+      type: object
+      description: One move, as the collector reports it.
+      required:
+        [connection, email_id, rule_id, from_mailbox_id, from_mailbox_name,
+         to_mailbox_id, to_mailbox_name, occurred_at]
+      additionalProperties: false
+      properties:
+        connection: { type: string }
+        email_id: { type: string }
+        rule_id:
+          type: string
+          description: The rule that caused it, or `undo` when the owner asked for it back.
+        from_mailbox_id: { type: string }
+        from_mailbox_name: { type: string }
+        to_mailbox_id: { type: string }
+        to_mailbox_name: { type: string }
+        occurred_at: { type: string, format: date-time }
+        undoes:
+          type: integer
+          format: int64
+          nullable: true
+          description: The move this one reverses, when it is an undo.
+    MailMove:
+      allOf:
+        - $ref: "#/components/schemas/MailMoveReport"
+        - type: object
+          required: [sequence, undo_requested_at]
+          properties:
+            sequence:
+              type: integer
+              format: int64
+              description: Its position in the journal, and what an undo names.
+            undo_requested_at:
+              type: string
+              format: date-time
+              nullable: true
+              description: |
+                Set when the owner asked for this move to be put back and the
+                collector has not done it yet.
+    MailRule:
+      type: object
+      description: |
+        One triage rule: what it looks at, and the mailbox a match files into.
+
+        The match is a tagged union — `field` says which envelope field, and
+        `value` is what to compare. Every field is one the **server parsed**
+        rather than prose a sender wrote, which is what makes a rule something
+        a stranger cannot author (ADR 0042).
+      required: [id, field, value, destination]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          maxLength: 200
+          description: |
+            Stable across amendments, so the journal can say *this* rule
+            changed rather than *a* rule was removed and another added.
+        field:
+          type: string
+          enum: [sender, subject, list_id, older_than_days]
+          description: |
+            `sender` matches the address, whole or by a `*@domain` /
+            `local@*` wildcard on one side, lower-cased on both.
+            `subject` is a case-insensitive fragment — a fragment and not a
+            pattern, because a regular expression in a rule is a denial of
+            service the owner writes by accident.
+            `list_id` is the header a mailing list stamps, and is the most
+            useful of the four.
+            `older_than_days` is the one match about time, and the only one
+            that can act on a mail already seen.
+        value:
+          oneOf:
+            - type: string
+              maxLength: 200
+            - type: integer
+              minimum: 1
+              maximum: 3650
+          description: A string for the first three fields, a count of days for the fourth.
+        destination:
+          type: string
+          maxLength: 200
+          description: |
+            A mailbox from the owner's allowlist, by name. Resolved to a JMAP
+            id by the collector, which is the only component holding the
+            mailbox (#417).
+    MailTriage:
+      type: object
+      description: The mailboxes a rule may file into, and the rules themselves.
+      required: [destinations, rules]
+      additionalProperties: false
+      properties:
+        destinations:
+          type: array
+          maxItems: 200
+          items:
+            type: string
+            maxLength: 200
+          description: |
+            The mailboxes a rule may name. Empty means triage does nothing,
+            which is how every deployment starts. The trash and the spam
+            folder cannot be in it, whatever is written.
+        rules:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/MailRule"
+    MailTriageState:
+      type: object
+      required: [triage]
+      additionalProperties: false
+      properties:
+        triage:
+          $ref: "#/components/schemas/MailTriage"
     WorkingDayState:
       type: object
       required: [day, since, actor, reason]
@@ -5803,9 +6167,24 @@ components:
         The state alone, never who decided it or when: that belongs to the
         owner's screen, and a collector reading it would be holding a fact
         about the owner it has no use for.
-      required: [calendar_location, working_day]
+      required: [calendar_location, mail_triage, mail_undos, working_day]
       additionalProperties: false
       properties:
+        mail_undos:
+          type: array
+          items:
+            $ref: "#/components/schemas/MailMove"
+          description: |
+            The undos the owner asked for and this collector has not performed
+            (#418). On the same seam as the rules, for the same reason.
+        mail_triage:
+          allOf:
+            - $ref: "#/components/schemas/MailTriage"
+          description: |
+            The owner's triage rules, as the collector applies them (#416).
+            Served here rather than on a route of its own: it is one more
+            thing a service collecting the owner's data needs before it acts,
+            and a second fetch would be a second thing to get out of step.
         calendar_location:
           type: object
           required: [enabled]

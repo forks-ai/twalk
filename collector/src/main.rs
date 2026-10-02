@@ -229,11 +229,15 @@ async fn run(config: Config) -> Result<()> {
     // The owner's working day (#381), read from the same document as the
     // switch above and refreshed on the same rounds. `None` until they say.
     let working_day: twalk_collector::calendars::SharedWorkingDay = Default::default();
+    // The owner's triage rules, re-read with the switch before each round.
+    let triage: twalk_collector::triage::SharedTriage = Default::default();
+    // The undos the owner asked for, read with the rules (#418).
+    let undos: twalk_collector::triage::SharedUndos = Default::default();
     let snapshot = match (&config.gateway_url, &config.gateway_service_token) {
         (Some(url), Some(token)) => {
             let document = consent_snapshot(url, token).await?;
             config.refuse_unknown_connections(&registry_ids(&document))?;
-            let (enabled, day) = collection_settings(url, token).await?;
+            let (enabled, day, rules, _undos) = collection_settings(url, token).await?;
             location_enabled.store(enabled, Ordering::Relaxed);
             match &day {
                 Some(day) => info!(
@@ -249,6 +253,19 @@ async fn run(config: Config) -> Result<()> {
             *working_day
                 .lock()
                 .expect("the working day mutex is never poisoned") = day;
+            if !rules.is_empty() {
+                info!(
+                    rules = rules.rules.len(),
+                    destinations = rules.destinations.len(),
+                    "the owner's mail triage rules are in force: a mail this inbox receives is \
+                     filed where they say, and nowhere a rule did not name"
+                );
+            }
+            *triage.lock().expect("the triage mutex is never poisoned") = rules;
+            *undos.lock().expect("the undo mutex is never poisoned") = _undos
+                .iter()
+                .filter_map(|one| serde_json::from_value(one.clone()).ok())
+                .collect();
             if enabled {
                 warn!("the calendar location is ON: published events carry where a meeting is, by a decision recorded on the Companion Gateway. Turn it off there to stop it");
             } else {
@@ -329,6 +346,12 @@ async fn run(config: Config) -> Result<()> {
                     .as_deref()
                     .context("a mail connection is held with no COLLECTOR_JMAP_SESSION_URL")?,
                 &config.state_dir,
+                triage.clone(),
+                undos.clone(),
+                config
+                    .gateway_url
+                    .clone()
+                    .zip(config.gateway_service_token.clone()),
                 consent.clone(),
             )
         })
@@ -684,7 +707,7 @@ async fn run(config: Config) -> Result<()> {
             let mut may_publish = true;
             if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
                 match collection_settings(url, token).await {
-                    Ok((enabled, day)) => {
+                    Ok((enabled, day, rules, undos_now)) => {
                         location_unreadable = false;
                         // The working day as it stands, beside the switch: an
                         // owner who narrows their hours at noon has narrowed
@@ -692,6 +715,11 @@ async fn run(config: Config) -> Result<()> {
                         *working_day
                             .lock()
                             .expect("the working day mutex is never poisoned") = day;
+                        *triage.lock().expect("the triage mutex is never poisoned") = rules;
+                        *undos.lock().expect("the undo mutex is never poisoned") = undos_now
+                            .iter()
+                            .filter_map(|one| serde_json::from_value(one.clone()).ok())
+                            .collect();
                         if location_enabled.swap(enabled, Ordering::Relaxed) != enabled {
                             if enabled {
                                 warn!("the calendar location was turned ON: published events now carry where a meeting is");
@@ -1020,7 +1048,12 @@ async fn publish(
 async fn collection_settings(
     gateway_url: &str,
     service_token: &str,
-) -> Result<(bool, Option<twalk_collector::freebusy::WorkingDay>)> {
+) -> Result<(
+    bool,
+    Option<twalk_collector::freebusy::WorkingDay>,
+    twalk_collector::triage::Triage,
+    Vec<serde_json::Value>,
+)> {
     let url = format!(
         "{}/api/settings/collection",
         gateway_url.trim_end_matches('/')
@@ -1083,7 +1116,27 @@ async fn collection_settings(
         })
         .filter(|day| !day.days.is_empty())
     });
-    Ok((enabled, day))
+    // The owner's triage rules (#416, ADR 0042). Absent from a Gateway older
+    // than the decision, and from one where nobody wrote a rule — both mean
+    // the same thing and both triage nothing. A set this build cannot read is
+    // an empty set for the same reason the working day treats a half-read
+    // value as none: a rule applied from a value nobody checked is worse than
+    // no rule.
+    let triage = document
+        .get("mail_triage")
+        .cloned()
+        .and_then(|set| serde_json::from_value::<twalk_collector::triage::Triage>(set).ok())
+        .unwrap_or_default();
+    // The undos the owner asked for and this collector has not performed
+    // (#418). A move the Gateway cannot make itself: it records the request,
+    // this reads it on the seam it already fetches, and the reverse move is
+    // reported as a move of its own.
+    let undos = document
+        .get("mail_undos")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok((enabled, day, triage, undos))
 }
 
 /// The Companion Gateway's consent snapshot, the document the Sensor reads too
