@@ -2772,18 +2772,25 @@ impl Store {
             .map(|triage| serde_json::to_string(triage))
             .transpose()
             .context("failed to serialize the triage set")?;
-        let connection = self.connection();
-        connection.execute(
-            "INSERT INTO mail_triage_decision (new_state, triage, occurred_at, actor, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                if triage.is_some() { "set" } else { "cleared" },
-                document,
-                occurred_at,
-                actor,
-                reason
-            ],
-        )?;
+        // The guard is a temporary and is **never** bound to a name here:
+        // `self.connection()` is a non-reentrant `std::sync::Mutex`, and
+        // `mail_triage()` below takes it again. Holding it across that call
+        // deadlocks the whole store for the Gateway's lifetime — the request
+        // never answers and every later consent read waits behind it. The
+        // working day's journal is written the same way, for the same reason.
+        self.connection()
+            .execute(
+                "INSERT INTO mail_triage_decision (new_state, triage, occurred_at, actor, reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    if triage.is_some() { "set" } else { "cleared" },
+                    document,
+                    occurred_at,
+                    actor,
+                    reason
+                ],
+            )
+            .context("failed to record a mail triage decision")?;
         self.mail_triage()
     }
 

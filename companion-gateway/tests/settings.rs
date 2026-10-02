@@ -32,8 +32,9 @@ mod harness;
 
 use anyhow::{Context, Result};
 use harness::{
-    companion_build, ensure_stack, gateway_env_with, gateway_state_dir, poll_until,
-    signed_in_device_token, GatewayProc, StubEndpoint, StubLlm, SERVICE_TOKEN,
+    companion_build, ensure_stack, gateway_env_with, gateway_env_with_consent, gateway_state_dir,
+    nats_url, poll_until, signed_in_device_token, GatewayProc, StubEndpoint, StubLlm,
+    SERVICE_TOKEN,
 };
 use serde_json::{json, Value};
 
@@ -65,7 +66,30 @@ impl Deployment {
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
-        let gateway = GatewayProc::start(&gateway_env_with(&static_dir, &overrides))?;
+        Self::answering(GatewayProc::start(&gateway_env_with(
+            &static_dir,
+            &overrides,
+        ))?)
+        .await
+    }
+
+    /// A deployment whose consent store is open, for the settings that are
+    /// journalled in it rather than held in configuration. A Gateway without
+    /// one answers `consent_not_configured` to every triage route, which is
+    /// the right answer and not the one a test of those routes wants.
+    async fn with_consent(test_name: &str) -> Result<Self> {
+        ensure_stack().await?;
+        let static_dir = companion_build(test_name)?;
+        Self::answering(GatewayProc::start(&gateway_env_with_consent(
+            &static_dir,
+            &nats_url(),
+        ))?)
+        .await
+    }
+
+    /// The three steps both constructors end with: read back the port the
+    /// Gateway chose, wait until it answers, and sign a device in.
+    async fn answering(gateway: GatewayProc) -> Result<Self> {
         let base = gateway.base_url().await?;
         wait_until_answering(&base).await?;
         let device = signed_in_device_token(&base).await?;
@@ -887,7 +911,11 @@ async fn a_malformed_configuration_says_which_part_is_wrong() -> Result<()> {
 /// because a move there has an expiry date (ADR 0042).
 #[tokio::test]
 async fn the_owners_triage_rules_are_written_served_and_refused() -> Result<()> {
-    let deployment = Deployment::start("settings-mail-triage", None).await?;
+    // With a consent store: the triage journal lives beside the consent
+    // decisions, so a Gateway without one answers `consent_not_configured` to
+    // every route here — which is the right answer, and was this test's own
+    // first finding about itself.
+    let deployment = Deployment::with_consent("settings-mail-triage").await?;
 
     // Every deployment starts triaging nothing, and that is a true answer
     // rather than a seeded row pretending somebody decided.
@@ -960,7 +988,7 @@ async fn the_owners_triage_rules_are_written_served_and_refused() -> Result<()> 
         )
         .await?;
     assert_eq!(status, 422, "{body}");
-    assert_eq!(body["code"], json!("destination_not_allowed"));
+    assert_eq!(body["error"], json!("destination_not_allowed"));
     assert!(
         body["detail"]
             .as_str()
@@ -990,7 +1018,7 @@ async fn the_owners_triage_rules_are_written_served_and_refused() -> Result<()> 
             .await?;
         assert_eq!(status, 422, "{destination}: {body}");
         assert_eq!(
-            body["code"],
+            body["error"],
             json!("destination_is_destructive"),
             "{destination}: a move there has an expiry date: {body}"
         );
