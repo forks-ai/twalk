@@ -375,7 +375,48 @@ So, two lines that go together:
 
 `GET /api/deployment` then carries it as `client_url`, the sign-in and recovery screens call that address instead of deriving one from the name, and **nothing server-side changes**: the Gateway still verifies the OpenID token against `GATEWAY_HOMESERVER_FEDERATION_URL` inside the deployment, and still checks the user is `GATEWAY_OWNER`. Unset, a deployment whose name *is* its address behaves exactly as before.
 
-Two paths must be left out of what you publish. **`/_twalk/*`** carries its own credentials — a bridge's `as_token`, the secret shared with Hermes — and belongs on the deployment's own network. And if your proxy authenticates the Companion (an SSO in front of it), the Matrix routes a browser needs *before* it has a session have to be let through: `/_matrix/client/versions`, `/.well-known/matrix/`, and the OpenID token request `/_matrix/client/v3/user/{userId}/openid/request_token`.
+Two paths must be left out of what you publish. **`/_twalk/*`** carries its own credentials — a bridge's `as_token`, the secret shared with Hermes — and belongs on the deployment's own network. And **`/_synapse/admin`** is not among the upstreams above at all, which is the point of listing `synapse:8008/_matrix/` rather than `synapse:8008`.
+
+### An SSO in front of the Companion does not go in front of Matrix
+
+If your proxy authenticates the Companion — an SSO, a basic-auth gate, anything that answers a stranger with a redirect — then the **whole** client-server API has to be exempt from it. Not the handful of routes a browser calls before it has a session: all of it.
+
+**No Matrix client sends cookies.** matrix-js-sdk hardcodes it, and the Companion's own password login does the same, for the same reason:
+
+```js
+credentials: "omit",   // we send credentials via headers
+```
+
+A request that authenticates with a bearer token cannot pass a cookie gate — before a sign-in or after one. An earlier version of this section said otherwise, that the login endpoint and the rest could stay behind the SSO; what that cost, on 2026-10-04, was the owner of the deployment described above locked out of their own keys (#448):
+
+```text
+POST /_matrix/client/v3/login   →  302 to the SSO
+fetch follows the redirect      →  200 text/html
+the recovery screen reads       →  `the login response was not a session`
+```
+
+With oauth2-proxy, that is one line:
+
+```
+OAUTH2_PROXY_SKIP_AUTH_ROUTES: "^/_matrix/,^/.well-known/matrix/"
+```
+
+What guards the API instead is Matrix's own, which is how every homeserver on the federation is published. Every route but those needs an access token Synapse issued — `/keys/query` with none answers `M_MISSING_TOKEN`. Registration is closed on this deployment (`synapse/homeserver.yaml` sets no `enable_registration`; accounts come from `provision.sh`), so `POST /_matrix/client/v3/register` answers `M_FORBIDDEN`. And `rc_login.failed_attempts` — 0.2/s with a burst of 10 — is the limiter that carries the brute-force argument. The SSO still guards what it was there for: the Companion and the Gateway's `/api`.
+
+One command says which side of this a deployment is on, and you can run it from anywhere:
+
+```sh
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
+  -XPOST -H 'Content-Type: application/json' \
+  -d '{"type":"m.login.password","identifier":{"type":"m.id.user","user":"nobody"},"password":"x"}' \
+  https://companion.example.com/_matrix/client/v3/login
+
+# 403 application/json  → the homeserver answered. A browser can sign in.
+# 200 text/html         → your gate answered. It cannot, and the screen
+#                         will blame the login response.
+```
+
+Two things that are *not* enough on their own: being signed into the SSO in your browser (the cookie exists, the request just does not carry it), and `/_matrix/client/versions` answering 200 (that route is usually the first one an operator exempts, so it answers while everything after it does not).
 
 ## What is where
 
