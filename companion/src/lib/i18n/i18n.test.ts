@@ -199,7 +199,12 @@ describe('the catalogues', () => {
 			// and the day a pending removal names (#393).
 			startsAt: '09:00',
 			endsAt: '18:30',
-			day: 'jeudi'
+			day: 'jeudi',
+			// What a reset costs this account (#439): how many of the account's
+			// devices its identity has signed, and how many of them there are.
+			// `count` — the room keys in the backup — is above.
+			signed: 1,
+			devices: 3
 		};
 		for (const locale of LOCALES) {
 			for (const key of Object.keys(en) as (keyof typeof en)[]) {
