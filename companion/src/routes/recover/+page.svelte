@@ -42,7 +42,7 @@
 		domain,
 		restoreDomain,
 		rememberDomain,
-		homeserverBaseUrl,
+		matrixBaseUrl,
 		isValidDomain,
 		normaliseDomain
 	} from '$lib/onboarding/domain';
@@ -74,6 +74,8 @@
 		accessToken: string;
 	} | null>(null);
 	let resetKey = $state<string | null>(null);
+	/** What the deployment says about where its homeserver answers (#323). */
+	let clientUrl = $state<string | null>(null);
 	let resetBackup = $state(false);
 
 	/** Filled from the Gateway session when there is one: one less thing to type. */
@@ -122,6 +124,15 @@
 			} catch {
 				// No session: the user types their username like anyone else.
 			}
+			try {
+				// Where this deployment's homeserver answers a browser (#323).
+				// Asked of the deployment rather than derived from its name,
+				// which is not always an address the outside can call.
+				const described = await gateway.GET('/api/deployment');
+				clientUrl = described.data?.client_url ?? null;
+			} catch {
+				// The screen still works: the address falls back to the name.
+			}
 		})();
 	});
 
@@ -130,12 +141,24 @@
 	const effectiveDomain = $derived(askDomain ? normaliseDomain(typedDomain) : $domain);
 	const domainValid = $derived(isValidDomain(effectiveDomain));
 
-	// The homeserver screen 1 resolved, but only if it belongs to the domain in
-	// play: a user correcting the domain here must not be sent to the old one.
+	/**
+	 * Where this browser sends its Matrix requests (#323). The deployment's
+	 * own answer wins when there is one, then what screen 1 resolved, then the
+	 * domain itself — and the last two only while the domain in play is still
+	 * the deployment's, so a user correcting it is not sent to the old one.
+	 *
+	 * This screen is where it was found: both paths below begin with a
+	 * password login, and on a deployment published under another name than
+	 * its server name the login went to the browser's own loopback. What the
+	 * owner read was `the login response was not a session`.
+	 */
 	const baseUrl = $derived(
-		$homeserver !== '' && effectiveDomain === $domain
-			? $homeserver
-			: homeserverBaseUrl(effectiveDomain)
+		matrixBaseUrl({
+			deploymentClientUrl: clientUrl,
+			discoveredHomeserver: $homeserver,
+			deploymentDomain: $domain,
+			effectiveDomain
+		})
 	);
 	const decoded = $derived(decodeRecoveryKey(typedKey));
 	const keyProblem = $derived<RecoveryKeyProblem | null>(decoded.ok ? null : decoded.problem);
