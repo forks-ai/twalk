@@ -5,18 +5,45 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use tokio::time::sleep;
 
-/// Polls `attempt` every 500 ms until it yields `Some`, or fails after ~20 s.
+/// How long every wait in the harness may take, and how often it looks.
+///
+/// This was twenty seconds, and twenty seconds was wrong for the commonest
+/// condition here: something that waits on a component's **initial sync**.
+/// Every component a test starts starts cold, so its first sync costs
+/// whatever the shared homeserver holds — which is everything every previous
+/// run left there, measured at 1 395 rooms and 3 115 devices on one account
+/// (#432). Four separate waits were found failing on it in one suite, and the
+/// repository has 155 call sites: raising each as it is met is not a plan.
+///
+/// A longer deadline is close to free, and that is the argument for choosing
+/// it over cleverness. A wait returns the moment its condition holds, so a
+/// passing run costs nothing at all; only a genuinely failing test takes
+/// longer to say so. Nothing here waits for a timeout in order to prove an
+/// absence — checked, not assumed — so no test changes meaning.
+///
+/// It does not fix the accumulation. That is #432's own subject, and until it
+/// is dealt with this is what keeps the suites readable.
+pub const DEADLINE: Duration = Duration::from_secs(120);
+const EVERY: Duration = Duration::from_millis(500);
+
+/// Polls `attempt` every 500 ms until it yields `Some`, or gives up after
+/// [`DEADLINE`] — naming the deadline, so a reader asks whether it was ever
+/// enough rather than suspecting the component under test.
 pub async fn poll_until<T, Fut>(mut attempt: impl FnMut() -> Fut, description: &str) -> Result<T>
 where
     Fut: std::future::Future<Output = Option<T>>,
 {
-    for _ in 0..40 {
+    let started = std::time::Instant::now();
+    while started.elapsed() < DEADLINE {
         if let Some(value) = attempt().await {
             return Ok(value);
         }
-        sleep(Duration::from_millis(500)).await;
+        sleep(EVERY).await;
     }
-    bail!("timed out {description}")
+    bail!(
+        "timed out after {:.0}s {description}",
+        DEADLINE.as_secs_f64()
+    )
 }
 
 #[cfg(test)]

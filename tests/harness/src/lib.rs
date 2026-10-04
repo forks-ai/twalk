@@ -37,7 +37,7 @@ pub use stack::{
     PORTALS_APPSERVICE_SENDER, SERVER_NAME,
 };
 pub use stub_llm::{StubAnswer, StubLlm, StubRequest, DEFAULT_LANGUAGE_ANSWER, LANGUAGE_ASK_MARK};
-pub use wait::poll_until;
+pub use wait::{poll_until, DEADLINE};
 
 use sha2::{Digest, Sha256};
 
