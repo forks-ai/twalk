@@ -453,6 +453,94 @@ test.describe.serial('the bootstrap journey', () => {
 	});
 
 	/**
+	 * The settings card mints a new key on a browser that still has its own
+	 * (#445), which is the journey #438 built and could not reach.
+	 *
+	 * It runs **here**, right after the reload above, and that position is the
+	 * test: a reload is what empties `matrixSession`, and the card used to
+	 * answer "this browser no longer holds your keys" to exactly this state —
+	 * an inference from a missing session, false whenever the keys were there,
+	 * which is what the owner of the reference deployment met. What the card
+	 * does now is sign in with the password and ask the crypto stack.
+	 *
+	 * It is before the store-loss journeys on purpose: those replace the key
+	 * this one makes, and every journey after it uses whatever key is current.
+	 */
+	test('the settings card mints a new key after a reload, with the password', async () => {
+		if (stack === null) {
+			return;
+		}
+		await page.goto('/settings');
+		await expect(page.getByTestId('screen-settings')).toBeVisible();
+		await page.getByTestId('recovery-key-ask').click();
+
+		// The password is asked for, because this page load carries no Matrix
+		// session — and nothing happens until it is given.
+		const go = page.getByTestId('recovery-key-go');
+		await expect(page.getByTestId('recovery-key-password')).toBeVisible();
+		await expect(go).toBeDisabled();
+		await page.getByTestId('recovery-key-password').fill(password);
+		await expect(go).toBeEnabled();
+		forget();
+		await go.click();
+
+		// The new key, shown once, and it is not the one onboarding showed.
+		const shown = page.getByTestId('recovery-key');
+		await expect(shown).toBeVisible({ timeout: 180_000 });
+		const minted = (await shown.innerText()).replace(/\s+/gu, ' ').trim();
+		expect(minted.split(' ')).toHaveLength(12);
+		expect(minted).not.toBe(recoveryKey);
+
+		// And the account's secret storage holds the three cross-signing
+		// secrets, not an empty storage — which is what a browser without the
+		// keys would have written, and what the card now refuses to do. Asked
+		// of the homeserver, where the account data lives.
+		await expectSecretStorageCarriesTheIdentity(stack, password);
+
+		// The key never left the page, here as everywhere.
+		await assertKeyNeverLeft(minted);
+		recoveryKey = minted;
+	});
+
+	/**
+	 * The three cross-signing secrets, present in the account's secret
+	 * storage. Their contents are encrypted and none of this reads them: what
+	 * is asserted is that a renewal wrote them, rather than replacing the
+	 * storage with an empty one.
+	 */
+	async function expectSecretStorageCarriesTheIdentity(
+		where: NonNullable<ReturnType<typeof realStack>>,
+		accountPassword: string
+	): Promise<void> {
+		const login = await fetch(`${where.synapseUrl}/_matrix/client/v3/login`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				type: 'm.login.password',
+				identifier: { type: 'm.id.user', user: where.ownerId },
+				password: accountPassword
+			})
+		});
+		const session = (await login.json()) as { access_token: string };
+		for (const secret of [
+			'm.cross_signing.master',
+			'm.cross_signing.self_signing',
+			'm.cross_signing.user_signing'
+		]) {
+			const answer = await fetch(
+				`${where.synapseUrl}/_matrix/client/v3/user/${encodeURIComponent(where.ownerId)}/account_data/${secret}`,
+				{ headers: { authorization: `Bearer ${session.access_token}` } }
+			);
+			expect(answer.status, `${secret} is in the account's secret storage`).toBe(200);
+			const document = (await answer.json()) as { encrypted?: Record<string, unknown> };
+			expect(
+				Object.keys(document.encrypted ?? {}).length,
+				`${secret} is sealed by a key`
+			).toBeGreaterThan(0);
+		}
+	}
+
+	/**
 	 * Logs in to Synapse from the test process and reads `/keys/query` for the
 	 * owner: every live device must carry a signature by the account's
 	 * self-signing key.

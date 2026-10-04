@@ -28,7 +28,12 @@
 	import RecoveryKeyCard from '$lib/components/RecoveryKeyCard.svelte';
 	import { t } from '$lib/i18n';
 	import { domain, restoreDomain, homeserverBaseUrl } from '$lib/onboarding/domain';
-	import { homeserver, restoreHomeserver, matrixSession } from '$lib/onboarding/progress';
+	import {
+		homeserver,
+		restoreHomeserver,
+		matrixSession,
+		rememberDevice
+	} from '$lib/onboarding/progress';
 	import {
 		checkPassword,
 		checkUsername,
@@ -137,6 +142,9 @@
 			const session = await createAccount({ username, password, baseUrl });
 			accountId = session.userId;
 			matrixSession.set(session);
+			// Which device this browser's store belongs to (#445): public, and
+			// the only way back into that store after a reload.
+			rememberDevice(session.deviceId);
 
 			// The crypto stack, and the SDK itself, arrive here and nowhere
 			// earlier: this dynamic import is what keeps screen 1 light.

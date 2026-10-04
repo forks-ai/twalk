@@ -3,12 +3,25 @@ import { describe, expect, it, vi } from 'vitest';
 import { renewRecoveryKey, type RenewableCrypto } from './renew';
 
 /** A crypto stack that records what it was asked to do. */
-function fakeCrypto(encodedPrivateKey: string | undefined) {
+function fakeCrypto(
+	encodedPrivateKey: string | undefined,
+	cached: { masterKey: boolean; selfSigningKey: boolean; userSigningKey: boolean } = {
+		masterKey: true,
+		selfSigningKey: true,
+		userSigningKey: true,
+	},
+) {
 	const bootstrapSecretStorage = vi.fn().mockResolvedValue(undefined);
 	const crypto: RenewableCrypto = {
 		createRecoveryKeyFromPassphrase: async () =>
 			({ encodedPrivateKey, privateKey: new Uint8Array() }) as never,
 		bootstrapSecretStorage,
+		getCrossSigningStatus: async () =>
+			({
+				publicKeysOnDevice: true,
+				privateKeysInSecretStorage: true,
+				privateKeysCachedLocally: cached,
+			}) as never,
 	};
 	return { crypto, bootstrapSecretStorage };
 }
@@ -75,5 +88,52 @@ describe('renewing the recovery key', () => {
 			'no displayable recovery key',
 		);
 		expect(bootstrapSecretStorage).not.toHaveBeenCalled();
+	});
+});
+
+describe('what renewing requires of this browser', () => {
+	/**
+	 * The precondition, enforced rather than assumed (#445).
+	 *
+	 * `bootstrapSecretStorage({ setupNewSecretStorage: true })` writes the
+	 * cross-signing secrets **the local store holds** into the new storage. A
+	 * browser that holds none would therefore replace the account's secret
+	 * storage with an empty one, and the owner would be shown a key that opens
+	 * nothing while the secrets that were in there became unreachable — a
+	 * silent loss, dressed as a success.
+	 *
+	 * So the stack is asked, and the answer is the screen's: "this browser no
+	 * longer holds your keys" stops being an inference from a missing session
+	 * and becomes something measured.
+	 */
+	it('refuses when the private keys are not in this browser', async () => {
+		const { crypto, bootstrapSecretStorage } = fakeCrypto(ENCODED, {
+			masterKey: false,
+			selfSigningKey: false,
+			userSigningKey: false,
+		});
+
+		await expect(renewRecoveryKey(crypto)).rejects.toThrow('no-local-keys');
+		expect(bootstrapSecretStorage).not.toHaveBeenCalled();
+	});
+
+	it('refuses when only some of the three are here', async () => {
+		// A half-populated store is not a store this may write from: the two
+		// secrets it could carry would be written and the third lost.
+		const { crypto, bootstrapSecretStorage } = fakeCrypto(ENCODED, {
+			masterKey: true,
+			selfSigningKey: true,
+			userSigningKey: false,
+		});
+
+		await expect(renewRecoveryKey(crypto)).rejects.toThrow('no-local-keys');
+		expect(bootstrapSecretStorage).not.toHaveBeenCalled();
+	});
+
+	it('goes ahead when all three are cached locally', async () => {
+		const { crypto, bootstrapSecretStorage } = fakeCrypto(ENCODED);
+
+		await expect(renewRecoveryKey(crypto)).resolves.toMatch(/^(\w{4} ){11}\w{4}$/);
+		expect(bootstrapSecretStorage).toHaveBeenCalledOnce();
 	});
 });

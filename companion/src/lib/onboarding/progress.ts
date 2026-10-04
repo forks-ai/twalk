@@ -54,6 +54,50 @@ export function restoreHomeserver(): string {
 	return '';
 }
 
+const DEVICE_KEY = 'twalk:device';
+
+/**
+ * Remembers **which Matrix device this browser's crypto store belongs to**
+ * (#445).
+ *
+ * The store holds exactly one account, and the rust crypto stack refuses to
+ * open it for another: a browser whose store was written by device
+ * `OMQYWMQVVC` and which signs in again — a new device, `KNUAUTXUYB` — is told
+ * `the account in the store doesn't match the account in the constructor`.
+ * Measured, which is how this exists. So the settings card cannot renew a key
+ * by signing in afresh; it has to sign in **as the device the store is for**,
+ * and Matrix's own login takes a `device_id` for exactly that.
+ *
+ * **A device id is not a credential.** It is a public identifier — it is in
+ * every `/keys/query` answer any member of a shared room can make — so this
+ * keeps nothing secret in browser storage, which is what makes it a smaller
+ * decision than keeping an access token would be (ADR 0014 argued the
+ * unencrypted store; a second long-lived credential beside it would want its
+ * own argument).
+ *
+ * Written whenever this browser's store is created or re-created: onboarding,
+ * recovery with a key, and a reset. A browser whose store predates this knows
+ * nothing, and the card says so rather than guessing.
+ */
+export function rememberDevice(deviceId: string): void {
+	try {
+		window.localStorage.setItem(DEVICE_KEY, deviceId);
+	} catch {
+		// Storage can be switched off; the card then asks the owner to use the
+		// recovery screen, which needs nothing remembered.
+	}
+}
+
+/** The device this browser's crypto store belongs to, or `null`. */
+export function restoreDevice(): string | null {
+	try {
+		const stored = window.localStorage.getItem(DEVICE_KEY);
+		return stored !== null && stored.length > 0 ? stored : null;
+	} catch {
+		return null;
+	}
+}
+
 /**
  * The live Matrix session: in memory, for this page's life. `null` before an
  * account exists and after a reload.
