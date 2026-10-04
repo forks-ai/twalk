@@ -14,6 +14,7 @@
 
 import type {
 	CreateSecretStorageOpts,
+	CrossSigningStatus,
 	GeneratedSecretStorageKey,
 } from 'matrix-js-sdk/lib/crypto-api';
 
@@ -26,7 +27,16 @@ import { groupRecoveryKey } from '$lib/recovery/key';
 export interface RenewableCrypto {
 	createRecoveryKeyFromPassphrase(): Promise<GeneratedSecretStorageKey>;
 	bootstrapSecretStorage(opts: CreateSecretStorageOpts): Promise<void>;
+	/** What this browser holds of the account's identity — see below. */
+	getCrossSigningStatus(): Promise<CrossSigningStatus>;
 }
+
+/**
+ * Thrown when this browser holds none of the account's cross-signing secrets,
+ * so there is nothing for a new key to be given (#445). The screen turns it
+ * into the one sentence an owner can act on.
+ */
+export const NO_LOCAL_KEYS = 'no-local-keys';
 
 /**
  * Generates a new recovery key, installs it as the account's secret storage,
@@ -50,6 +60,24 @@ export interface RenewableCrypto {
 export async function renewRecoveryKey(
 	crypto: RenewableCrypto,
 ): Promise<string> {
+	// **Asked, not assumed** (#445). `bootstrapSecretStorage` below writes the
+	// cross-signing secrets *this browser holds* into the new storage. A
+	// browser holding none would replace the account's secret storage with an
+	// empty one: the owner would be shown a key that opens nothing, while
+	// whatever was in there became unreachable. A silent loss dressed as a
+	// success, and the one outcome this function must not have.
+	//
+	// Until #445 the screen inferred this from the absence of a live client,
+	// which is a different question and was wrong on every normal visit: the
+	// client is built by onboarding and by the recovery screen, and nothing
+	// rebuilds one on a page load, so an owner whose keys were right there was
+	// told their browser had lost them.
+	const status = await crypto.getCrossSigningStatus();
+	const cached = status.privateKeysCachedLocally;
+	if (!cached.masterKey || !cached.selfSigningKey || !cached.userSigningKey) {
+		throw new Error(NO_LOCAL_KEYS);
+	}
+
 	const generated = await crypto.createRecoveryKeyFromPassphrase();
 	const encoded = generated.encodedPrivateKey;
 	if (encoded === undefined || encoded.length === 0) {

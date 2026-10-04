@@ -49,8 +49,11 @@
 	import Icon from '$lib/icons/Icon.svelte';
 	import RecoveryKeyCard from '$lib/components/RecoveryKeyCard.svelte';
 	import { currentClient } from '$lib/crypto/bootstrap';
-	import { renewRecoveryKey } from '$lib/crypto/renew';
-	import { domain } from '$lib/onboarding/domain';
+	import { NO_LOCAL_KEYS, renewRecoveryKey } from '$lib/crypto/renew';
+	import { domain, matrixBaseUrl } from '$lib/onboarding/domain';
+	import { homeserver, restoreHomeserver, restoreDevice } from '$lib/onboarding/progress';
+	import { gateway } from '$lib/api/client';
+	import type { CryptoApi } from 'matrix-js-sdk/lib/crypto-api';
 	import { locale, setLocale, t, LOCALES, type Locale } from '$lib/i18n';
 	import {
 		forgetModel,
@@ -107,6 +110,16 @@
 	 * running, or the key on screen once. `null` is the resting state.
 	 */
 	let renewing = $state<'asked' | 'working' | null>(null);
+	/**
+	 * What renewing needs that a page load does not have (#445): the owner's
+	 * Matrix ID, their password, and where a browser reaches the homeserver.
+	 * Only the password is typed; the other two are asked of the deployment.
+	 */
+	let renewPassword = $state('');
+	/** What this card says when nothing remembers the store's device (#445). */
+	const NO_REMEMBERED_DEVICE = 'no-remembered-device';
+	let owner = $state<string | null>(null);
+	let clientUrl = $state<string | null>(null);
 	let renewedKey = $state<string | null>(null);
 	let renewProblem = $state<string | null>(null);
 	let modelProblem = $state<Refused | null>(null);
@@ -202,7 +215,27 @@
 	);
 
 	onMount(() => {
+		restoreHomeserver();
 		void load();
+		void (async () => {
+			// Who this deployment serves and where its homeserver answers a
+			// browser: what a sign-in from this card needs, and what a page
+			// load does not carry (#445, #323).
+			try {
+				const [session, described] = await Promise.all([
+					gateway.GET('/api/session'),
+					gateway.GET('/api/deployment')
+				]);
+				owner = session.data?.owner ?? null;
+				clientUrl = described.data?.client_url ?? null;
+				if ($domain === '' && session.data !== undefined) {
+					domain.set(session.data.homeserver);
+				}
+			} catch {
+				// The rest of the screen is unaffected; the card says what it
+				// cannot do when the button is pressed.
+			}
+		})();
 	});
 
 	async function load() {
@@ -513,6 +546,19 @@
 		return refused.detail ?? $t('api.trouble.refused');
 	}
 
+	/** Where this browser reaches the homeserver (#323). */
+	const baseUrl = $derived(
+		matrixBaseUrl({
+			deploymentClientUrl: clientUrl,
+			discoveredHomeserver: $homeserver,
+			deploymentDomain: $domain,
+			effectiveDomain: $domain
+		})
+	);
+
+	/** Whether this page can renew without asking for a password. */
+	const liveClient = $derived(currentClient() !== null);
+
 	/**
 	 * Mints a new recovery key and installs it, from this browser's own crypto
 	 * store. It is irreversible and it is not a recovery: the key that was lost
@@ -522,21 +568,75 @@
 	async function renew(): Promise<void> {
 		renewing = 'working';
 		renewProblem = null;
-		const crypto = currentClient()?.getCrypto();
-		if (crypto === undefined || crypto === null) {
-			// No store in this browser: there is nothing to sign a new key with,
-			// which is exactly the situation this feature cannot rescue.
-			renewProblem = $t('settings.recoveryKey.noKeys');
-			renewing = null;
-			return;
-		}
 		try {
+			const crypto = currentClient()?.getCrypto() ?? (await signInForRenewal());
 			renewedKey = await renewRecoveryKey(crypto);
+			renewPassword = '';
 			renewing = null;
 		} catch (error) {
-			renewProblem = error instanceof Error ? error.message : String(error);
+			const detail = error instanceof Error ? error.message : String(error);
+			renewProblem =
+				detail === NO_LOCAL_KEYS
+					? $t('settings.recoveryKey.noKeys')
+					: detail === NO_REMEMBERED_DEVICE
+						? $t('settings.recoveryKey.noDevice')
+						: renewProblemOf(error, detail);
 			renewing = null;
 		}
+	}
+
+	/**
+	 * Signs in with the password the owner typed, and hands back the crypto
+	 * stack it brought up.
+	 *
+	 * **The password is asked for because a page load has no Matrix session**
+	 * (#445). The tab's client is built by onboarding and by the recovery
+	 * screen, and nothing rebuilds one afterwards — `matrixSession` is "in
+	 * memory, for this page's life", in its own words. So this card used to
+	 * answer "this browser no longer holds your keys" on every normal visit,
+	 * which was an inference from a missing session and was false whenever the
+	 * keys were right there.
+	 *
+	 * The same call the recovery screen makes when it has no key (#439), for
+	 * the same reason: it opens no secret storage. It costs one device, as
+	 * that screen does. A live client is still preferred when there is one, so
+	 * an owner who has just onboarded and walked over to the settings pays
+	 * nothing.
+	 */
+	async function signInForRenewal(): Promise<CryptoApi> {
+		// **As the device this browser's store belongs to**, not as a new one.
+		// The rust crypto store holds one account and refuses to open for
+		// another: a renewal that signed in afresh was told `the account in
+		// the store doesn't match the account in the constructor`, naming the
+		// two devices. Matrix's login takes a `device_id` for exactly this.
+		const device = restoreDevice();
+		if (device === null) {
+			// Nothing remembered — a store written before this browser learned
+			// to remember, or storage switched off. Said as what it is, rather
+			// than as a claim about the keys, which is the mistake this whole
+			// ticket is about.
+			throw new Error(NO_REMEMBERED_DEVICE);
+		}
+		const { signInWithoutRecoveryKey } = await import('$lib/crypto/bootstrap');
+		const session = await signInWithoutRecoveryKey({
+			baseUrl,
+			userId: owner ?? '',
+			password: renewPassword,
+			deviceId: device
+		});
+		return session.crypto;
+	}
+
+	/** A failure that is not the refusal, said in the owner's own language. */
+	function renewProblemOf(error: unknown, detail: string): string {
+		const problem = (error as { problem?: string }).problem;
+		if (problem === 'wrong-password') {
+			return $t('recover.error.wrong-password');
+		}
+		if (problem === 'unreachable') {
+			return $t('recover.error.unreachable', { url: baseUrl });
+		}
+		return detail;
 	}
 </script>
 
@@ -1275,8 +1375,33 @@
 				<p class="card card--warning small" data-testid="recovery-key-confirm">
 					{$t('settings.recoveryKey.confirm')}
 				</p>
+				{#if !liveClient}
+					<!--
+						A page load carries no Matrix session (#445), so the key
+						is signed by a sign-in made here. Asked for only when
+						there is no live client: an owner who has just onboarded
+						and walked over pays nothing.
+					-->
+					<div class="field">
+						<label class="label" for="renew-password">{$t('settings.recoveryKey.password')}</label>
+						<input
+							id="renew-password"
+							class="input"
+							type="password"
+							autocomplete="current-password"
+							bind:value={renewPassword}
+							data-testid="recovery-key-password"
+						/>
+						<p class="small muted">{$t('settings.recoveryKey.password.hint')}</p>
+					</div>
+				{/if}
 				<p>
-					<button class="button button--primary" onclick={renew} data-testid="recovery-key-go">
+					<button
+						class="button button--primary"
+						onclick={renew}
+						disabled={!liveClient && renewPassword.length === 0}
+						data-testid="recovery-key-go"
+					>
 						{$t('settings.recoveryKey.go')}
 					</button>
 					<button class="button" onclick={() => (renewing = null)}>

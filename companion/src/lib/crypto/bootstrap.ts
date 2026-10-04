@@ -361,6 +361,8 @@ export async function signInWithoutRecoveryKey(options: {
 	userId: string;
 	password: string;
 	deviceName?: string;
+	/** Sign in as this device, to reach the store it owns (#445). */
+	deviceId?: string;
 	onStep?: (step: 'signing-in' | 'loading-crypto') => void;
 }): Promise<{
 	crypto: CryptoApi;
@@ -374,7 +376,8 @@ export async function signInWithoutRecoveryKey(options: {
 		options.baseUrl,
 		options.userId,
 		options.password,
-		options.deviceName
+		options.deviceName,
+		options.deviceId
 	);
 
 	onStep('loading-crypto');
@@ -413,7 +416,21 @@ export async function passwordLogin(
 	baseUrl: string,
 	userId: string,
 	password: string,
-	deviceName?: string
+	deviceName?: string,
+	/**
+	 * Sign in **as this device** rather than creating one (#445).
+	 *
+	 * Matrix's login takes a `device_id`, and a known one is re-used: the
+	 * homeserver issues a fresh access token and the device keeps its
+	 * cryptographic identity. That is the only way to reach this browser's
+	 * crypto store, which holds one account and refuses to open for another —
+	 * `the account in the store doesn't match the account in the constructor`,
+	 * measured on a renewal that signed in afresh.
+	 *
+	 * Its previous token stops working, which is what re-logging into a device
+	 * means and is why nothing calls this with a device another tab is using.
+	 */
+	deviceId?: string
 ): Promise<{ userId: string; deviceId: string; accessToken: string }> {
 	let response: Response;
 	try {
@@ -425,7 +442,8 @@ export async function passwordLogin(
 				type: 'm.login.password',
 				identifier: { type: 'm.id.user', user: userId },
 				password,
-				initial_device_display_name: deviceName ?? 'Twalk Companion'
+				initial_device_display_name: deviceName ?? 'Twalk Companion',
+				...(deviceId === undefined ? {} : { device_id: deviceId })
 			})
 		});
 	} catch (cause) {

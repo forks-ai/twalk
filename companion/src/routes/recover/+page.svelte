@@ -46,7 +46,12 @@
 		isValidDomain,
 		normaliseDomain
 	} from '$lib/onboarding/domain';
-	import { homeserver, restoreHomeserver, matrixSession } from '$lib/onboarding/progress';
+	import {
+		homeserver,
+		restoreHomeserver,
+		matrixSession,
+		rememberDevice
+	} from '$lib/onboarding/progress';
 	import { localpartOf } from '$lib/onboarding/account';
 	import { decodeRecoveryKey, groupRecoveryKey, type RecoveryKeyProblem } from '$lib/recovery/key';
 	import type { ResetCost, ResettableCrypto } from '$lib/crypto/reset';
@@ -221,6 +226,8 @@
 				deviceId: result.deviceId,
 				accessToken: result.accessToken
 			});
+			// The store this browser now owns is this device's (#445).
+			rememberDevice(result.deviceId);
 
 			// A device that has just come back needs a Gateway session too:
 			// the cookie may have been evicted with the store.
@@ -320,6 +327,7 @@
 				deviceId: signedIn.deviceId,
 				accessToken: signedIn.accessToken
 			});
+			rememberDevice(signedIn.deviceId);
 
 			// As on the restore path: the Gateway cookie may have gone with the
 			// store, and the keys are back either way if this fails.
