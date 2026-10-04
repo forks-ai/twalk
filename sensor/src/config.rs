@@ -56,17 +56,35 @@ pub struct Config {
     /// dead-letter subject (SENSOR_SEND_RETRY_MAX_ATTEMPTS, default 5).
     pub send_retry_max_attempts: i64,
     /// The **Sensor account's own** recovery key (SENSOR_RECOVERY_KEY,
-    /// optional), kept by the operator from provisioning that account —
-    /// never the user's recovery key, which no Twalk service may hold
-    /// (ADR 0011, `docs/architecture/security-model.md`). When set, the
-    /// Sensor opens its own account's secret storage with it at startup and
-    /// imports that account's cross-signing secrets and key-backup
-    /// decryption key, so a replacement device regains the backed-up
-    /// room-key history. When unset, the Sensor relies on its
-    /// local crypto store only: new traffic still decrypts (senders share
-    /// Megolm keys with its device), history from before the device existed
-    /// does not.
+    /// optional), kept by the operator — never the user's recovery key, which
+    /// no Twalk service may hold (ADR 0011,
+    /// `docs/architecture/security-model.md`). When set, the Sensor opens its
+    /// own account's secret storage with it at startup and imports that
+    /// account's cross-signing secrets and key-backup decryption key, so a
+    /// replacement device regains the backed-up room-key history. When unset,
+    /// the Sensor relies on its local crypto store only: new traffic still
+    /// decrypts (senders share Megolm keys with its device), history from
+    /// before the device existed does not.
+    ///
+    /// Where the operator gets one is [`Self::recovery_key_out`]. It used to
+    /// say "kept from provisioning that account", and provisioning never
+    /// produced one — which is how the reference deployment came to hold a key
+    /// backup nothing could open (#451).
     pub recovery_key: Option<String>,
+    /// Where to write the Sensor account's recovery key when the account has
+    /// no secret storage yet (SENSOR_RECOVERY_KEY_OUT, optional).
+    ///
+    /// Set it on one start and the Sensor mints the key, writes it there at
+    /// mode 0600, and says so in one line; the operator takes it off the host,
+    /// into `SENSOR_RECOVERY_KEY` or wherever they keep secrets, and deletes
+    /// the file. Left unset, nothing is minted and the Sensor says once what
+    /// that costs: its key backup is then sealed by a secret kept only in the
+    /// store the backup exists to insure, so losing the store loses both.
+    ///
+    /// A path **inside** [`Self::state_dir`] is refused at startup rather than
+    /// written: a copy that dies with what it protects is not a copy. See
+    /// `crate::recovery_key`.
+    pub recovery_key_out: Option<PathBuf>,
     /// Origin of the Companion Gateway, e.g. `http://companion-gateway:8080`
     /// (SENSOR_GATEWAY_URL). The Sensor reads the consent snapshot there at
     /// startup and then follows the bus from the position it names
@@ -187,6 +205,10 @@ impl Config {
             send_retry_base: Duration::from_millis(optional("SENSOR_SEND_RETRY_BASE_MS", 1000)?),
             send_retry_max_attempts: optional("SENSOR_SEND_RETRY_MAX_ATTEMPTS", 5)?,
             recovery_key: optional_string("SENSOR_RECOVERY_KEY"),
+            recovery_key_out: std::env::var("SENSOR_RECOVERY_KEY_OUT")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             gateway_url: optional_string("SENSOR_GATEWAY_URL"),
             gateway_service_token: optional_string("SENSOR_GATEWAY_SERVICE_TOKEN"),
             owner: optional_string("SENSOR_OWNER"),

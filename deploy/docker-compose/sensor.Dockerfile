@@ -32,10 +32,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system sensor \
-    && mkdir -p /data \
-    && chown sensor:sensor /data
+    && mkdir -p /data /keys \
+    && chown sensor:sensor /data /keys
 COPY --from=build /usr/local/bin/twalk-sensor /usr/local/bin/twalk-sensor
 # /data is the default SENSOR_STATE_DIR; a fresh named volume inherits this
-# ownership.
+# ownership. /keys exists for the same reason and must be a *different*
+# volume: it receives SENSOR_RECOVERY_KEY_OUT, whose whole purpose is to
+# outlive /data, and the Sensor refuses to write the key inside the store it
+# insures (#451).
 USER sensor
 ENTRYPOINT ["twalk-sensor"]

@@ -17,3 +17,4 @@ pub mod network;
 pub mod normalize;
 pub mod outbound;
 pub mod owner_device;
+pub mod recovery_key;

@@ -13,6 +13,7 @@ use futures::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::{ProcessedToDeviceEvent, RawAnySyncOrStrippedState};
+use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::ruma::api::client::filter::{
     Filter as EventTypeFilter, FilterDefinition, RoomEventFilter, RoomFilter,
@@ -234,6 +235,125 @@ async fn main() -> Result<()> {
                 %error,
                 "recovery with SENSOR_RECOVERY_KEY failed; continuing with the local device identity only"
             ),
+        }
+    }
+
+    // And when nobody ever had one to configure (#451). The block above *uses*
+    // a recovery key; this one mints the account's first, because a key backup
+    // whose key lives only inside the crypto store it insures protects
+    // nothing: a replacement device starts empty, finds no backup key, and
+    // what is in the backup stays sealed. Measured on the reference
+    // deployment — a live backup, twenty room keys over seven rooms, and no
+    // secret storage at all.
+    //
+    // `Recovery::enable` creates the secret storage key and uploads the
+    // secrets this device already holds, the existing backup key among them.
+    // So on a deployment that has run without one, this does not only protect
+    // what comes next: it makes the keys already in the backup openable.
+    //
+    // The decision is `recovery_key::decide`, with no I/O, so each course is a
+    // case a test states rather than a branch read off this function.
+    {
+        use twalk_sensor::recovery_key::{decide, Plan, StorageState};
+        let recovery = client.encryption().recovery();
+        let state = match recovery.state() {
+            RecoveryState::Unknown => StorageState::Unknown,
+            RecoveryState::Enabled => StorageState::Enabled,
+            RecoveryState::Disabled => StorageState::Disabled,
+            RecoveryState::Incomplete => StorageState::Incomplete,
+        };
+        match decide(
+            config.recovery_key.is_some(),
+            state,
+            config.recovery_key_out.as_deref(),
+            config.state_dir.as_deref(),
+        ) {
+            Plan::OperatorHasOne | Plan::AlreadyEnabled | Plan::TooEarly => {}
+            Plan::IncompleteWithoutTheKey => warn!(
+                "this account's secret storage exists but this device is missing some of its \
+                 secrets, and no SENSOR_RECOVERY_KEY is configured to import them. Only that key \
+                 can complete this device; minting a second one would orphan the first"
+            ),
+            Plan::NoOutputConfigured => warn!(
+                "this account has no secret storage, so the key that opens its server-side key \
+                 backup exists only in this crypto store — the one thing the backup is meant to \
+                 survive. Losing the store loses both, and SENSOR_RECOVERY_KEY cannot help \
+                 because there is nothing for it to open. Set SENSOR_RECOVERY_KEY_OUT to a file \
+                 outside SENSOR_STATE_DIR for one start and the key is minted there (#451)"
+            ),
+            // A configured-but-impossible instruction about a secret, caught
+            // before any crypto runs: the operator's to fix, the way a
+            // configured-but-unusable metrics endpoint is.
+            Plan::RefusedInsideTheStore { out, state_dir } => {
+                return Err(anyhow!(
+                    "SENSOR_RECOVERY_KEY_OUT ({}) is inside SENSOR_STATE_DIR ({}). The key would \
+                     then be lost with the very store it exists to survive — a copy that dies \
+                     with what it protects is not a copy. Name a file outside the store",
+                    out.display(),
+                    state_dir.display()
+                ))
+            }
+            // Three steps in an order that matters, and none of them fatal:
+            // this is an opt-in the operator turned on, and failing it must
+            // not take observation down with it — the posture the configured
+            // recovery above already takes.
+            Plan::MintInto(path) => {
+                // **Prove the file can be written before minting anything.** A
+                // key created on the account and then not written down is
+                // worse than no key: secret storage would exist, sealed by
+                // something nobody holds, and the account would be stuck that
+                // way. So an empty file first, at the mode the real one needs.
+                if let Err(error) = write_private_file(&path, b"") {
+                    error!(
+                        %error,
+                        path = %path.display(),
+                        "SENSOR_RECOVERY_KEY_OUT cannot be written, so no key was minted — a key \
+                         created on the account and then not written down would seal its secret \
+                         storage with something nobody has. Fix the path or its permissions and \
+                         start again (#451)"
+                    );
+                } else {
+                    // Deliberately not `wait_for_backups_to_upload`: the
+                    // upload runs on the sync loop this function is about to
+                    // start, and an account with a long history would hold up
+                    // observing for it.
+                    match recovery.enable().await {
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&path);
+                            error!(
+                                %error,
+                                "could not create this account's secret storage, so it still has \
+                                 no recovery key; continuing with the local device identity only. \
+                                 A key backup that exists on the homeserver and that this device \
+                                 is not connected to is the usual cause (#451)"
+                            );
+                        }
+                        Ok(key) => match write_private_file(&path, key.as_bytes()) {
+                            Ok(()) => info!(
+                                path = %path.display(),
+                                state = ?recovery.state(),
+                                "minted this account's recovery key and wrote it at mode 0600. \
+                                 Take it off this host — into SENSOR_RECOVERY_KEY or wherever you \
+                                 keep secrets — and delete the file: left here, it is lost with \
+                                 the store it exists to survive. The room keys already in the key \
+                                 backup become openable with it (#451)"
+                            ),
+                            // The window the empty-file probe above narrows to
+                            // almost nothing, said plainly because the account
+                            // is then in the state that probe exists to avoid.
+                            Err(error) => error!(
+                                %error,
+                                path = %path.display(),
+                                "this account's secret storage was created but its recovery key \
+                                 could not be written down, so the key backup is now sealed by a \
+                                 key nobody holds. Delete the account's \
+                                 m.secret_storage.default_key and start again with a writable \
+                                 path (#451)"
+                            ),
+                        },
+                    }
+                }
+            }
         }
     }
 
