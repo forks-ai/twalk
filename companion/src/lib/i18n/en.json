@@ -603,7 +603,9 @@
 
 	"recover.title": "Your keys are not on this device",
 	"recover.intro": "This is normal, not a failure. Twalk keeps your encryption keys in this browser alone, and a browser can throw them away — iOS deletes them after seven days without opening the app, and clearing your browsing data does it too.",
-	"recover.fix": "Your recovery key puts them back. Nothing is lost.",
+	"recover.fix": "Your recovery key restores this browser’s identity as a device of your account. It does not bring conversations back: the Companion never reads or keeps any.",
+	"recover.carryOn": "You can carry on without it. Approvals, settings and mail triage all work — this page is the only one that needs the key.",
+	"recover.carryOn.link": "Go to approvals",
 	"recover.domain.label": "Your Twalk domain",
 	"recover.install": "Install Twalk to your home screen to stop iOS from doing it again.",
 	"recover.account": "Account {id}",

@@ -367,6 +367,20 @@
 			<Icon name="phone" size="dense" />
 			{$t('recover.install')}
 		</p>
+
+		<!--
+			The way out, and it has to be here. Only `/` asks whether the crypto
+			store exists; approvals, every settings screen and mail triage do
+			not, and they work untouched without the key. A screen that gates
+			one route out of six and offers no exit reads as a locked
+			application, which is how the owner of the reference deployment
+			concluded they had to reset and lose their history (#433). It is
+			quiet and it is last: entering the key is still the thing to do.
+		-->
+		<p class="small muted" data-testid="recover-carry-on">
+			{$t('recover.carryOn')}
+			<a href="/approvals">{$t('recover.carryOn.link')}</a>
+		</p>
 	{/if}
 </section>
 
