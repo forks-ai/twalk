@@ -458,6 +458,8 @@
 	"screen1.retry": "Reintentar",
 	"screen1.signedIn.title": "Ya has iniciado sesión",
 	"screen1.signedIn.body": "Este navegador ya tiene una sesión para {owner}.",
+	"screen1.keysGone.body": "Este navegador ya no tiene tus claves de cifrado — aquí nada depende de ello, y el resto de Twalk funciona como siempre. Tu clave de recuperación devuelve este navegador a los dispositivos de tu cuenta.",
+	"screen1.keysGone.link": "Devolver mis claves",
 	"screen1.signedIn.continue": "Continuar la configuración",
 	"screen2.back": "Cambiar el dominio",
 	"screen2.title": "Crea tu cuenta",

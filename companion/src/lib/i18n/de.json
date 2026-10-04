@@ -458,6 +458,8 @@
 	"screen1.retry": "Erneut versuchen",
 	"screen1.signedIn.title": "Du bist angemeldet",
 	"screen1.signedIn.body": "Dieser Browser hält bereits eine Sitzung für {owner}.",
+	"screen1.keysGone.body": "Dieser Browser hat deine Verschlüsselungsschlüssel nicht mehr — hier hängt nichts davon ab, und der Rest von Twalk funktioniert wie zuvor. Dein Wiederherstellungsschlüssel nimmt diesen Browser wieder unter die Geräte deines Kontos auf.",
+	"screen1.keysGone.link": "Meine Schlüssel zurückholen",
 	"screen1.signedIn.continue": "Einrichtung fortsetzen",
 	"screen2.back": "Domain ändern",
 	"screen2.title": "Konto anlegen",

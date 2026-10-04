@@ -503,6 +503,8 @@
 	"screen1.retry": "Try again",
 	"screen1.signedIn.title": "You are signed in",
 	"screen1.signedIn.body": "This browser already holds a session for {owner}.",
+	"screen1.keysGone.body": "This browser no longer holds your encryption keys — nothing here is blocked by that, and the rest of Twalk works as it always did. Your recovery key puts this browser back among your account’s devices.",
+	"screen1.keysGone.link": "Put my keys back",
 	"screen1.signedIn.continue": "Continue setting up",
 
 	"screen2.back": "Change the domain",

@@ -29,6 +29,7 @@
 	import { probeDeployment, type DeploymentOutcome } from '$lib/onboarding/deployment';
 	import { rememberHomeserver } from '$lib/onboarding/progress';
 	import { gateway } from '$lib/api/client';
+	import { arrivalFor } from '$lib/landing/arrival';
 
 	let typed = $state('');
 	/** Errors appear after the field has been left, not while typing into it. */
@@ -36,6 +37,12 @@
 	let submitting = $state(false);
 	let failure = $state<DeploymentOutcome | null>(null);
 	let signedInAs = $state<string | null>(null);
+	/**
+	 * The browser threw the crypto store away. A notice, never a gate: this is
+	 * the only screen that asks, and the rest of the application needs no key
+	 * (#433).
+	 */
+	let keysGone = $state(false);
 
 	const normalised = $derived(normaliseDomain(typed));
 	const valid = $derived(isValidDomain(typed));
@@ -59,16 +66,18 @@
 			// on "Continue" will say so properly.
 			return;
 		}
-		if (owner === null) {
-			return;
-		}
 		const { hasCryptoStore } = await import('$lib/crypto/store');
-		if (!(await hasCryptoStore())) {
-			// The designed path of ADR 0014: signed in, keys evicted.
-			await goto('/recover');
+		const arrival = arrivalFor(owner, await hasCryptoStore());
+		if (arrival.kind === 'form') {
 			return;
 		}
-		signedInAs = owner;
+		// Signed in, with or without the keys. ADR 0014 calls the recovery
+		// screen the designed path for an evicted store, and it still is —
+		// what is gone is the redirect that **took** the user there. Only this
+		// screen asks whether the store exists, so sending them away gated six
+		// screens on a key that five of them never needed (#433).
+		signedInAs = arrival.owner;
+		keysGone = arrival.keysGone;
 	}
 
 	async function submit(event: SubmitEvent) {
@@ -148,6 +157,12 @@
 				{$t('screen1.signedIn.title')}
 			</p>
 			<p>{$t('screen1.signedIn.body', { owner: signedInAs })}</p>
+			{#if keysGone}
+				<p data-testid="keys-gone">
+					{$t('screen1.keysGone.body')}
+					<a href="/recover">{$t('screen1.keysGone.link')}</a>
+				</p>
+			{/if}
 			<p>
 				<!-- The dashboard, not the account form: the wireframe's screen 5
 				     is what a returning user opens the Companion for, and this

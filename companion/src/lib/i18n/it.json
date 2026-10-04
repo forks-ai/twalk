@@ -458,6 +458,8 @@
 	"screen1.retry": "Riprova",
 	"screen1.signedIn.title": "Hai già effettuato l'accesso",
 	"screen1.signedIn.body": "Questo browser ha già una sessione per {owner}.",
+	"screen1.keysGone.body": "Questo browser non conserva più le tue chiavi di cifratura — qui non dipende nulla da questo, e il resto di Twalk funziona come prima. La tua chiave di recupero rimette questo browser fra i dispositivi del tuo account.",
+	"screen1.keysGone.link": "Rimettere le mie chiavi",
 	"screen1.signedIn.continue": "Continua la configurazione",
 	"screen2.back": "Cambia il dominio",
 	"screen2.title": "Crea il tuo account",

@@ -204,6 +204,8 @@
 	"screen1.retry": "Réessayer",
 	"screen1.signedIn.title": "Vous êtes connecté",
 	"screen1.signedIn.body": "Ce navigateur a déjà une session pour {owner}.",
+	"screen1.keysGone.body": "Ce navigateur ne détient plus vos clés de chiffrement — rien ici n'en dépend, et le reste de Twalk fonctionne comme avant. Votre clé de récupération remet ce navigateur au nombre des appareils de votre compte.",
+	"screen1.keysGone.link": "Remettre mes clés",
 	"screen1.signedIn.continue": "Poursuivre l'installation",
 
 	"screen2.back": "Changer de domaine",
