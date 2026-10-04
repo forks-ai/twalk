@@ -16,22 +16,22 @@
 
 /** What the landing page should show. */
 export type Arrival =
-  /** No session on this browser: ask which deployment, as screen 1 always has. */
-  | { kind: "form" }
-  /**
+	/** No session on this browser: ask which deployment, as screen 1 always has. */
+	| { kind: 'form' }
+	/**
    * A session this browser already holds. `keysGone` says the crypto store
    * is missing — which changes what is offered, and nothing about access.
    */
-  | { kind: "signed-in"; owner: string; keysGone: boolean };
+	| { kind: 'signed-in'; owner: string; keysGone: boolean };
 
 /**
  * `owner` is what `GET /api/session` answered, `hasKeys` whether the crypto
  * store is present. A Gateway that did not answer is `null`, and lands on the
- * form: the probe behind "Continue" will say so properly.
+ * form: the probe behind 'Continue' will say so properly.
  */
 export function arrivalFor(owner: string | null, hasKeys: boolean): Arrival {
-  if (owner === null) {
-    return { kind: "form" };
-  }
-  return { kind: "signed-in", owner, keysGone: !hasKeys };
+	if (owner === null) {
+		return { kind: 'form' };
+	}
+	return { kind: 'signed-in', owner, keysGone: !hasKeys };
 }
