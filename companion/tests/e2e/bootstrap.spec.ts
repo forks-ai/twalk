@@ -639,7 +639,7 @@ test.describe.serial('the bootstrap journey', () => {
 			'true'
 		);
 		await expect(page.getByTestId('recover-done')).toHaveAttribute('data-device-signed', 'true');
-		await expect(page.getByTestId('recover-done')).toContainText(/open as before/i);
+		await expect(page.getByTestId('recover-done')).toContainText(/identity is restored/i);
 
 		// And the fact that matters to everyone *else*: the homeserver carries
 		// a signature on this device by the account's own self-signing key, so
