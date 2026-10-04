@@ -346,7 +346,7 @@
 	"recover.error.unreachable": "Rien n'a répondu à {url} : ni votre mot de passe ni votre clé n'ont encore été envoyés. Vérifiez l'adresse ci-dessus — un port s'oublie vite — et votre connexion.",
 	"recover.error.failed": "La récupération n'a pas pu aboutir. {detail}",
 	"recover.done.title": "Cet appareil est de retour",
-	"recover.done.body": "Vos clés sont de nouveau sur cet appareil et il est vérifié. Vos conversations chiffrées s'ouvrent comme avant.",
+	"recover.done.body": "Vos clés sont de nouveau sur cet appareil et il est vérifié. Votre identité est rétablie : ce navigateur compte de nouveau parmi vos appareils, et c'est par elle que les autres sont vérifiés.",
 	"recover.done.unverified": "Vos clés sont revenues, mais cet appareil n'a pas pu être vérifié. Ouvrez les diagnostics avant d'aller plus loin.",
 	"recover.done.backup": "Votre sauvegarde de clés est de nouveau connectée.",
 	"recover.noKey.offer": "Pas de clé de récupération ? Il y a un retour possible sans elle, et ce n'est pas une récupération : ce compte reçoit une nouvelle identité et une nouvelle clé. Vous saurez ce que cela coûte avant de choisir.",

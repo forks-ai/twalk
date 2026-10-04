@@ -645,7 +645,7 @@
 	"recover.error.unreachable": "Nothing answered at {url}, so nothing has seen your password or your key yet. Check the address above — a port is easy to leave out — and your connection.",
 	"recover.error.failed": "The recovery could not be completed. {detail}",
 	"recover.done.title": "This device is back",
-	"recover.done.body": "Your keys are on this device again and it is verified. Your encrypted conversations open as before.",
+	"recover.done.body": "Your keys are on this device again and it is verified. Your identity is restored: this browser counts as one of your devices, and it is what verifies the others.",
 	"recover.done.unverified": "Your keys came back, but this device could not be verified. Open diagnostics before going further.",
 	"recover.done.backup": "Your key backup is connected again.",
 	"recover.noKey.offer": "No recovery key? There is a way back without it, and it is not a recovery: this account gets a new identity and a new key. You will be told what that costs before you choose.",
