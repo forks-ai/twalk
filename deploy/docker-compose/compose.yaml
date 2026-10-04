@@ -168,6 +168,11 @@ services:
       SENSOR_LOG_LEVEL: ${SENSOR_LOG_LEVEL:-info}
       SENSOR_METRICS_LISTEN: ${SENSOR_METRICS_LISTEN:-}
       SENSOR_RECOVERY_KEY: ${SENSOR_RECOVERY_KEY:-}
+      # Set for one start to mint the Sensor account's own recovery key
+      # into the sensor-keys volume below, then take it off this host and
+      # delete the file — see ../README.md and #451. A path inside
+      # SENSOR_STATE_DIR is refused at startup.
+      SENSOR_RECOVERY_KEY_OUT: ${SENSOR_RECOVERY_KEY_OUT:-}
       # The operator, and the identities their own messages arrive under
       # (ticket #109, ADR 0018). SENSOR_OWNER is the same human as
       # GATEWAY_OWNER and defaults to it; SENSOR_OWNER_IDENTITIES is the set
@@ -226,6 +231,9 @@ services:
       # Session, sync token and crypto store: a restart resumes the sync
       # instead of re-syncing (and re-emitting) recent traffic.
       - sensor-data:/data
+      # Where SENSOR_RECOVERY_KEY_OUT can be written, and deliberately not
+      # the volume above: the key exists to survive losing that one (#451).
+      - sensor-keys:/keys
     # The sensor exits on an unreachable homeserver or bus and on a missing
     # account (should provisioning have been skipped or failed); compose
     # restarts it until both are there.
@@ -1310,6 +1318,11 @@ volumes:
   synapse-data:
   nats-data:
   sensor-data:
+  # Receives the Sensor account's recovery key on the one start that mints it
+  # (SENSOR_RECOVERY_KEY_OUT, #451). It is meant to be emptied: take the key
+  # off this host and delete the file. Separate from sensor-data on purpose —
+  # a copy of the key that dies with the store it protects is not a copy.
+  sensor-keys:
   gateway-data:
   # The collector's grant (#274). Deleting it is revoking the collector's
   # access from this side; the SSO still holds the grant until the owner

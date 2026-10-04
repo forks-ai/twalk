@@ -25,6 +25,26 @@ Two consequences are worth knowing before it happens rather than after:
 
 The registration relay's own refusal does not depend on that row either: the homeserver's `M_USER_IN_USE` closes the window on a second attempt whatever the store remembers.
 
+## What the Sensor's state directory holds, and the key that outlives it
+
+The Sensor keeps its session, sync token and **crypto store** on the `sensor-data` volume (`SENSOR_STATE_DIR`, `/data` in the container). Among what that store holds are the Megolm keys for every encrypted conversation it observes — and the key that opens the account's server-side key backup.
+
+That last one is the trap. The Sensor creates a key backup when the account has none, so that room keys survive a device replacement; but the key that opens the backup starts out **only in the crypto store the backup exists to insure**. A replacement device starts with an empty store, finds no backup key, and what is in the backup stays sealed. The reference deployment ran that way for days: a live backup, twenty room keys over seven conversations, and no secret storage at all ([#451](https://github.com/linagora/twalk/issues/451)).
+
+So, once per deployment, name a file for the key and start the Sensor:
+
+```
+SENSOR_RECOVERY_KEY_OUT=/keys/sensor-recovery-key
+```
+
+The Sensor mints the account's recovery key, writes it there at mode 0600, and says so in one line. **Then take it off this host** — into `SENSOR_RECOVERY_KEY`, or wherever you keep secrets — and delete the file. Left beside the store, it is lost with the store, which is the one thing it exists to survive. The path must be outside `SENSOR_STATE_DIR`: one inside is refused at startup rather than written, because a copy that dies with what it protects is not a copy.
+
+`/keys` is already there for this: a `sensor-keys` volume of its own, owned by the user the Sensor runs as, deliberately not the volume the store is on. Read the key with `docker compose exec sensor cat /keys/sensor-recovery-key`, then `rm` it.
+
+What that key is for, on the morning after losing the volume: set `SENSOR_RECOVERY_KEY` and the replacement device rejoins the **same** cryptographic identity and downloads the backed-up room keys, instead of starting a new identity that can read nothing from before itself.
+
+Two things it is not. It is **not your own** recovery key — yours stays with you, and no Twalk service may hold it (ADR 0011, `docs/architecture/security-model.md`). And it is not minted behind your back: with `SENSOR_RECOVERY_KEY_OUT` unset the Sensor keeps working and says once, in the log, what the absence costs.
+
 ## Hermes, and the two things it asks of you
 
 Hermes is part of that one step, so `docker compose up -d --wait` gives you a deployment where the whole loop can close: a contact writes, a persona drafts a reply, you approve it in the Companion, and the reply reaches the room. `hermes/tests/full_loop.rs` runs exactly this stack and asserts exactly that.
