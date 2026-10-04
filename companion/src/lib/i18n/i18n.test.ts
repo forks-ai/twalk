@@ -201,10 +201,10 @@ describe('the catalogues', () => {
 			endsAt: '18:30',
 			day: 'jeudi',
 			// What a reset costs this account (#439): how many of the account's
-			// devices its identity has signed, and how many of them there are.
-			// `count` — the room keys in the backup — is above.
-			signed: 1,
-			devices: 3
+			// devices its identity has signed. `count` — the room keys in the
+			// backup — is above, and the account's total is on the element
+			// rather than in the sentence.
+			signed: 1
 		};
 		for (const locale of LOCALES) {
 			for (const key of Object.keys(en) as (keyof typeof en)[]) {

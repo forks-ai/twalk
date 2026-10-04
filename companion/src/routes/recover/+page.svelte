@@ -366,13 +366,16 @@
 			<h1>{$t('recover.cost.title')}</h1>
 			<p class="subtitle">{$t('recover.cost.intro')}</p>
 		</header>
+		<!--
+			The account's total is on the element and not in the sentence: "one of
+			your 1 devices" is reachable and reads as a bug, and the number the
+			owner acts on is how many devices lose their signature. The journey
+			asserts both attributes.
+		-->
 		<ul class="stack" data-testid="recover-cost" data-signed={cost?.signedDevices}
 			data-devices={cost?.devices} data-room-keys={cost?.roomKeys ?? 'none'}>
 			<li>
-				{$t('recover.cost.devices', {
-					signed: cost?.signedDevices ?? 0,
-					devices: cost?.devices ?? 0
-				})}
+				{$t('recover.cost.devices', { signed: cost?.signedDevices ?? 0 })}
 			</li>
 			<li>
 				{#if cost?.roomKeys === null || cost?.roomKeys === undefined}
