@@ -1,7 +1,7 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from 'vitest';
 
 /**
  * The recovery screen offers a way past itself — approvals, settings and mail
@@ -19,40 +19,40 @@ import { describe, expect, it } from "vitest";
  * takes on purpose — and then `recover.carryOn` has to stop promising what it
  * no longer delivers.
  */
-describe("the crypto store", () => {
-  const routes = join(import.meta.dirname ?? "src/routes");
+describe('the crypto store', () => {
+	const routes = join(import.meta.dirname ?? 'src/routes');
 
-  /** Every `+page.svelte` under `src/routes`, by its route path. */
-  function screens(
-    dir: string,
-    route = "/",
-  ): { route: string; source: string }[] {
-    const found: { route: string; source: string }[] = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        found.push(
-          ...screens(
-            path,
-            route === "/" ? `/${entry.name}` : `${route}/${entry.name}`,
-          ),
-        );
-      } else if (entry.name === "+page.svelte") {
-        found.push({ route, source: readFileSync(path, "utf8") });
-      }
-    }
-    return found;
-  }
+	/** Every `+page.svelte` under `src/routes`, by its route path. */
+	function screens(
+		dir: string,
+		route = '/',
+	): { route: string; source: string }[] {
+		const found: { route: string; source: string }[] = [];
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const path = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				found.push(
+					...screens(
+						path,
+						route === '/' ? `/${entry.name}` : `${route}/${entry.name}`,
+					),
+				);
+			} else if (entry.name === '+page.svelte') {
+				found.push({ route, source: readFileSync(path, 'utf8') });
+			}
+		}
+		return found;
+	}
 
-  it("is read by the landing page and by no other screen", () => {
-    const asking = screens(routes)
-      .filter(
-        ({ source }) =>
-          source.includes("crypto/store") || source.includes("hasCryptoStore"),
-      )
-      .map(({ route }) => route)
-      .sort();
+	it('is read by the landing page and by no other screen', () => {
+		const asking = screens(routes)
+			.filter(
+				({ source }) =>
+					source.includes('crypto/store') || source.includes('hasCryptoStore'),
+			)
+			.map(({ route }) => route)
+			.sort();
 
-    expect(asking).toEqual(["/"]);
-  });
+		expect(asking).toEqual(['/']);
+	});
 });

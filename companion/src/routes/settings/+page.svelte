@@ -47,6 +47,10 @@
 	import { onMount } from 'svelte';
 
 	import Icon from '$lib/icons/Icon.svelte';
+	import RecoveryKeyCard from '$lib/components/RecoveryKeyCard.svelte';
+	import { currentClient } from '$lib/crypto/bootstrap';
+	import { renewRecoveryKey } from '$lib/crypto/renew';
+	import { domain } from '$lib/onboarding/domain';
 	import { locale, setLocale, t, LOCALES, type Locale } from '$lib/i18n';
 	import {
 		forgetModel,
@@ -98,6 +102,13 @@
 		| { kind: 'refused'; refused: Refused };
 
 	let loaded = $state(false);
+	/**
+	 * Replacing the recovery key (#433). Three states and no form: asked for,
+	 * running, or the key on screen once. `null` is the resting state.
+	 */
+	let renewing = $state<'asked' | 'working' | null>(null);
+	let renewedKey = $state<string | null>(null);
+	let renewProblem = $state<string | null>(null);
 	let modelProblem = $state<Refused | null>(null);
 	let languageProblem = $state<Refused | null>(null);
 	let configuration = $state<ModelConfiguration | null>(null);
@@ -500,6 +511,32 @@
 			return $t(key, { status: refused.endpointStatus ?? '', detail: refused.detail ?? '' });
 		}
 		return refused.detail ?? $t('api.trouble.refused');
+	}
+
+	/**
+	 * Mints a new recovery key and installs it, from this browser's own crypto
+	 * store. It is irreversible and it is not a recovery: the key that was lost
+	 * stays lost, and anything sealed with it that is not in this browser stays
+	 * sealed. The screen says so before the button, not after.
+	 */
+	async function renew(): Promise<void> {
+		renewing = 'working';
+		renewProblem = null;
+		const crypto = currentClient()?.getCrypto();
+		if (crypto === undefined || crypto === null) {
+			// No store in this browser: there is nothing to sign a new key with,
+			// which is exactly the situation this feature cannot rescue.
+			renewProblem = $t('settings.recoveryKey.noKeys');
+			renewing = null;
+			return;
+		}
+		try {
+			renewedKey = await renewRecoveryKey(crypto);
+			renewing = null;
+		} catch (error) {
+			renewProblem = error instanceof Error ? error.message : String(error);
+			renewing = null;
+		}
 	}
 </script>
 
@@ -1202,6 +1239,67 @@
 	</section>
 
 	<!-- Tracing: decided (ADR 0017), and not yet storable (#99). -->
+	<!--
+		Replacing the recovery key (#433). The key is shown once at onboarding
+		and nothing keeps it, so an owner who did not save it had no way back
+		inside Twalk at all — the only route was another Matrix client against
+		a homeserver published nowhere. This is the way back, and it is last on
+		the page because it is the rarest thing here and the only irreversible
+		one.
+	-->
+	<section class="card stack" data-testid="settings-recovery-key">
+		<h2 class="card__title">
+			<Icon name="recovery-key" size="dense" />
+			{$t('settings.recoveryKey.title')}
+		</h2>
+		{#if renewedKey !== null}
+			<RecoveryKeyCard
+				recoveryKey={renewedKey}
+				userId={currentClient()?.getUserId() ?? ''}
+				domain={$domain}
+				keyBackup={false}
+				onContinue={() => {
+					renewedKey = null;
+					renewing = null;
+				}}
+			/>
+		{:else}
+			<p class="small">{$t('settings.recoveryKey.body')}</p>
+			<p class="small muted">{$t('settings.recoveryKey.cost')}</p>
+			{#if renewProblem !== null}
+				<p class="card card--warning small" role="alert" data-testid="recovery-key-problem">
+					{renewProblem}
+				</p>
+			{/if}
+			{#if renewing === 'asked'}
+				<p class="card card--warning small" data-testid="recovery-key-confirm">
+					{$t('settings.recoveryKey.confirm')}
+				</p>
+				<p>
+					<button class="button button--primary" onclick={renew} data-testid="recovery-key-go">
+						{$t('settings.recoveryKey.go')}
+					</button>
+					<button class="button" onclick={() => (renewing = null)}>
+						{$t('settings.recoveryKey.cancel')}
+					</button>
+				</p>
+			{:else}
+				<p>
+					<button
+						class="button"
+						disabled={renewing === 'working'}
+						onclick={() => (renewing = 'asked')}
+						data-testid="recovery-key-ask"
+					>
+						{renewing === 'working'
+							? $t('settings.recoveryKey.working')
+							: $t('settings.recoveryKey.ask')}
+					</button>
+				</p>
+			{/if}
+		{/if}
+	</section>
+
 	<section class="card stack" data-testid="settings-tracing">
 		<h2 class="card__title">
 			<Icon name="info" size="dense" />
