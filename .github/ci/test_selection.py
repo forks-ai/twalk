@@ -199,6 +199,43 @@ class TheTable(unittest.TestCase):
                     f"{name}'s workdir {suite['workdir']} does not exist",
                 )
 
+    def test_a_suite_that_needs_a_docker_host_does_not_claim_to_gate(self):
+        """`required` has to mean "a merge waits for this", or it means nothing.
+
+        Branch protection requires `routing` and `verified`, and `verified` is a
+        verdict over the **hosted** suites alone. Everything that needs a Docker
+        host is gated by `verified-stack`, which is not a required check, so a
+        suite needing one cannot hold a merge however it is tiered here.
+
+        Calling such a suite `required` is therefore a claim this repository
+        does not honour, and it is not a harmless one: #422 merged with four
+        defects in it — a store deadlock that hung `cargo test --lib`, a guard
+        that refused the collector's only call, a source scanner left inert, and
+        a description nothing drove — every one of them inside `gateway`, which
+        said `required` and gated nothing.
+
+        When `TWALK_STACK_RUNNER` names a runner and `verified-stack` joins the
+        required checks, delete this test in the same commit that puts the tier
+        back. Until then it is what keeps the file honest (#428).
+        """
+        for name, suite in self.suites.items():
+            if "docker" not in suite["needs"]:
+                continue
+            with self.subTest(suite=name):
+                self.assertEqual(
+                    suite["tier"],
+                    "advisory",
+                    f"{name} needs a Docker host, so no merge waits for it: "
+                    "calling it required states a guarantee this repository "
+                    "does not give. See its tier_note and #428.",
+                )
+                self.assertIn(
+                    "tier_note",
+                    suite,
+                    f"{name} is advisory for a reason a reader deserves to "
+                    "have in front of them, not inferred from `needs`.",
+                )
+
     def test_every_trigger_names_something_that_exists(self):
         """A rule for a path that was renamed away silently stops triggering."""
         for name, suite in self.suites.items():

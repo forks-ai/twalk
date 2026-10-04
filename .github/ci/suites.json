@@ -1,6 +1,7 @@
 {
 	"$schema-note": "The single source of truth for what CI runs and when. `select.py` reads it to decide which suites a change needs; the workflows run nothing that is not in here; `test_selection.py` checks it against the repository. Editing a workflow's job list is not a way to change what runs — edit this file.",
 
+	"tier_note": "`required` means a merge waits for the suite; `advisory` means it runs where it can and holds nothing up. Branch protection requires `routing` and `verified`, and `verified` is a verdict over the hosted suites alone — so a suite that needs a Docker host is gated by `verified-stack`, which is not required, and cannot hold a merge whatever it says here. Every such suite is therefore `advisory` and says why in its own `tier_note`; `test_selection.py` refuses any that claims otherwise. This is a description of what this repository does, not of what these suites are worth: see #428 for the three ways out and what the present state has already cost.",
 	"unclaimed_policy": "run_everything",
 	"unclaimed_policy_note": "A changed path that no suite claims and that `ignored` does not list makes the selection every suite, never none. A new component must not be able to merge untested because nobody added a routing rule for it, and `test_selection.py` fails on an unclaimed top-level path so that the fallback stays a safety net rather than the normal case.",
 
@@ -83,7 +84,8 @@
 			"run": "cargo test --test calendar --test freebusy --test mail --test push --test reply --test status --test triage",
 			"targets": ["calendar", "freebusy", "mail", "push", "reply", "status", "triage"],
 			"needs": ["rust", "docker"],
-			"tier": "required",
+			"tier": "advisory",
+			"tier_note": "Required in substance and advisory in fact: this suite needs a Docker host, so it is gated by `verified-stack`, which branch protection does not require. Calling it `required` asserted a guarantee the repository does not give — and four defects reached `main` and the reference deployment through that gap in one feature (#422, then #426, #430, #431). It returns to `required` the day `TWALK_STACK_RUNNER` names a runner and `verified-stack` joins the required checks (#428).",
 			"triggers": ["collector/", "contracts/", "tests/harness/", "consent-cache/", "companion-gateway/openapi.yaml"]
 		},
 
@@ -101,7 +103,8 @@
 				"sweep"
 			],
 			"needs": ["rust", "docker"],
-			"tier": "required",
+			"tier": "advisory",
+			"tier_note": "Required in substance and advisory in fact: this suite needs a Docker host, so it is gated by `verified-stack`, which branch protection does not require. Calling it `required` asserted a guarantee the repository does not give — and four defects reached `main` and the reference deployment through that gap in one feature (#422, then #426, #430, #431). It returns to `required` the day `TWALK_STACK_RUNNER` names a runner and `verified-stack` joins the required checks (#428).",
 			"triggers": [
 				"clerk/",
 				"contracts/",
@@ -121,6 +124,7 @@
 			"targets": ["deployment"],
 			"needs": ["rust", "docker", "deployment"],
 			"tier": "advisory",
+			"tier_note": "The deployment tier, advisory by choice and not by accident: measured on this project own reference host, this is where the wall clock goes and where the flakes are, so it runs nightly rather than on every pull request (see .github/workflows/nightly.yml). It also needs a Docker host, so `verified-stack` would gate it and does not.",
 			"triggers": ["clerk/", "deploy/docker-compose/"]
 		},
 
@@ -132,6 +136,7 @@
 			"targets": ["deployment"],
 			"needs": ["rust", "docker", "deployment"],
 			"tier": "advisory",
+			"tier_note": "The deployment tier, advisory by choice: the slowest and flakiest of the suites on this project own reference host, so it runs nightly rather than on every pull request. It needs a Docker host besides, so nothing gates it today.",
 			"triggers": ["collector/", "deploy/docker-compose/"]
 		},
 
@@ -171,7 +176,8 @@
 				"smoke"
 			],
 			"needs": ["rust", "docker"],
-			"tier": "required",
+			"tier": "advisory",
+			"tier_note": "Required in substance and advisory in fact: this suite needs a Docker host, so it is gated by `verified-stack`, which branch protection does not require. Calling it `required` asserted a guarantee the repository does not give — and four defects reached `main` and the reference deployment through that gap in one feature (#422, then #426, #430, #431). It returns to `required` the day `TWALK_STACK_RUNNER` names a runner and `verified-stack` joins the required checks (#428).",
 			"triggers": [
 				"sensor/",
 				"contracts/",
@@ -190,6 +196,7 @@
 			"targets": ["deployment", "bridges_deployment"],
 			"needs": ["rust", "docker", "deployment"],
 			"tier": "advisory",
+			"tier_note": "The deployment tier, advisory by choice: measured as the expensive one, so it runs nightly rather than on every pull request. It needs a Docker host besides, so nothing gates it today.",
 			"triggers": ["sensor/", "contracts/", "tests/harness/", "deploy/docker-compose/", "bridges/", "consent-cache/"]
 		},
 
@@ -218,7 +225,8 @@
 				"suggestions"
 			],
 			"needs": ["rust", "docker"],
-			"tier": "required",
+			"tier": "advisory",
+			"tier_note": "Required in substance and advisory in fact: this suite needs a Docker host, so it is gated by `verified-stack`, which branch protection does not require. Calling it `required` asserted a guarantee the repository does not give — and four defects reached `main` and the reference deployment through that gap in one feature (#422, then #426, #430, #431). It returns to `required` the day `TWALK_STACK_RUNNER` names a runner and `verified-stack` joins the required checks (#428).",
 			"triggers": ["companion-gateway/", "contracts/", "tests/harness/", "skills/"],
 			"triggers_note": "`skills/` since #281: `hermes_freebusy.rs` runs the skill's script against the real route, so a change to the document's script is a change to what this suite proves."
 		},
@@ -231,6 +239,7 @@
 			"targets": ["deployment", "portals_deployment"],
 			"needs": ["rust", "docker", "deployment"],
 			"tier": "advisory",
+			"tier_note": "The deployment tier, advisory by choice: it brings a whole stack up and is where the wall clock goes, so it runs nightly. It needs a Docker host besides, so nothing gates it today.",
 			"triggers": ["companion-gateway/", "contracts/", "tests/harness/", "deploy/docker-compose/", "companion/"]
 		},
 
@@ -251,7 +260,8 @@
 				"suggestion"
 			],
 			"needs": ["rust", "docker"],
-			"tier": "required",
+			"tier": "advisory",
+			"tier_note": "Required in substance and advisory in fact: this suite needs a Docker host, so it is gated by `verified-stack`, which branch protection does not require. Calling it `required` asserted a guarantee the repository does not give — and four defects reached `main` and the reference deployment through that gap in one feature (#422, then #426, #430, #431). It returns to `required` the day `TWALK_STACK_RUNNER` names a runner and `verified-stack` joins the required checks (#428).",
 			"triggers": ["hermes/", "contracts/", "tests/harness/", "sdk/python/"]
 		},
 
@@ -263,6 +273,7 @@
 			"targets": ["full_loop"],
 			"needs": ["rust", "docker", "deployment"],
 			"tier": "advisory",
+			"tier_note": "The deployment tier, advisory by choice: a whole loop end to end, the longest run in the repository, so it runs nightly. It needs a Docker host besides, so nothing gates it today.",
 			"triggers": [
 				"hermes/",
 				"contracts/",
@@ -292,6 +303,7 @@
 			"run": "npm ci && npx playwright install chromium && npm run build && npm run test:e2e:stack",
 			"needs": ["node", "playwright", "rust", "docker"],
 			"tier": "advisory",
+			"tier_note": "The browser journeys against a real Gateway and a real Synapse: advisory because Playwright against a live stack is the slowest and least steady thing here, so it runs nightly. It needs a Docker host besides, so nothing gates it today.",
 			"triggers": [
 				"companion/",
 				"companion-gateway/",
