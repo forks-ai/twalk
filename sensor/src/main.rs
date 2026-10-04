@@ -49,7 +49,10 @@ use twalk_sensor::{bus, connection, consent, network, normalize, outbound, owner
 async fn main() -> Result<()> {
     let config = Config::from_env()?;
     tracing_subscriber::fmt()
-        .with_env_filter(&config.log_level)
+        // Not `config.log_level` directly: see `Config::log_filter` for the one
+        // directive it puts in front, and the 16 006 warnings in five days that
+        // bought it (#452).
+        .with_env_filter(config.log_filter())
         .init();
     info!(homeserver = %config.homeserver_url, user = %config.user_id, "sensor starting");
 
@@ -262,6 +265,17 @@ async fn main() -> Result<()> {
             RecoveryState::Disabled => StorageState::Disabled,
             RecoveryState::Incomplete => StorageState::Incomplete,
         };
+        // Said once, every start, about **this** client — the observing one.
+        // It takes the place of what `matrix_sdk_crypto::backups` used to say
+        // from two clients at once and indistinguishably (#452): that target is
+        // silenced below ERROR by `Config::log_filter`, because the owner's
+        // device warns on every sync about a backup it must not have.
+        info!(
+            recovery = ?recovery.state(),
+            backup = ?client.encryption().backups().state(),
+            "the observing client's secret storage and key backup, as it sees \
+             them. The owner's device (ADR 0034) has neither, by design"
+        );
         match decide(
             config.recovery_key.is_some(),
             state,

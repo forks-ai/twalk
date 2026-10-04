@@ -439,6 +439,55 @@ fn also_the_operator<'a>(
 
 /// An environment variable that is absent or empty is unset: an empty value
 /// in a compose `.env` file is how an operator leaves an option out.
+impl Config {
+    /// The tracing filter this process runs with: the operator's
+    /// `SENSOR_LOG_LEVEL`, with one directive in front of it.
+    ///
+    /// **Why a directive is needed.** The Sensor holds two Matrix clients, and
+    /// the owner's own device (ADR 0034) deliberately has no key backup: it
+    /// posts approved replies and reads no history, so there is nothing for it
+    /// to back up. matrix-sdk does not offer that shape. Its backup *download*
+    /// task is created only for the download strategy that wants it
+    /// (`encryption/mod.rs:241`), but the *upload* task is created
+    /// unconditionally on the line above it, and every sync response triggers
+    /// it (`sync.rs:164`) without consulting `EncryptionSettings` or the backup
+    /// state. The task then finds no backup key, which is correct, and says so
+    /// at WARN.
+    ///
+    /// The owner device must sync — for its own Olm requests and to see
+    /// invitations — so that warning arrives about twice a minute, forever.
+    /// **16 006 times in five days** on the reference deployment, which is
+    /// almost everything that container logged at WARN. A permanent warning
+    /// naming a missing key is indistinguishable from a fault, so it gets
+    /// investigated; it was, and it cost a full round of measurement to
+    /// establish that the one device complaining is the one device that must
+    /// not back anything up (#452).
+    ///
+    /// It also drowned the signal it was supposed to be: a *real* warning from
+    /// this target — the Sensor's own client losing its backup key — reads
+    /// exactly the same and would be the 16 007th line. Silencing the target
+    /// below ERROR therefore loses nothing that was legible, and what it did
+    /// carry is replaced by one line the Sensor says itself, at startup, naming
+    /// which client it is about.
+    ///
+    /// **The operator's own directives come after**, so a directive for the
+    /// same target in `SENSOR_LOG_LEVEL` wins and the SDK's lines come back:
+    /// `SENSOR_LOG_LEVEL=info,matrix_sdk_crypto::backups=warn`.
+    pub fn log_filter(&self) -> String {
+        log_filter_for(&self.log_level)
+    }
+}
+
+/// [`Config::log_filter`] without a whole `Config`, so it can be stated in a
+/// test.
+pub fn log_filter_for(log_level: &str) -> String {
+    format!("{SILENCED_TARGET}=error,{log_level}")
+}
+
+/// The one target the Sensor silences below ERROR, and the reason is
+/// [`Config::log_filter`].
+pub const SILENCED_TARGET: &str = "matrix_sdk_crypto::backups";
+
 fn optional_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
@@ -477,7 +526,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{also_the_operator, owner_device_complete};
+    use super::{also_the_operator, log_filter_for, owner_device_complete, SILENCED_TARGET};
 
     const OWNER: &str = "@michel:twalk.localhost";
     const WHATSAPP_BOT: &str = "@whatsappbot:twalk.localhost";
@@ -541,4 +590,49 @@ mod tests {
             owner_device_complete(Some("syt_token"), Some("TWALKDEVICE"), None).unwrap_err();
         assert!(format!("{error}").contains("SENSOR_OWNER"), "{error}");
     }
+
+    #[test]
+    fn the_filter_silences_one_target_and_keeps_what_the_operator_asked_for() {
+        let filter = log_filter_for("info,twalk_sensor=debug");
+        assert_eq!(filter, "matrix_sdk_crypto::backups=error,info,twalk_sensor=debug");
+        assert!(
+            filter.contains("twalk_sensor=debug"),
+            "the operator's own directives survive whole"
+        );
+    }
+
+    #[test]
+    fn the_operators_directives_come_last_so_theirs_wins() {
+        // The order is the whole contract: an operator who wants the SDK's
+        // backup lines back writes the target themselves, and EnvFilter must
+        // see their directive after ours. `tests/log_noise.rs` proves the
+        // behaviour this ordering is for; here it is only the order.
+        let filter = log_filter_for("info,matrix_sdk_crypto::backups=warn");
+        let ours = filter.find("matrix_sdk_crypto::backups=error");
+        let theirs = filter.find("matrix_sdk_crypto::backups=warn");
+        assert_eq!(ours, Some(0));
+        assert!(theirs > ours, "{filter}");
+    }
+
+    #[test]
+    fn an_empty_level_still_yields_a_usable_filter() {
+        // `SENSOR_LOG_LEVEL` has a default, so this is defensive rather than
+        // reachable — but a filter string ending in a comma is rejected by
+        // EnvFilter, and that would take the process down at startup.
+        assert_eq!(log_filter_for(""), "matrix_sdk_crypto::backups=error,");
+        assert!(
+            tracing_subscriber::EnvFilter::try_new(log_filter_for("")).is_ok(),
+            "a trailing comma must not be a parse error"
+        );
+    }
+
+    #[test]
+    fn the_silenced_target_is_the_one_the_sdk_logs_from() {
+        // Pinned against the dependency: if matrix-sdk-crypto renames this
+        // module, the directive silences nothing and the 16 006 lines come
+        // back. The string is checked here so that rename is a test failure
+        // rather than a surprise in a log six months later.
+        assert_eq!(SILENCED_TARGET, "matrix_sdk_crypto::backups");
+    }
+
 }
