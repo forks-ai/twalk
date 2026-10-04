@@ -1179,6 +1179,24 @@ export interface paths {
          *     publishes nothing a registration attempt would not reveal.
          *     `homeserver` is the server name, which is in the deployment's own DNS.
          *
+         *     `client_url` is **where a browser reaches that homeserver's client
+         *     API**, and it is a different question (#323). A server name is in every
+         *     user id, room id and device a deployment has, so it cannot be renamed;
+         *     it is not always an address the outside can call. The reference
+         *     deployment is exactly that: its server name is `twalk.localhost` while
+         *     its Companion is published elsewhere with `/_matrix/` proxied to
+         *     Synapse beside it, so a browser out there resolved `twalk.localhost` to
+         *     **its own** loopback — the first sign-in on a new device could not
+         *     reach a homeserver at all, and the recovery screen read `the login
+         *     response was not a session`, which was that browser's own machine
+         *     answering.
+         *
+         *     `null` when the name is the address, which is every deployment that
+         *     needs nothing here, and then the Companion derives
+         *     `https://<server name>` as it always has. Matrix's own `.well-known`
+         *     delegation answers the same question and cannot help: it would have to
+         *     be served *at* the unreachable name.
+         *
          *     Absent by design: the owner's Matrix ID. Naming the human who owns a
          *     deployment to anyone who can reach it is a different disclosure, and no
          *     screen needs it before sign-in.
@@ -7831,6 +7849,14 @@ export interface operations {
                     "application/json": {
                         /** @description Whether this deployment's one account exists. */
                         bootstrapped: boolean;
+                        /**
+                         * Format: uri
+                         * @description Where a browser reaches the homeserver's client API
+                         *     (`GATEWAY_HOMESERVER_CLIENT_URL`), or `null` when the
+                         *     server name is the address. No trailing slash.
+                         * @example https://companion.example.com
+                         */
+                        client_url: string | null;
                         /**
                          * @description The server name this deployment's owner is on.
                          * @example example.com

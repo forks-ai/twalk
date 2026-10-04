@@ -423,6 +423,10 @@ async fn deployment(State(gateway): State<Gateway>) -> Response {
     Json(serde_json::json!({
         "bootstrapped": bootstrapped,
         "homeserver": sessions.homeserver_name(),
+        // Where a browser reaches the client API, when the server name is not
+        // an address it can use (#323). `null` on a deployment that needs no
+        // such thing, which is what the Companion's own fallback assumes.
+        "client_url": gateway.client_base_url(),
     }))
     .into_response()
 }

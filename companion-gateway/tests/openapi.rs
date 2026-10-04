@@ -1505,6 +1505,17 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         described.body["bootstrapped"].is_boolean(),
         "bootstrapped is a fact, not an absence"
     );
+    // The address a browser calls, which is not the server name (#323). This
+    // Gateway sets no `GATEWAY_HOMESERVER_CLIENT_URL`, so the honest answer is
+    // `null` — and it is **present and null** rather than absent, because a
+    // client that must tell "this deployment needs no other address" from "an
+    // older Gateway that does not know the question" cannot do it with a
+    // missing member.
+    assert_eq!(
+        described.body["client_url"],
+        Value::Null,
+        "a deployment whose name is its address says so with a null, not a silence"
+    );
     assert!(
         described.body.get("owner").is_none(),
         "the owner's Matrix ID is not published to an unauthenticated caller"
