@@ -292,7 +292,11 @@ async fn the_recovery_key_bootstraps_the_identity_and_restores_history() -> Resu
             }
         });
     alpha.send_message(&room_id, "backed-up history").await?;
-    tokio::time::timeout(std::time::Duration::from_secs(20), decrypted_rx)
+    // The harness's deadline, not twenty seconds written here. The onboarding
+    // device is a fresh client with an empty store: it syncs whatever the
+    // shared homeserver holds before it sees this room at all, and that grows
+    // with every run nobody cleans up after (#432).
+    tokio::time::timeout(twalk_test_harness::DEADLINE, decrypted_rx)
         .await
         .expect("the onboarding device must decrypt the message")?;
 

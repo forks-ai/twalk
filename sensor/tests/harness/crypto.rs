@@ -232,12 +232,21 @@ impl CryptoBot {
                 Default::default(),
             )
             .await?;
+        // Not `failures.is_empty()`. That asked the homeserver to hold no dead
+        // device for this account, which it cannot promise and the shared test
+        // stack flatly contradicts: 83 devices for `@owner` on 2026-10-03 and
+        // 34 refusing by the next morning, because every run logs in a new one
+        // and nothing ever removes any (#432). The handover test failed on
+        // them while setting up, before exercising anything it was written to
+        // prove. What matters is that the credential was delivered somewhere;
+        // a delivery to none is still a failure, and still caught.
         anyhow::ensure!(
-            failures.is_empty(),
-            "the credential could not be encrypted to {} device(s)",
-            failures.len()
+            failures.len() < devices.len(),
+            "the credential reached none of {user_id}'s {} device(s): every one \
+             of them refused it",
+            devices.len()
         );
-        Ok(devices.len())
+        Ok(devices.len() - failures.len())
     }
 
     /// Sends a state event (e.g. the `m.bridge` portal marker). State events
