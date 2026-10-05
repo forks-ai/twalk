@@ -643,6 +643,7 @@
 	"recover.error.wrong-recovery-key": "This recovery key does not open this account's storage. Check it group by group.",
 	"recover.error.no-secret-storage": "This account has no recovery storage, so there is nothing a recovery key opens.",
 	"recover.error.unreachable": "Nothing answered at {url}, so nothing has seen your password or your key yet. Check the address above — a port is easy to leave out — and your connection.",
+	"recover.error.not-a-homeserver": "Something answered at that address, and it was not a homeserver — {detail}. Your password was sent there, so whatever is at that address received it. This deployment's Matrix API is behind something that intercepts it, usually an SSO; your administrator has to let /_matrix/ through.",
 	"recover.error.failed": "The recovery could not be completed. {detail}",
 	"recover.done.title": "This device is back",
 	"recover.done.body": "Your keys are on this device again and it is verified. Your identity is restored: this browser counts as one of your devices, and it is what verifies the others.",

@@ -592,6 +592,7 @@
 	"recover.error.wrong-recovery-key": "Esta clave de recuperación no abre el almacén de esta cuenta. Compruébala grupo por grupo.",
 	"recover.error.no-secret-storage": "Esta cuenta no tiene almacén de recuperación, así que no hay nada que una clave de recuperación abra.",
 	"recover.error.unreachable": "Nada respondió en {url}, así que nada ha visto aún tu contraseña ni tu clave. Comprueba la dirección de arriba — un puerto es fácil de olvidar — y tu conexión.",
+	"recover.error.not-a-homeserver": "Algo respondió en esa dirección, y no era un homeserver — {detail}. Tu contraseña se envió allí, así que lo que haya en esa dirección la recibió. La API de Matrix de esta instalación está detrás de algo que la intercepta, normalmente un SSO; tu administrador tiene que dejar pasar /_matrix/.",
 	"recover.error.failed": "No se pudo completar la recuperación. {detail}",
 	"recover.done.title": "Este dispositivo ha vuelto",
 	"recover.done.body": "Tus claves están de nuevo en este dispositivo y está verificado. Tu identidad está restablecida: este navegador cuenta de nuevo entre tus dispositivos, y es con ella que se verifican los demás.",

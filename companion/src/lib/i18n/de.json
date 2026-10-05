@@ -592,6 +592,7 @@
 	"recover.error.wrong-recovery-key": "Dieser Wiederherstellungsschlüssel öffnet den Speicher dieses Kontos nicht. Prüfe ihn Gruppe für Gruppe.",
 	"recover.error.no-secret-storage": "Dieses Konto hat keinen Wiederherstellungsspeicher, also gibt es nichts, was ein Wiederherstellungsschlüssel öffnen könnte.",
 	"recover.error.unreachable": "Unter {url} hat nichts geantwortet, also hat noch nichts dein Passwort oder deinen Schlüssel gesehen. Prüfe die Adresse oben — ein Port ist leicht vergessen — und deine Verbindung.",
+	"recover.error.not-a-homeserver": "Etwas hat an dieser Adresse geantwortet, und es war kein Homeserver — {detail}. Dein Passwort wurde dorthin gesendet, also hat es empfangen, was an dieser Adresse steht. Die Matrix-API dieser Installation steht hinter etwas, das sie abfängt, meist einem SSO; dein Administrator muss /_matrix/ durchlassen.",
 	"recover.error.failed": "Die Wiederherstellung konnte nicht abgeschlossen werden. {detail}",
 	"recover.done.title": "Dieses Gerät ist zurück",
 	"recover.done.body": "Deine Schlüssel sind wieder auf diesem Gerät, und es ist verifiziert. Deine Identität ist wiederhergestellt: dieser Browser zählt wieder zu deinen Geräten, und mit ihr werden die anderen verifiziert.",

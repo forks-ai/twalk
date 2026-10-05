@@ -38,6 +38,7 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { CryptoApi, GeneratedSecretStorageKey } from 'matrix-js-sdk/lib/crypto-api';
 
+import { describe as describeAnswer, whatAnswered } from '$lib/matrix/answered';
 import type { CredentialCrypto } from '$lib/matrix/credential';
 import type { HandoverCrypto } from '$lib/matrix/handover';
 import { groupRecoveryKey } from '$lib/recovery/key';
@@ -156,6 +157,20 @@ export type RestoreProblem =
 	 * what sent a user hunting for a password that was correct all along.
 	 */
 	| 'unreachable'
+	/**
+	 * Something answered at that address, and it was not a homeserver — a
+	 * sign-in page, a proxy, anything (#450).
+	 *
+	 * Its own problem for the same reason as `unreachable` above: the
+	 * homeserver never saw the password, so a refusal must not be reported.
+	 * This is the one that cost the most, twice. #323 pointed the browser at a
+	 * `twalk.localhost` it resolved to itself; #448 left an SSO in front of the
+	 * Matrix API, which no Matrix client can pass because none sends cookies.
+	 * Both ended in `failed: the login response was not a session`, which is
+	 * true and tells nobody what to do. `$lib/matrix/answered` decides which
+	 * it was; `detail` carries the sentence.
+	 */
+	| 'not-a-homeserver'
 	/** Anything else, with the message in `detail`. */
 	| 'failed';
 
@@ -457,6 +472,14 @@ export async function passwordLogin(
 		);
 	}
 	const body: unknown = await response.json().catch(() => ({}));
+	// **Who answered, before what they said** (#450). A gate's 200 of HTML is
+	// `ok` and a gate's 401 is not, so neither the status nor the body shape
+	// can tell them apart from a homeserver's — asked here, once, of the one
+	// thing that knows: the response itself.
+	const answered = whatAnswered(response, body);
+	if (answered.kind !== 'homeserver') {
+		throw new RestoreError('not-a-homeserver', describeAnswer(answered));
+	}
 	if (!response.ok) {
 		const errcode = (body as { errcode?: string }).errcode;
 		throw errcode === 'M_FORBIDDEN' || errcode === 'M_UNAUTHORIZED'
