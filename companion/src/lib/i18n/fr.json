@@ -344,6 +344,7 @@
 	"recover.error.wrong-recovery-key": "Cette clé de récupération n'ouvre pas le stockage de ce compte. Vérifiez-la groupe par groupe.",
 	"recover.error.no-secret-storage": "Ce compte n'a pas de stockage de récupération : il n'y a rien qu'une clé de récupération puisse ouvrir.",
 	"recover.error.unreachable": "Rien n'a répondu à {url} : ni votre mot de passe ni votre clé n'ont encore été envoyés. Vérifiez l'adresse ci-dessus — un port s'oublie vite — et votre connexion.",
+	"recover.error.not-a-homeserver": "Quelque chose a répondu à cette adresse, et ce n'était pas un homeserver — {detail}. Votre mot de passe y a été envoyé : ce qui se trouve à cette adresse l'a donc reçu. L'API Matrix de ce déploiement est derrière quelque chose qui l'intercepte, le plus souvent un SSO ; c'est à votre administrateur de laisser passer /_matrix/.",
 	"recover.error.failed": "La récupération n'a pas pu aboutir. {detail}",
 	"recover.done.title": "Cet appareil est de retour",
 	"recover.done.body": "Vos clés sont de nouveau sur cet appareil et il est vérifié. Votre identité est rétablie : ce navigateur compte de nouveau parmi vos appareils, et c'est par elle que les autres sont vérifiés.",

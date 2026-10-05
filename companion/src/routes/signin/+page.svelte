@@ -368,6 +368,8 @@
 		<p class="error-text" role="alert" data-testid="signin-error" data-kind={failureKind}>
 			{#if failureKind === 'unreachable'}
 				{$t('recover.error.unreachable', { url: baseUrl })}
+			{:else if failureKind === 'not-a-homeserver'}
+				{$t('recover.error.not-a-homeserver', { detail: failure })}
 			{:else if failureKind === 'wrong-password'}
 				{$t('recover.error.wrong-password')}
 			{:else if failureKind === 'sso-lost'}

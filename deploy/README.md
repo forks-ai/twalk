@@ -438,6 +438,8 @@ curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
 
 Two things that are *not* enough on their own: being signed into the SSO in your browser (the cookie exists, the request just does not carry it), and `/_matrix/client/versions` answering 200 (that route is usually the first one an operator exempts, so it answers while everything after it does not).
 
+Your users will tell you too, in those words: since [#450](https://github.com/linagora/twalk/issues/450) the sign-in and recovery screens classify what answered at the address this deployment gave the browser, and say *"something answered at that address, and it was not a homeserver — https://auth.example answered with a sign-in page"*, that the password reached whatever is there, and that `/_matrix/` has to be let through. The browser is the only place that can measure it: a check run from inside the deployment answers for a different vantage point, which is the assumption #323 was.
+
 ## What is where
 
 | Path | What it is |

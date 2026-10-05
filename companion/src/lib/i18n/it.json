@@ -592,6 +592,7 @@
 	"recover.error.wrong-recovery-key": "Questa chiave di recupero non apre l'archivio di questo account. Controllala gruppo per gruppo.",
 	"recover.error.no-secret-storage": "Questo account non ha un archivio di recupero, quindi non c'è nulla che una chiave di recupero possa aprire.",
 	"recover.error.unreachable": "Nulla ha risposto a {url}, quindi nulla ha ancora visto la tua password o la tua chiave. Controlla l'indirizzo qui sopra — una porta è facile da dimenticare — e la tua connessione.",
+	"recover.error.not-a-homeserver": "Qualcosa ha risposto a quell'indirizzo, e non era un homeserver — {detail}. La tua password è stata inviata lì, quindi ciò che si trova a quell'indirizzo l'ha ricevuta. L'API Matrix di questa installazione è dietro qualcosa che la intercetta, di solito un SSO; il tuo amministratore deve lasciar passare /_matrix/.",
 	"recover.error.failed": "Non è stato possibile completare il recupero. {detail}",
 	"recover.done.title": "Questo dispositivo è tornato",
 	"recover.done.body": "Le tue chiavi sono di nuovo su questo dispositivo ed è verificato. La tua identità è ripristinata: questo browser conta di nuovo tra i tuoi dispositivi, ed è con essa che gli altri vengono verificati.",

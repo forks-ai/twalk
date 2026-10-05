@@ -584,6 +584,8 @@
 						{$t('recover.error.no-secret-storage')}
 					{:else if failureKind === 'unreachable'}
 						{$t('recover.error.unreachable', { url: baseUrl })}
+					{:else if failureKind === 'not-a-homeserver'}
+						{$t('recover.error.not-a-homeserver', { detail: failure })}
 					{:else}
 						{$t('recover.error.failed', { detail: failure })}
 					{/if}
